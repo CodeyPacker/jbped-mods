@@ -270,9 +270,10 @@ export default class Wayfinder extends View {
               .children(tickets.map((tk) => card(tk, t, this.selected?.summary.key === tk.key, (cx) => this.openTicket(b, tk, cx)))))));
     }
     const panel = this.selected?.boardId === b.id ? this.ticketPanel(t) : null;
-    return v_flex().size_full().child(bar)
-      .child(h_flex().flex_1().min_h(0).items_start().child(v_flex().flex_1().min_w(0).h_full().child(content))
-        .when(Boolean(panel), (el) => el.child(panel)));
+    // The detail panel takes the full height under the header, beside the Board's bar and Columns.
+    return h_flex().size_full().items_start()
+      .child(v_flex().flex_1().min_w(0).h_full().child(bar).child(content))
+      .when(Boolean(panel), (el) => el.child(panel));
   }
 
   // The detail panel (D11, D23): the summary shows at once, the rest when the Ticket arrives.
