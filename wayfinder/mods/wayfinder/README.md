@@ -1,31 +1,23 @@
 # wayfinder
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of the work area, outside any space. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Ticket detail work today. Azure DevOps, Pull Requests, Launch and Review are still to come.
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side panel beside Files, Changes and Wingman, with a fullscreen mode. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Ticket detail work today. Azure DevOps, Pull Requests, Launch and Review are still to come.
 
 ## Install
 
 1. Copy `mods/wayfinder/` to `~/.config/herdr-app/mods/` and run `herdr-app check ~/.config/herdr-app/mods/wayfinder`.
-2. In your layout (a clone, not a shipped one), wrap the work area node in a stack with a Wayfinder block. For a clone of `main`, replace the `work` column with:
+2. In your layout (a clone of `main`, not a shipped one), add a Wayfinder block to the side panel's stack:
 
    ```json
-   {
-     "id": "wayfinder-stack",
-     "type": "stack",
-     "active": "work",
-     "children": [
-       { "id": "work", "type": "column", "children": ["...the work column's children, unchanged..."] },
-       { "id": "wayfinder", "type": "block", "content": { "mod": "wayfinder" } }
-     ]
-   }
+   { "id": "wayfinder", "type": "block", "content": { "mod": "wayfinder" } }
    ```
 
-   Keep the ids `wayfinder-stack`, `work` and `wayfinder`. The palette entries use them.
+   as a child of `panel-body`. Keep the ids `wayfinder`, `panel`, `panel-body` and `main`: the tab bar button, the palette and fullscreen use them. The `tabs-plus` tab bar shows a Wayfinder button for the block, opens it from the palette (`tabs-plus.wayfinder`), and leaves fullscreen when Wayfinder stops showing.
 3. Create `~/.config/herdr-app/data/wayfinder.json` (below).
 4. Sign in with the CLIs where the runner runs them: `gh auth login`, and `az login` plus `az extension add --name azure-devops`.
 
 ## Use
 
-Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Click another card to switch it. Esc closes the panel, then a second Esc, or Close, goes back to the work area. To bind a key, add it to `keys.json`, e.g. `"global": { "<key>": { "command": "layout.select", "args": { "stack": "wayfinder-stack", "child": "wayfinder" } } }`.
+Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Fullscreen`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. Fullscreen hides the terminals and gives the panel the whole work area. Another panel, Close, or a space with the panel closed puts them back. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Click another card to switch it. Esc closes the detail panel, then a second Esc leaves fullscreen. To bind a key, add it to `keys.json`, e.g. `"global": { "<key>": { "command": "tabs-plus.wayfinder" } }`.
 
 ## Configuration
 

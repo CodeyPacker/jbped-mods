@@ -1,17 +1,24 @@
-// Wayfinder: one Profile's Boards and Pull Requests, outside any space.
-// The layout holds it in a stack beside the work area (STACK below): "Wayfinder: Open" selects it,
-// and the close button, Esc or "Wayfinder: Close" select the work area again.
+// Wayfinder: one Profile's Boards and Pull Requests, in the layout's side panel beside Wingman
+// (a "wayfinder" block in the "panel-body" stack; the tab bar's Wayfinder button shows it).
+// Fullscreen hides the "main" block and stretches the panel; tabs-plus undoes it when Wayfinder
+// stops showing. Esc closes the Ticket detail panel, then leaves fullscreen.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
-import { run, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
+import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket } from "./flow.js";
 import { byColumn, initials } from "./providers/contract.js";
 
-const STACK = "wayfinder-stack", WORK = "work";
 const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
+const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
+
+function findNode(node, id) {
+  if (node?.id === id) return node;
+  for (const c of node?.children ?? []) { const f = findNode(c, id); if (f) return f; }
+  return null;
+}
 const configPath = () => `${appHome()}/data/wayfinder.json`;
 
 const EXAMPLE = `{
@@ -83,6 +90,7 @@ export default class Wayfinder extends View {
         const c = String(await nextCommand()).replace(/^wayfinder\./, "");
         if (c === "focus") this.handle.focus();
         else if (c === "close") this.close_();
+        else if (c === "fullscreen") this.setFullscreen(!this.fullscreen);
         else if (c === "refresh") this.reload(cx);
         else if (c === "profile") await this.nextProfile(cx);
         cx.notify();
@@ -90,7 +98,23 @@ export default class Wayfinder extends View {
     });
   }
 
-  close_() { run("layout.select", { stack: STACK, child: WORK }); }
+  get fullscreen() { return Boolean(shared(FULL_KEY)); }
+
+  setFullscreen(on) {
+    const full = shared(FULL_KEY);
+    if (on && !full) {
+      const px = findNode(layout(), "panel")?.size?.px;
+      setShared(FULL_KEY, { px: typeof px === "number" ? px : null });
+      run("layout.hide", { id: "main" });
+      run("layout.resize", { id: "panel", weight: 1 });
+    } else if (!on && full) {
+      setShared(FULL_KEY, null);
+      run("layout.show", { id: "main" });
+      run("layout.resize", { id: "panel", px: full.px ?? 960 });
+    }
+  }
+
+  close_() { this.setFullscreen(false); run("layout.hide", { id: "panel" }); }
 
   get profile() { return this.state.status === "ok" ? this.state.profile : null; }
 
@@ -204,6 +228,7 @@ export default class Wayfinder extends View {
       .child(div().flex_1())
       .when(Boolean(this.profile), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.profile.name)))
       .child(button("wf-refresh", "Refresh", t, (cx) => this.reload(cx)))
+      .child(button("wf-full", this.fullscreen ? "Exit fullscreen" : "Fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }, { on: this.fullscreen }))
       .child(button("wf-close", "Close", t, () => this.close_()));
   }
 
@@ -316,7 +341,8 @@ export default class Wayfinder extends View {
       .on_mouse_down("left", () => this.handle.focus())
       .on_key_down((e, cx) => {
         if (e.key !== "escape") return;
-        if (this.selected) { this.closeTicket(); cx.notify(); } else this.close_();
+        if (this.selected) this.closeTicket(); else this.setFullscreen(false);
+        cx.notify();
       })
       .child(this.header(t))
       .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));
