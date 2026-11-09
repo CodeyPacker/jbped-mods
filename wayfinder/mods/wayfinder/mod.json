@@ -1,0 +1,11 @@
+{
+  "place": "none",
+  "title": "Wayfinder",
+  "focusable": true,
+  "palette": [
+    { "title": "Wayfinder: Open", "command": "layout.select", "args": { "stack": "wayfinder-stack", "child": "wayfinder" }, "about": "Show Wayfinder in place of the work area" },
+    { "title": "Wayfinder: Close", "command": "layout.select", "args": { "stack": "wayfinder-stack", "child": "work" }, "about": "Show the work area again" },
+    { "title": "Wayfinder: Switch Profile", "command": "wayfinder.profile", "about": "Show the next profile" },
+    { "title": "Wayfinder: Refresh", "command": "wayfinder.refresh", "about": "Reload the configuration and data" }
+  ]
+}
