@@ -75,6 +75,31 @@ function card(tk, t, selected, onClick) {
         .rounded(10).bg(t.raised).border_1().border_color(t.border).text_size(9).font_semibold().text_color(t.muted).child(initials(a.name))))));
 }
 
+// Loading placeholders: grey bars in the shape of what's coming, pulsing (native animation, no timer).
+const bar = (t, w, h = 10) => div().w(w).h(h).flex_none().rounded(4).bg(t.raised);
+const pulse = (el) => el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
+
+function skeletonColumns(t) {
+  return pulse(h_flex().id("wf-columns-skeleton").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_hidden()
+    .children([3, 2, 4, 1].map((n, i) => v_flex().id(`wf-col-skel-${i}`).w(COLUMN_W).flex_none().rounded(10).bg(t.chrome).border_1().border_color(t.border)
+      .child(h_flex().h(36).px(12).gap(8).flex_none().items_center().child(bar(t, 80, 12)).child(bar(t, 14)))
+      .child(v_flex().px(8).pb(8).gap(8).children(Array.from({ length: n }, (_, j) =>
+        v_flex().gap(8).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+          .child(bar(t, 70, 9)).child(bar(t, (i + j) % 2 ? 210 : 230, 12)).child(bar(t, (i + j) % 2 ? 120 : 160, 12))))))));
+}
+
+function skeletonTicket(t) {
+  const row = (w) => h_flex().gap(8).items_center().child(div().w(84).flex_none().child(bar(t, 56))).child(bar(t, w));
+  return pulse(v_flex().gap(10)
+    .child(v_flex().gap(8).child(row(90)).child(row(140)).child(row(70)).child(row(40)).child(row(180)))
+    .child(bar(t, 96, 12))
+    .child(div().pt(8).child(bar(t, 80, 9)))
+    .child(v_flex().gap(8).children([380, 400, 340, 0, 360, 300, 390, 220].map((w) => w ? bar(t, w, 11) : div().h(4))))
+    .child(div().pt(8).child(bar(t, 110, 9)))
+    .child(v_flex().gap(8).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+      .child(bar(t, 120, 9)).child(bar(t, 360, 11)).child(bar(t, 240, 11))));
+}
+
 export default class Wayfinder extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
@@ -258,7 +283,7 @@ export default class Wayfinder extends View {
 
     let content;
     if (!entry.data) {
-      content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : this.message(t, "Loading…", []);
+      content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : skeletonColumns(t);
     } else {
       content = h_flex().id("wf-columns").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
         .children(byColumn(entry.data, { mine }).map(({ column, tickets }) =>
@@ -296,7 +321,8 @@ export default class Wayfinder extends View {
 
     const body = v_flex().id(`wf-ticket-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
       .child(div().text_size(16).font_semibold().text_color(t.foreground).child((tk ?? sum).title))
-      .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)));
+      .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
+      .when(!tk && entry.status === "loading", (el) => el.child(skeletonTicket(t)));
     if (tk) {
       body
         .child(v_flex().gap(6)
