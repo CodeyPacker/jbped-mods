@@ -2,6 +2,8 @@
 // (a "wayfinder" block in the "panel-body" stack; the tab bar's Wayfinder button shows it).
 // Fullscreen hides the "main" block and stretches the panel; tabs-plus undoes it when Wayfinder
 // stops showing. Esc closes the Ticket detail panel, then leaves fullscreen.
+// Board data comes from the cache at once, then refreshes in the background on show and every
+// 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
@@ -10,6 +12,7 @@ import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, signInStates } from "./flow.js";
 import { shellInvocation } from "./command.js";
 import { byColumn, initials } from "./providers/contract.js";
+import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
@@ -107,10 +110,13 @@ export default class Wayfinder extends View {
     this.view = load(VIEW_KEY, "board") === "prs" ? "prs" : "board";
     this.state = { status: "loading" };
     this.checks = null;
-    this.boards = {}; // board id -> { status: "loading" | "ok" | "error", data, error }
+    this.boards = {}; // board id -> { status: "cached" | "loading" | "ok" | "error", data, at, tried, error }
+    this.hidden = true; // until seen on screen: the first show refreshes
+    this.lastRefresh = null;
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
     this.tickets = {}; // ticket key -> { status, data, error }
     this.reload(cx);
+    cx.timer.every(60_000, (cx) => { if (this.watch(cx)) cx.notify(); }); // reads the layout only: no requests
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfinder\./, "");
@@ -142,6 +148,26 @@ export default class Wayfinder extends View {
 
   close_() { this.setFullscreen(false); run("layout.hide", { id: "panel" }); }
 
+  shownNow() { return isShown(layout(), (n) => n.content?.mod === "wayfinder"); }
+
+  // Refreshes on show and every POLL_MS while shown. Never while hidden (D25). True when shown.
+  watch(cx) {
+    if (!this.shownNow()) { this.hidden = true; return false; }
+    const showing = this.hidden;
+    this.hidden = false;
+    if (this.profile && due(this.lastRefresh, Date.now(), { showing })) this.refresh(cx);
+    return true;
+  }
+
+  // Sign-in states and the selected Board (or the CLI checks without one), plus a Ticket a reload left open.
+  refresh(cx) {
+    this.lastRefresh = Date.now();
+    this.checkSignIn(cx);
+    if (this.board) this.fetchBoard(this.board, cx);
+    else cx.spawn((cx) => this.check(cx));
+    if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
+  }
+
   get profile() { return this.state.status === "ok" ? this.state.profile : null; }
 
   // The selected Board's config: the remembered one, else the first.
@@ -159,6 +185,7 @@ export default class Wayfinder extends View {
     this.boards = {};
     this.tickets = {};
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
+    this.lastRefresh = null;
     if (this.selected) this.fetchTicketLater = true;
     cx.spawn(async (cx) => {
       const path = configPath();
@@ -169,25 +196,49 @@ export default class Wayfinder extends View {
       this.state = parsed.errors.length
         ? { status: "invalid", path, errors: parsed.errors }
         : { status: "ok", path, text, ...parsed, runner: createRunner(parsed.profile.runner) };
+      if (this.state.status === "ok") {
+        let cached = null;
+        try { cached = await readTextFile(cacheFile(appHome(), parsed.profile.name)); } catch { /* no cache */ }
+        const cache = parseCache(cached);
+        for (const b of parsed.profile.boards) {
+          const c = cachedBoard(cache, b);
+          if (c) this.boards[b.id] = { status: "cached", ...c };
+        }
+      }
       cx.notify();
-      if (this.state.status !== "ok") return;
-      this.checkSignIn(cx);
-      if (this.board) this.fetchBoard(this.board, cx);
-      if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
-      else await this.check(cx);
+      if (this.state.status === "ok") this.watch(cx);
     });
   }
 
+  // A failed refresh keeps the data it had and shows the error beside its age.
   fetchBoard(b, cx) {
-    const prev = this.boards[b.id];
-    this.boards[b.id] = { status: "loading", data: prev?.data ?? null };
+    const prev = this.boards[b.id], profile = this.profile, tried = Date.now();
+    this.boards[b.id] = { status: "loading", data: prev?.data ?? null, at: prev?.at ?? null, tried };
     const io = { run: this.state.runner.run, fetch };
     cx.spawn(async (cx) => {
-      try { this.boards[b.id] = { status: "ok", data: await loadBoard(this.profile, b, io) }; } catch (e) {
-        this.boards[b.id] = { status: "error", data: prev?.data ?? null, error: String(e.message ?? e) };
+      let data = null;
+      try { data = await loadBoard(profile, b, io); } catch (e) {
+        if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+        this.boards[b.id] = { status: "error", data: prev?.data ?? null, at: prev?.at ?? null, tried, error: String(e.message ?? e) };
+        cx.notify();
+        return;
       }
+      if (this.profile !== profile) return;
+      const at = Date.now();
+      this.boards[b.id] = { status: "ok", data, at, tried };
       cx.notify();
+      await this.saveCache(profile, b, data, at);
     });
+  }
+
+  // Best effort: a failed write leaves the old cache, and the next refresh writes again.
+  async saveCache(profile, b, data, at) {
+    const path = cacheFile(appHome(), profile.name);
+    for (let i = 0; i < 2; i++) { // a second try when another copy wrote in between
+      let cur = null;
+      try { cur = await readTextFile(path); } catch { /* unreadable: start over */ }
+      try { await writeTextFile(path, serializeCache(withBoard(parseCache(cur), profile.boards, b, data, at)), cur); return; } catch { /* stale snapshot */ }
+    }
   }
 
   checkSignIn(cx) {
@@ -249,7 +300,8 @@ export default class Wayfinder extends View {
   selectBoard(id, cx) {
     this.closeTicket();
     save(`wayfinder.board.${this.profile.name}`, id);
-    if (!this.boards[id]) this.fetchBoard(this.board, cx);
+    const e = this.boards[id];
+    if (!e || e.status === "cached" || (e.status !== "loading" && due(e.tried, Date.now(), { showing: true }))) this.fetchBoard(this.board, cx);
     cx.notify();
   }
 
@@ -316,8 +368,9 @@ export default class Wayfinder extends View {
       .when(p.boards.length <= 1, (el) => el.child(div().text_size(13).font_semibold().text_color(t.foreground).child(title)))
       .child(button("wf-mine", "Mine", t, (cx) => { save(this.mineKey(b), mine ? "0" : "1"); cx.notify(); }, { on: mine }))
       .child(div().flex_1())
-      .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
-      .when(entry.status === "error" && Boolean(entry.data), (el) => el.child(div().text_size(12).text_color(t.blocked).truncate().child(entry.error)));
+      .when(entry.status === "error" && Boolean(entry.data), (el) => el.child(div().min_w(0).text_size(12).text_color(t.blocked).truncate().child(`Couldn't refresh: ${entry.error}`)))
+      .when(entry.status === "loading" || Boolean(entry.at), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim)
+        .child(entry.status === "loading" ? (entry.data ? "Refreshing…" : "Loading…") : `Updated ${formatAge(Date.now() - entry.at)}`)));
 
     const account = p.accounts.find((a) => a.id === b.account);
     const si = account ? this.signIn?.[account.id] : null;
@@ -404,6 +457,7 @@ export default class Wayfinder extends View {
   }
 
   render(cx) {
+    if (this.hidden) this.watch(cx); // just shown: refresh in the background
     const t = theme();
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
