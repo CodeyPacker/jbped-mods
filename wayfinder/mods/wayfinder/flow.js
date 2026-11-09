@@ -24,6 +24,21 @@ export async function loadBoard(profile, boardCfg, io, registry = PROVIDERS) {
   return provider.board(account, boardCfg.ref, io);
 }
 
+// Every Account's sign-in state, by Account id. Accounts whose Provider can't tell are left out.
+// One Account failing never stops the others (D19).
+export async function signInStates(profile, io, registry = PROVIDERS) {
+  const out = {};
+  await Promise.all(profile.accounts.map(async (account) => {
+    const provider = providerFor(account, registry);
+    if (!can(provider, "signInState")) return;
+    const needs = { boards: profile.boards.some((b) => b.account === account.id) };
+    try { out[account.id] = await provider.signInState(account, io, needs); } catch (e) {
+      out[account.id] = { ok: false, reason: String(e.message ?? e), command: null };
+    }
+  }));
+  return out;
+}
+
 // The detail panel's Ticket for a TicketSummary on that Board.
 export async function loadTicket(profile, boardCfg, summary, io, registry = PROVIDERS) {
   const { account, provider } = resolve(profile, boardCfg, registry);

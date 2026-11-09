@@ -4,6 +4,13 @@
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// A shell command line (a fixed one from a Provider, like a sign-in command) for a terminal tab,
+// through the runner. Herdr runs a tab's argv in the user's interactive shell, which stays open after.
+export function shellInvocation(runner, platform, line) {
+  if (runner === "native" && platform === "windows") return invocation(runner, platform, "cmd.exe", ["/c", line]);
+  return invocation(runner, platform, /^wsl:/.test(runner) ? "bash" : "sh", ["-lc", line]);
+}
+
 export function invocation(runner, platform, cmd, args = [], { env = {}, cwd } = {}) {
   const vars = Object.entries(env).filter(([, v]) => v != null);
   for (const [k] of vars) if (!ENV_NAME.test(k)) throw new Error(`Bad environment variable name: ${k}`);

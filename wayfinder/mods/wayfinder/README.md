@@ -46,6 +46,7 @@ Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `
 - A GitHub account's `login` is a user signed in with `gh` (`gh auth status` lists them).
 - A GitHub Board's `ref` is the project's owner and number (from its URL, `github.com/users/<owner>/projects/<number>` or `orgs/<owner>/...`). Its Columns are the `Status` field's options, and every item shows (view filters don't apply). Optional: `statusField` and `priorityField` to use other single-select fields, and a Board `name`. Private and org projects may need `gh auth refresh -h github.com -s read:project`.
 - With several Boards, a switcher shows them. "Mine" shows only Tickets assigned to the Account, and is remembered per Board.
+- Each Account's sign-in is checked with `gh auth status` on every refresh. A missing or expired login, or a Board Account without `read:project`, shows "Sign in needed" with the exact command and a button that runs it in a new tab through the runner. gh refreshes only its active account, so for another account the command switches to it and back. The Profile's other Accounts keep working. Press Refresh afterwards.
 - Wayfinder never stores secrets. A field named `token`, `pat`, `password`, `secret`, `accessToken` or `apiKey` is rejected. Sign-in stays with `gh` and `az`.
 
 ## Tests

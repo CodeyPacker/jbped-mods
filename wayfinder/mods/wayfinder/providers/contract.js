@@ -8,7 +8,9 @@
 //     board(account, ref, io) -> Board
 //     ticket(account, ref, io) -> Ticket            // "ticket"
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
-//     signInState(account, io) -> { ok } | { ok: false, reason, command }
+//     signInState(account, io, needs) -> { ok: true } | { ok: false, reason, command } // "signInState"
+//                  needs: { boards } (what the Profile uses the Account for, so scopes can be checked)
+//                  command: the exact shell command that fixes it, or null when there's none to run
 //   }
 //
 // `io` is what the flow hands a Provider: { run(cmd, args, opts), fetch(url, opts) }.

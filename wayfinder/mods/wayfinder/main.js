@@ -7,7 +7,8 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket } from "./flow.js";
+import { loadBoard, loadTicket, signInStates } from "./flow.js";
+import { shellInvocation } from "./command.js";
 import { byColumn, initials } from "./providers/contract.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -157,6 +158,7 @@ export default class Wayfinder extends View {
     this.state = { status: "loading" };
     this.boards = {};
     this.tickets = {};
+    this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     if (this.selected) this.fetchTicketLater = true;
     cx.spawn(async (cx) => {
       const path = configPath();
@@ -169,6 +171,7 @@ export default class Wayfinder extends View {
         : { status: "ok", path, text, ...parsed, runner: createRunner(parsed.profile.runner) };
       cx.notify();
       if (this.state.status !== "ok") return;
+      this.checkSignIn(cx);
       if (this.board) this.fetchBoard(this.board, cx);
       if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
       else await this.check(cx);
@@ -185,6 +188,38 @@ export default class Wayfinder extends View {
       }
       cx.notify();
     });
+  }
+
+  checkSignIn(cx) {
+    const profile = this.profile, io = { run: this.state.runner.run, fetch };
+    cx.spawn(async (cx) => {
+      const states = await signInStates(profile, io);
+      if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+      this.signIn = states;
+      cx.notify();
+    });
+  }
+
+  // Runs an Account's sign-in command in a new tab, through the Profile's runner (D19).
+  signInTab(account, command) {
+    try {
+      const inv = shellInvocation(this.profile.runner, herdrWindow().platform, command);
+      run("tab.new", { name: `Sign in: ${account.id}`, argv: [inv.command, ...inv.args] });
+    } catch (e) {
+      notify({ title: "Wayfinder", body: `Couldn't open the sign-in tab: ${e.message ?? e}`, level: "error" });
+    }
+  }
+
+  signInCard(t, account, si) {
+    const who = account.login ? `${account.id} (${account.login})` : account.id;
+    return v_flex().id(`wf-signin-${account.id}`).p(14).gap(8).max_w(720).rounded(10).bg(t.surface).border_1().border_color(t.border)
+      .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Sign in needed"))
+      .child(div().text_size(12).text_color(t.muted).child(`${who}: ${si.reason}`))
+      .when(Boolean(si.command), (el) => el
+        .child(div().text_size(12).child(TextView.markdown(`wf-signin-cmd-${account.id}`, "```sh\n" + si.command + "\n```").selectable(true)))
+        .child(h_flex().gap(8).items_center()
+          .child(button(`wf-signin-run-${account.id}`, "Run in a new tab", t, () => this.signInTab(account, si.command), { on: true }))
+          .child(div().text_size(12).text_color(t.dim).child("Then press Refresh."))));
   }
 
   // Opens the detail panel on a Ticket, or switches it to another.
@@ -267,7 +302,10 @@ export default class Wayfinder extends View {
     if (!b) {
       const c = this.checks;
       const check = (name, r) => r ? `${name}: ${r.ok ? r.text : `not reachable (${r.text})`}` : `${name}: checking…`;
-      return this.message(t, "No Boards", [`Profile ${p.name} has no Boards. Add one under "boards" in ${this.state.path}.`, check("gh", c?.gh), check("az", c?.az)]);
+      const bad = p.accounts.filter((a) => this.signIn?.[a.id]?.ok === false);
+      return v_flex().p(16).gap(12)
+        .child(this.message(t, "No Boards", [`Profile ${p.name} has no Boards. Add one under "boards" in ${this.state.path}.`, check("gh", c?.gh), check("az", c?.az)]).p(0))
+        .children(bad.map((a) => this.signInCard(t, a, this.signIn[a.id])));
     }
     const entry = this.boards[b.id] ?? { status: "loading" };
     const mine = load(this.mineKey(b), "0") === "1";
@@ -281,8 +319,12 @@ export default class Wayfinder extends View {
       .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
       .when(entry.status === "error" && Boolean(entry.data), (el) => el.child(div().text_size(12).text_color(t.blocked).truncate().child(entry.error)));
 
+    const account = p.accounts.find((a) => a.id === b.account);
+    const si = account ? this.signIn?.[account.id] : null;
     let content;
-    if (!entry.data) {
+    if (si && !si.ok) {
+      content = v_flex().p(16).child(this.signInCard(t, account, si));
+    } else if (!entry.data) {
       content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : skeletonColumns(t);
     } else {
       content = h_flex().id("wf-columns").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
@@ -294,7 +336,7 @@ export default class Wayfinder extends View {
             .child(v_flex().id(`wf-col-body-${column.id}`).px(8).pb(8).gap(8).overflow_y_scrollbar()
               .children(tickets.map((tk) => card(tk, t, this.selected?.summary.key === tk.key, (cx) => this.openTicket(b, tk, cx)))))));
     }
-    const panel = this.selected?.boardId === b.id ? this.ticketPanel(t) : null;
+    const panel = this.selected?.boardId === b.id && !(si && !si.ok) ? this.ticketPanel(t) : null;
     // The detail panel takes the full height under the header, beside the Board's bar and Columns.
     return h_flex().size_full().items_start()
       .child(v_flex().flex_1().min_w(0).h_full().child(bar).child(content))

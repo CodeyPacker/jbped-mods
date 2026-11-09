@@ -59,6 +59,42 @@ export const TICKET_QUERY = `query($item: ID!, $content: ID!, $status: String!, 
   }
 }`;
 
+// GitHub user names: letters, digits and single hyphens. Checked before one goes into a shell command.
+const GH_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const GH_LOGIN_CMD = "gh auth login -h github.com";
+const GH_REFRESH_CMD = "gh auth refresh -s read:project -h github.com";
+
+// `gh auth status -h github.com` (no token in it, only a masked one) into login -> { login, ok, active, scopes }.
+// Keys are lower-cased: GitHub logins ignore case. scopes is null when gh doesn't list them. Pure.
+export function parseGhStatus(text) {
+  const accounts = new Map();
+  let cur = null;
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    let m;
+    if ((m = /(Logged in to|Failed to log in to) github\.com account (\S+)/.exec(line))) {
+      cur = { login: m[2], ok: m[1] === "Logged in to", active: false, scopes: null };
+      accounts.set(cur.login.toLowerCase(), cur);
+    } else if (cur && (m = /Active account: (true|false)/.exec(line))) cur.active = m[1] === "true";
+    else if (cur && (m = /Token scopes: (.*)$/.exec(line))) cur.scopes = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  }
+  return accounts;
+}
+
+// The sign-in state from parsed gh status. gh refreshes only the active account, so an inactive one
+// is switched to and back around the refresh. Pure.
+export function ghSignInState(login, accounts, { boards = false } = {}) {
+  const me = accounts.get(String(login).toLowerCase());
+  if (!me) return { ok: false, reason: `${login} isn't signed in to gh`, command: GH_LOGIN_CMD };
+  if (!me.ok) return { ok: false, reason: `gh's login for ${login} is expired or revoked`, command: GH_LOGIN_CMD };
+  if (boards && me.scopes && !me.scopes.some((s) => s === "read:project" || s === "project")) {
+    const active = [...accounts.values()].find((a) => a.active);
+    const back = active && GH_LOGIN.test(active.login) ? ` && gh auth switch -h github.com -u ${active.login}` : "";
+    const command = me.active ? GH_REFRESH_CMD : `gh auth switch -h github.com -u ${login} && ${GH_REFRESH_CMD}${back}`;
+    return { ok: false, reason: `${login} lacks the read:project scope Boards need`, command };
+  }
+  return { ok: true };
+}
+
 const TYPE = { Issue: "Issue", PullRequest: "Pull request", DraftIssue: "Draft" };
 
 // One project page's items into TicketSummaries. Pure.
@@ -166,7 +202,14 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket"],
+  capabilities: ["boards", "board", "ticket", "signInState"],
+
+  async signInState(account, io, needs = {}) {
+    if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
+    const r = await io.run("gh", ["auth", "status", "-h", "github.com"], { timeout: 30000 });
+    if (r.code === 127) return { ok: false, reason: `gh isn't reachable through the runner: ${(r.stderr || r.stdout).trim().split("\n")[0]}`, command: null };
+    return ghSignInState(account.login, parseGhStatus(`${r.stdout}\n${r.stderr}`), needs);
+  },
 
   async boards(account, io) {
     const d = await graphql(account, io, BOARDS_QUERY, {});
