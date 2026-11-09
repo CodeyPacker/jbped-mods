@@ -1,6 +1,6 @@
 # wayfinder
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of the work area, outside any space. Start a space from a Ticket, or a review from a Pull Request. Work in progress: this version is the shell. It loads the configuration, shows the active Profile and checks that `gh` and `az` are reachable.
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of the work area, outside any space. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards show today. Ticket detail, Azure DevOps, Pull Requests, Launch and Review are still to come.
 
 ## Install
 
@@ -42,7 +42,9 @@ Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Switch Profile`, `Wa
         { "id": "ado", "provider": "azure", "org": "https://dev.azure.com/<org>", "projects": ["<project>"] }
       ],
       "repos": [{ "id": "frontend", "remote": "<clone url>", "path": "/home/me/src/frontend" }],
-      "boards": []
+      "boards": [
+        { "id": "team", "account": "gh-work", "ref": { "owner": "<user or org>", "number": 1 } }
+      ]
     }
   }
 }
@@ -50,6 +52,8 @@ Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Switch Profile`, `Wa
 
 - `runner`: where commands run. `native`, or `wsl:<distro>` (the default on Windows, `wsl:Ubuntu`).
 - A GitHub account's `login` is a user signed in with `gh` (`gh auth status` lists them).
+- A GitHub Board's `ref` is the project's owner and number (from its URL, `github.com/users/<owner>/projects/<number>` or `orgs/<owner>/...`). Its Columns are the `Status` field's options, and every item shows (view filters don't apply). Optional: `statusField` and `priorityField` to use other single-select fields, and a Board `name`. Private and org projects may need `gh auth refresh -h github.com -s read:project`.
+- With several Boards, a switcher shows them. "Mine" shows only Tickets assigned to the Account, and is remembered per Board.
 - Wayfinder never stores secrets. A field named `token`, `pat`, `password`, `secret`, `accessToken` or `apiKey` is rejected. Sign-in stays with `gh` and `az`.
 
 ## Tests
