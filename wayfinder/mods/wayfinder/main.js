@@ -260,7 +260,7 @@ export default class Wayfinder extends View {
     if (!entry.data) {
       content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : this.message(t, "Loading…", []);
     } else {
-      content = h_flex().id("wf-columns").flex_1().min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
+      content = h_flex().id("wf-columns").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
         .children(byColumn(entry.data, { mine }).map(({ column, tickets }) =>
           v_flex().id(`wf-col-${column.id}`).w(COLUMN_W).flex_none().max_h_full().rounded(10).bg(t.chrome).border_1().border_color(t.border)
             .child(h_flex().h(36).px(12).gap(8).flex_none().items_center()
