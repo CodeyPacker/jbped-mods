@@ -1,4 +1,5 @@
 // Loads and checks wayfinder.json. Pure: no Herdr imports, so it runs under node for tests.
+import { validOrg } from "./providers/azure.js";
 
 export const PROVIDERS = ["github", "azure"];
 // Wayfinder never stores secrets (ADR 0002). A field with one of these names is an error.
@@ -56,7 +57,7 @@ function checkProfile(name, p, platform, errors) {
     if (!PROVIDERS.includes(a.provider)) errors.push(`${where}.provider: use one of ${PROVIDERS.join(", ")}`);
     if (a.provider === "github" && !isStr(a.login)) errors.push(`${where}.login: the gh account name`);
     if (a.provider === "azure") {
-      if (!isStr(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
+      if (!validOrg(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
       if (!Array.isArray(a.projects) || !a.projects.every(isStr)) errors.push(`${where}.projects: a list of project names`);
     }
   });
@@ -68,6 +69,9 @@ function checkProfile(name, p, platform, errors) {
     const where = `${at}.boards[${i}]`;
     if (!accountIds.has(b.account)) errors.push(`${where}.account: no account "${b.account}" in this profile`);
     if (!isObj(b.ref)) errors.push(`${where}.ref: must be an object`);
+    else if (accounts.find((a) => a?.id === b.account)?.provider === "azure" && !(isStr(b.ref.project) && isStr(b.ref.team))) {
+      errors.push(`${where}.ref: an Azure Board needs "project" and "team" (and optionally "board")`);
+    }
     for (const r of b.repos ?? []) if (!repoIds.has(r)) errors.push(`${where}.repos: no repo "${r}" in this profile`);
     if (b.trackedStatuses != null && (!Array.isArray(b.trackedStatuses) || !b.trackedStatuses.every(isStr))) {
       errors.push(`${where}.trackedStatuses: a list of state names, or null`);

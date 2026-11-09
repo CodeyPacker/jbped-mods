@@ -17,6 +17,7 @@ import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, formatAg
 const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
 const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
+const SITE = { github: "GitHub", azure: "Azure" }; // for the Board's "View in …" link
 
 function findNode(node, id) {
   if (node?.id === id) return node;
@@ -168,6 +169,9 @@ export default class Wayfinder extends View {
     if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
   }
 
+  // What a Provider gets: the runner, fetch, and the Profile's name (Azure keeps an az login per Profile).
+  io() { return { run: this.state.runner.run, fetch, profile: this.profile.name }; }
+
   get profile() { return this.state.status === "ok" ? this.state.profile : null; }
 
   // The selected Board's config: the remembered one, else the first.
@@ -214,7 +218,7 @@ export default class Wayfinder extends View {
   fetchBoard(b, cx) {
     const prev = this.boards[b.id], profile = this.profile, tried = Date.now();
     this.boards[b.id] = { status: "loading", data: prev?.data ?? null, at: prev?.at ?? null, tried };
-    const io = { run: this.state.runner.run, fetch };
+    const io = this.io();
     cx.spawn(async (cx) => {
       let data = null;
       try { data = await loadBoard(profile, b, io); } catch (e) {
@@ -242,7 +246,7 @@ export default class Wayfinder extends View {
   }
 
   checkSignIn(cx) {
-    const profile = this.profile, io = { run: this.state.runner.run, fetch };
+    const profile = this.profile, io = this.io();
     cx.spawn(async (cx) => {
       const states = await signInStates(profile, io);
       if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
@@ -288,7 +292,7 @@ export default class Wayfinder extends View {
     if (!b) { this.selected = null; return; }
     const key = sel.summary.key;
     this.tickets[key] = { status: "loading", data: this.tickets[key]?.data ?? null };
-    const io = { run: this.state.runner.run, fetch };
+    const io = this.io();
     cx.spawn(async (cx) => {
       try { this.tickets[key] = { status: "ok", data: await loadTicket(p, b, sel.summary, io) }; } catch (e) {
         this.tickets[key] = { status: "error", data: this.tickets[key]?.data ?? null, error: String(e.message ?? e) };
@@ -362,11 +366,14 @@ export default class Wayfinder extends View {
     const entry = this.boards[b.id] ?? { status: "loading" };
     const mine = load(this.mineKey(b), "0") === "1";
     const title = b.name ?? entry.data?.title ?? b.id;
+    const site = p.accounts.find((a) => a.id === b.account)?.provider;
 
     const bar = h_flex().h(40).px(16).gap(10).flex_none().items_center()
       .when(p.boards.length > 1, (el) => el.child(segmented("wf-boards", p.boards.map((x) => [x.id, x.name ?? this.boards[x.id]?.data?.title ?? x.id]), b.id, t, (id, cx) => this.selectBoard(id, cx))))
       .when(p.boards.length <= 1, (el) => el.child(div().text_size(13).font_semibold().text_color(t.foreground).child(title)))
       .child(button("wf-mine", "Mine", t, (cx) => { save(this.mineKey(b), mine ? "0" : "1"); cx.notify(); }, { on: mine }))
+      .when(Boolean(entry.data?.url), (el) => el.child(div().flex_none().text_size(12)
+        .child(TextView.markdown(`wf-board-link-${b.id}`, link(`View in ${SITE[site] ?? "browser"}`, entry.data.url)))))
       .child(div().flex_1())
       .when(entry.status === "error" && Boolean(entry.data), (el) => el.child(div().min_w(0).text_size(12).text_color(t.blocked).truncate().child(`Couldn't refresh: ${entry.error}`)))
       .when(entry.status === "loading" || Boolean(entry.at), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim)

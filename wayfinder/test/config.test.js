@@ -12,7 +12,7 @@ const good = {
         { id: "ado", provider: "azure", org: "https://dev.azure.com/x", projects: ["P"] },
       ],
       repos: [{ id: "fe", path: "/src/fe" }],
-      boards: [{ id: "b", account: "ado", ref: { team: "T" }, repos: ["fe"], trackedStatuses: ["New", "Active"] }],
+      boards: [{ id: "b", account: "ado", ref: { project: "P", team: "T" }, repos: ["fe"], trackedStatuses: ["New", "Active"] }],
     },
     personal: { accounts: [] },
   },

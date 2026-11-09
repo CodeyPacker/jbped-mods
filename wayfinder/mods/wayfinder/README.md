@@ -1,6 +1,6 @@
 # wayfinder
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side panel beside Files, Changes and Wingman, with a fullscreen mode. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Ticket detail work today. Azure DevOps, Pull Requests, Launch and Review are still to come.
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side panel beside Files, Changes and Wingman, with a fullscreen mode. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards with Ticket detail, and Azure DevOps team boards, work today. Azure Ticket detail, Pull Requests, Launch and Review are still to come.
 
 ## Install
 
@@ -13,7 +13,7 @@ Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side
 
    as a child of `panel-body`. Keep the ids `wayfinder`, `panel`, `panel-body` and `main`: the tab bar button, the palette and fullscreen use them. The `tabs-plus` tab bar shows a Wayfinder button for the block, opens it from the palette (`tabs-plus.wayfinder`), and leaves fullscreen when Wayfinder stops showing.
 3. Create `~/.config/herdr-app/data/wayfinder.json` (below).
-4. Sign in with the CLIs where the runner runs them: `gh auth login`, and `az login` plus `az extension add --name azure-devops`.
+4. Sign in with the CLIs where the runner runs them: `gh auth login`, and for Azure the per-Profile `az login` that Wayfinder shows (below).
 
 ## Use
 
@@ -35,7 +35,8 @@ Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `
       ],
       "repos": [{ "id": "frontend", "remote": "<clone url>", "path": "/home/me/src/frontend" }],
       "boards": [
-        { "id": "team", "account": "gh-work", "ref": { "owner": "<user or org>", "number": 1 } }
+        { "id": "team", "account": "gh-work", "ref": { "owner": "<user or org>", "number": 1 } },
+        { "id": "sprint", "account": "ado", "ref": { "project": "<project>", "team": "<team>" } }
       ]
     }
   }
@@ -45,6 +46,8 @@ Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `
 - `runner`: where commands run. `native`, or `wsl:<distro>` (the default on Windows, `wsl:Ubuntu`).
 - A GitHub account's `login` is a user signed in with `gh` (`gh auth status` lists them).
 - A GitHub Board's `ref` is the project's owner and number (from its URL, `github.com/users/<owner>/projects/<number>` or `orgs/<owner>/...`). Its Columns are the `Status` field's options, and every item shows (view filters don't apply). Optional: `statusField` and `priorityField` to use other single-select fields, and a Board `name`. Private and org projects may need `gh auth refresh -h github.com -s read:project`.
+- An Azure Board's `ref` is the `project` and `team`, plus an optional `board` (its name, e.g. `Stories` or `Features`; the team's first board by default). Its Columns are the team board's, in order. Azure has no list of a board's items, so Wayfinder rebuilds it: the board's work item types on the team's area paths, in backlog order, each in the Column the team's board field says. Items in the last Column show if they changed in the last 30 days. Swimlanes are ignored, and "View in Azure" opens the real board.
+- Each Profile has its own `az` login in `~/.config/wayfinder/azure/<profile>` (inside the runner), so two Profiles never share Azure credentials. "Sign in needed" shows the exact `az login` command for it. Every refresh gets a fresh token.
 - With several Boards, a switcher shows them. "Mine" shows only Tickets assigned to the Account, and is remembered per Board.
 - Each Account's sign-in is checked with `gh auth status` on every refresh. A missing or expired login, or a Board Account without `read:project`, shows "Sign in needed" with the exact command and a button that runs it in a new tab through the runner. gh refreshes only its active account, so for another account the command switches to it and back. The Profile's other Accounts keep working. Press Refresh afterwards.
 - Board data is cached per Profile in `~/.config/herdr-app/data/wayfinder-cache-<profile>.json`. Opening Wayfinder shows the cache at once with its age ("Updated 12m ago"), then refreshes in the background. While Wayfinder shows, it refreshes every 30 minutes. Nothing runs while it is hidden. Refresh re-reads the configuration and refreshes now. A failed refresh keeps the cached Board and shows the error.
