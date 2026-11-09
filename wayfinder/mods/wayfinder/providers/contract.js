@@ -32,10 +32,11 @@
 //   tags       string[]
 //   parent     { id, title, url } | null
 //   description         markdown ("" when none)
+//   descriptionLabel    optional heading for it ("Description" by default; Azure Bugs say "Repro steps")
 //   acceptanceCriteria  markdown | null (null when the Provider has no such field)
 //   comments   [{ author, body (markdown), createdAt (ISO), url }], oldest first
 //   moreComments  how many older comments weren't fetched
-//   pullRequests  [{ id, title, url, state: "open" | "closed" | "merged", draft }]
+//   pullRequests  [{ id, title, url (null when unknown), state: "open" | "closed" | "merged" | null, draft }]
 
 export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "signInState", "move", "update"];
 

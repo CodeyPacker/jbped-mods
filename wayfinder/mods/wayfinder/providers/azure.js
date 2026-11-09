@@ -7,10 +7,16 @@
 // Azure has no "items on this board" endpoint (G4), so the Board is rebuilt (D20): the board's
 // columns, the work item types its columns map, the team's area paths, and a WIQL query. Each item's
 // Column is the team's own WEF_<guid>_Kanban.Column field. Swimlanes are ignored.
+//
+// Ticket detail converts the HTML fields to markdown. Bugs show their repro steps as the description.
+// Linked Azure PRs are fetched. GitHub PR links show by URL only (R5).
+import { htmlToMarkdown } from "./html.js";
 
 const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
 const API_VERSION = "7.1";
 const PREVIEW = "7.1-preview"; // connectionData has no GA version
+const COMMENTS_VERSION = "7.1-preview.4"; // the comments API is preview only: pinned here (R4)
+const COMMENTS = 100, MAX_PRS = 20;
 const MAX_ITEMS = 2000, BATCH = 200;
 const DONE_DAYS = 30; // items in the last Column show only if they changed this recently
 
@@ -93,7 +99,7 @@ export function mapWorkItems(items, board, { org, project }) {
     const f = w.fields, a = f["System.AssignedTo"], p = f["Microsoft.VSTS.Common.Priority"];
     const url = `${org}/${seg(project)}/_workitems/edit/${w.id}`;
     return {
-      ref: { id: w.id, project },
+      ref: { id: w.id, project, columnField },
       key: String(w.id), id: String(w.id), title: f["System.Title"] ?? "", type: f["System.WorkItemType"] ?? "", url,
       columnId: (columnField && f[columnField]) || byState(f["System.WorkItemType"], f["System.State"]),
       assignees: a ? [{ id: a.id, name: a.displayName ?? a.uniqueName ?? "" }] : [],
@@ -102,9 +108,94 @@ export function mapWorkItems(items, board, { org, project }) {
   });
 }
 
+const webUrl = (org, project, id) => `${org}/${seg(project)}/_workitems/edit/${id}`;
+const PR_STATE = { active: "open", completed: "merged", abandoned: "closed" };
+
+// A work item's linked pull requests: Azure ones by id (to fetch), GitHub ones as they are (R5).
+export function linkedPrs(relations) {
+  const azure = [], github = [];
+  for (const r of relations ?? []) {
+    const url = String(r.url ?? "");
+    let m;
+    if ((m = /^vstfs:\/\/\/Git\/PullRequestId\/[^/]+%2F[^/]+%2F(\d+)$/i.exec(url))) azure.push(Number(m[1]));
+    else if ((m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/i.exec(url))) {
+      github.push({ id: `${m[2]}#${m[3]}`, title: "GitHub pull request", url, state: null, draft: false });
+    } else if ((m = /^vstfs:\/\/\/GitHub\/PullRequest\/[^/]+%2F(\d+)$/i.exec(url))) {
+      github.push({ id: `GitHub #${m[1]}`, title: "GitHub pull request", url: null, state: null, draft: false });
+    }
+  }
+  return { azure: [...new Set(azure)], github };
+}
+
+export function mapPr(pr) {
+  const repo = pr.repository ?? {};
+  return {
+    id: `${repo.name ?? ""}!${pr.pullRequestId}`, title: pr.title ?? "",
+    url: repo.webUrl ? `${repo.webUrl}/pullrequest/${pr.pullRequestId}` : null,
+    state: PR_STATE[pr.status] ?? null, draft: Boolean(pr.isDraft),
+  };
+}
+
+// Comments oldest first, from a page fetched newest first.
+export function mapComments(page, url) {
+  const list = (page?.comments ?? []).slice().sort((a, b) => String(a.createdDate).localeCompare(String(b.createdDate)));
+  return {
+    comments: list.map((c) => ({
+      author: c.createdBy?.displayName ?? "", createdAt: c.createdDate ?? null, url,
+      body: c.format === "markdown" ? String(c.text ?? "") : htmlToMarkdown(c.text),
+    })),
+    moreComments: Math.max(0, (page?.totalCount ?? list.length) - list.length),
+  };
+}
+
+export function mapTicket(w, { org, project, columnField = null, parent = null, comments = { comments: [], moreComments: 0 }, pullRequests = [] }) {
+  const f = w.fields ?? {}, type = f["System.WorkItemType"] ?? "";
+  const a = f["System.AssignedTo"], p = f["Microsoft.VSTS.Common.Priority"];
+  const repro = type === "Bug" ? htmlToMarkdown(f["Microsoft.VSTS.TCM.ReproSteps"]) : "";
+  const ac = "Microsoft.VSTS.Common.AcceptanceCriteria";
+  return {
+    ref: { id: w.id, project, columnField },
+    key: String(w.id), id: String(w.id), title: f["System.Title"] ?? "", type, url: webUrl(org, project, w.id),
+    column: (columnField && f[columnField]) || f["System.BoardColumn"] || f["System.State"] || null,
+    assignees: a ? [{ id: a.id, name: a.displayName ?? a.uniqueName ?? "" }] : [],
+    priority: p != null ? `P${p}` : null,
+    tags: String(f["System.Tags"] ?? "").split(";").map((t) => t.trim()).filter(Boolean),
+    parent,
+    description: repro || htmlToMarkdown(f["System.Description"]),
+    descriptionLabel: repro ? "Repro steps" : "Description",
+    acceptanceCriteria: ac in f ? htmlToMarkdown(f[ac]) : null,
+    ...comments,
+    pullRequests,
+  };
+}
+
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "signInState"],
+  capabilities: ["boards", "board", "ticket", "signInState"],
+
+  // ref: a TicketSummary's ref from board().
+  async ticket(account, ref, io) {
+    const id = Number(ref.id);
+    if (!Number.isInteger(id) || id <= 0 || typeof ref.project !== "string") throw new Error("This card has no work item to open");
+    const org = orgUrl(account), tok = await token(account, io), p = seg(ref.project);
+    const w = await rest(org, tok, io, `${p}/_apis/wit/workitems/${id}?$expand=relations`);
+    const parentId = Number(w.fields?.["System.Parent"]);
+    const links = linkedPrs(w.relations);
+    const [parent, page, prs] = await Promise.all([
+      parentId > 0
+        ? rest(org, tok, io, `_apis/wit/workitems/${parentId}?fields=System.Title,System.TeamProject`)
+          .then((x) => ({ id: String(parentId), title: x.fields?.["System.Title"] ?? "", url: webUrl(org, x.fields?.["System.TeamProject"] ?? ref.project, parentId) }))
+          .catch(() => ({ id: String(parentId), title: "", url: webUrl(org, ref.project, parentId) }))
+        : null,
+      rest(org, tok, io, `${p}/_apis/wit/workItems/${id}/comments?$top=${COMMENTS}&order=desc`, null, COMMENTS_VERSION),
+      Promise.all(links.azure.slice(0, MAX_PRS).map((n) => rest(org, tok, io, `_apis/git/pullrequests/${n}`).then(mapPr)
+        .catch(() => ({ id: `!${n}`, title: "", url: null, state: null, draft: false })))),
+    ]);
+    return mapTicket(w, {
+      org, project: ref.project, columnField: ref.columnField ?? null, parent,
+      comments: mapComments(page, webUrl(org, ref.project, id)), pullRequests: [...prs, ...links.github],
+    });
+  },
 
   async signInState(_account, io) {
     const r = await az(io, ["account", "get-access-token", "--resource", RESOURCE, "--query", "expiresOn", "-o", "tsv"]);
