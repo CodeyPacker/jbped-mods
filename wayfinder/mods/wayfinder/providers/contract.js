@@ -25,6 +25,15 @@
 //   assignees  [{ id, name }]
 //   priority   string | null
 // }
+// Ticket       the detail panel's data (D11): a TicketSummary's fields, minus columnId, plus
+//   column     the Column's name, or null
+//   tags       string[]
+//   parent     { id, title, url } | null
+//   description         markdown ("" when none)
+//   acceptanceCriteria  markdown | null (null when the Provider has no such field)
+//   comments   [{ author, body (markdown), createdAt (ISO), url }], oldest first
+//   moreComments  how many older comments weren't fetched
+//   pullRequests  [{ id, title, url, state: "open" | "closed" | "merged", draft }]
 
 export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "signInState", "move", "update"];
 

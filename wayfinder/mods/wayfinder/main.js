@@ -6,12 +6,12 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { run, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard } from "./flow.js";
+import { loadBoard, loadTicket } from "./flow.js";
 import { byColumn, initials } from "./providers/contract.js";
 
 const STACK = "wayfinder-stack", WORK = "work";
 const VIEW_KEY = "wayfinder.view.v1";
-const COLUMN_W = 280;
+const COLUMN_W = 280, PANEL_W = 460;
 const configPath = () => `${appHome()}/data/wayfinder.json`;
 
 const EXAMPLE = `{
@@ -50,9 +50,14 @@ function segmented(id, options, value, t, onPick) {
   }));
 }
 
-function card(tk, t) {
-  return v_flex().id(`wf-card-${tk.key}`).gap(6).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
-    .hover((s) => s.border_color(t.input))
+// Markdown link text: brackets would end the link early.
+const linkText = (s) => String(s ?? "").replace(/([[\]\\])/g, "\\$1");
+const link = (label, url) => url ? `[${linkText(label)}](<${url}>)` : linkText(label);
+
+function card(tk, t, selected, onClick) {
+  return v_flex().id(`wf-card-${tk.key}`).gap(6).p(10).rounded(8).bg(t.surface).border_1().border_color(selected ? t.accent : t.border)
+    .cursor_pointer().hover((s) => s.border_color(selected ? t.accent : t.input))
+    .on_mouse_down("left", stop).on_click((_e, cx) => onClick(cx))
     .child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
       .child(div().child(tk.id)).child(div().child("·")).child(div().truncate().child(tk.type)))
     .child(div().text_size(13).text_color(t.foreground).child(tk.title))
@@ -70,6 +75,8 @@ export default class Wayfinder extends View {
     this.state = { status: "loading" };
     this.checks = null;
     this.boards = {}; // board id -> { status: "loading" | "ok" | "error", data, error }
+    this.selected = null; // { boardId, summary }: the Ticket in the detail panel
+    this.tickets = {}; // ticket key -> { status, data, error }
     this.reload(cx);
     cx.spawn(async (cx) => {
       for (;;) {
@@ -100,6 +107,8 @@ export default class Wayfinder extends View {
   reload(cx) {
     this.state = { status: "loading" };
     this.boards = {};
+    this.tickets = {};
+    if (this.selected) this.fetchTicketLater = true;
     cx.spawn(async (cx) => {
       const path = configPath();
       let text = null;
@@ -112,6 +121,7 @@ export default class Wayfinder extends View {
       cx.notify();
       if (this.state.status !== "ok") return;
       if (this.board) this.fetchBoard(this.board, cx);
+      if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
       else await this.check(cx);
     });
   }
@@ -128,7 +138,32 @@ export default class Wayfinder extends View {
     });
   }
 
+  // Opens the detail panel on a Ticket, or switches it to another.
+  openTicket(b, summary, cx) {
+    this.selected = { boardId: b.id, summary };
+    if (this.tickets[summary.key]?.status !== "ok") this.fetchTicket(cx);
+    cx.notify();
+  }
+
+  closeTicket() { this.selected = null; }
+
+  fetchTicket(cx) {
+    const sel = this.selected, p = this.profile;
+    const b = p?.boards.find((x) => x.id === sel?.boardId);
+    if (!b) { this.selected = null; return; }
+    const key = sel.summary.key;
+    this.tickets[key] = { status: "loading", data: this.tickets[key]?.data ?? null };
+    const io = { run: this.state.runner.run, fetch };
+    cx.spawn(async (cx) => {
+      try { this.tickets[key] = { status: "ok", data: await loadTicket(p, b, sel.summary, io) }; } catch (e) {
+        this.tickets[key] = { status: "error", data: this.tickets[key]?.data ?? null, error: String(e.message ?? e) };
+      }
+      cx.notify();
+    });
+  }
+
   selectBoard(id, cx) {
+    this.closeTicket();
     save(`wayfinder.board.${this.profile.name}`, id);
     if (!this.boards[id]) this.fetchBoard(this.board, cx);
     cx.notify();
@@ -207,9 +242,58 @@ export default class Wayfinder extends View {
               .child(div().text_size(12).font_semibold().text_color(t.foreground).truncate().child(column.name))
               .child(div().text_size(11).text_color(t.dim).child(String(tickets.length))))
             .child(v_flex().id(`wf-col-body-${column.id}`).px(8).pb(8).gap(8).overflow_y_scrollbar()
-              .children(tickets.map((tk) => card(tk, t))))));
+              .children(tickets.map((tk) => card(tk, t, this.selected?.summary.key === tk.key, (cx) => this.openTicket(b, tk, cx)))))));
     }
-    return v_flex().size_full().child(bar).child(content);
+    const panel = this.selected?.boardId === b.id ? this.ticketPanel(t) : null;
+    return v_flex().size_full().child(bar)
+      .child(h_flex().flex_1().min_h(0).items_start().child(v_flex().flex_1().min_w(0).h_full().child(content))
+        .when(Boolean(panel), (el) => el.child(panel)));
+  }
+
+  // The detail panel (D11, D23): the summary shows at once, the rest when the Ticket arrives.
+  ticketPanel(t) {
+    const sum = this.selected.summary;
+    const entry = this.tickets[sum.key] ?? { status: "loading" };
+    const tk = entry.data;
+    const k = sum.key;
+    const md = (id, text) => div().text_size(13).text_color(t.foreground).child(TextView.markdown(`wf-${id}-${k}`, text).selectable(true));
+    const section = (title) => div().pt(8).text_size(11).font_semibold().text_color(t.dim).child(title.toUpperCase());
+    const row = (label, value) => h_flex().gap(8).items_start().text_size(12)
+      .child(div().w(84).flex_none().text_color(t.dim).child(label))
+      .child(div().flex_1().min_w(0).text_color(t.foreground).child(value || "—"));
+
+    const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
+      .child(div().text_size(12).text_color(t.muted).truncate().child(`${(tk ?? sum).id} · ${(tk ?? sum).type}`))
+      .child(div().flex_1())
+      .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .child(button("wf-ticket-close", "Close", t, (cx) => { this.closeTicket(); cx.notify(); }));
+
+    const body = v_flex().id(`wf-ticket-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
+      .child(div().text_size(16).font_semibold().text_color(t.foreground).child((tk ?? sum).title))
+      .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)));
+    if (tk) {
+      body
+        .child(v_flex().gap(6)
+          .child(row("Column", tk.column))
+          .child(row("Assignees", tk.assignees.map((a) => a.name).join(", ")))
+          .child(row("Tags", tk.tags.join(", ")))
+          .child(row("Priority", tk.priority))
+          .child(row("Parent", tk.parent ? `${tk.parent.id} ${tk.parent.title}` : null)))
+        .when(Boolean(tk.url), (el) => el.child(md("url", link("Open in browser", tk.url))))
+        .child(section("Description"))
+        .child(tk.description.trim() ? md("desc", tk.description) : div().text_size(12).text_color(t.dim).child("No description."))
+        .when(tk.acceptanceCriteria != null, (el) => el.child(section("Acceptance criteria")).child(md("ac", tk.acceptanceCriteria ?? "")))
+        .child(section(`Pull requests (${tk.pullRequests.length})`))
+        .when(tk.pullRequests.length > 0, (el) => el.child(md("prs", tk.pullRequests
+          .map((pr) => `- ${link(`${pr.id} ${pr.title}`, pr.url)} · ${pr.draft ? "draft" : pr.state}`).join("\n"))))
+        .child(section(`Comments (${tk.comments.length + tk.moreComments})`))
+        .when(tk.moreComments > 0, (el) => el.child(md("more", link(`${tk.moreComments} older comments`, tk.url))))
+        .children(tk.comments.map((c, i) => v_flex().gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+          .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
+          .child(md(`c${i}`, c.body))));
+    }
+    return v_flex().id("wf-ticket").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border)
+      .child(head).child(body);
   }
 
   body(t) {
@@ -230,7 +314,10 @@ export default class Wayfinder extends View {
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
       .on_mouse_down("left", () => this.handle.focus())
-      .on_key_down((e) => { if (e.key === "escape") this.close_(); })
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape") return;
+        if (this.selected) { this.closeTicket(); cx.notify(); } else this.close_();
+      })
       .child(this.header(t))
       .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));
   }

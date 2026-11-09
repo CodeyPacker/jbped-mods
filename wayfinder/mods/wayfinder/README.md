@@ -1,6 +1,6 @@
 # wayfinder
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of the work area, outside any space. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards show today. Ticket detail, Azure DevOps, Pull Requests, Launch and Review are still to come.
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of the work area, outside any space. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Ticket detail work today. Azure DevOps, Pull Requests, Launch and Review are still to come.
 
 ## Install
 
@@ -25,7 +25,7 @@ Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in place of
 
 ## Use
 
-Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. Esc or Close goes back to the work area. To bind a key, add it to `keys.json`, e.g. `"global": { "<key>": { "command": "layout.select", "args": { "stack": "wayfinder-stack", "child": "wayfinder" } } }`.
+Palette: `Wayfinder: Open`, `Wayfinder: Close`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Click another card to switch it. Esc closes the panel, then a second Esc, or Close, goes back to the work area. To bind a key, add it to `keys.json`, e.g. `"global": { "<key>": { "command": "layout.select", "args": { "stack": "wayfinder-stack", "child": "wayfinder" } } }`.
 
 ## Configuration
 
