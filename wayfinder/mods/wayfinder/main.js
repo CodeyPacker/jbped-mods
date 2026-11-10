@@ -4,7 +4,7 @@
 // stops showing. Esc closes the Ticket detail panel, then leaves fullscreen.
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
@@ -43,6 +43,15 @@ const stop = (_e, cx) => cx.stop_propagation();
 // localStorage holds per-viewer niceties only; it can be missing, so every access is guarded.
 const load = (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } };
 const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* nicety only */ } };
+
+// A header action as an icon, like Herdr's pane actions. `on` marks the one that is open.
+function iconButton(id, icon, t, onClick, { on = false } = {}) {
+  return div().id(id).p(4).flex_none().rounded(4).cursor_pointer()
+    .text_color(on ? t.foreground : t.dim).when(on, (el) => el.bg(t.hover))
+    .hover((s) => s.bg(t.hover).text_color(t.foreground))
+    .on_mouse_down("left", stop).on_click((_e, cx) => onClick(cx))
+    .child(svg(`mods/wayfinder/icons/${icon}.svg`).size(14));
+}
 
 function button(id, label, t, onClick, { on = false } = {}) {
   return h_flex().id(id).h(26).px(10).flex_none().items_center().rounded(6)
@@ -762,10 +771,11 @@ export default class Wayfinder extends View {
       .child(div().flex_1())
       .when(Boolean(this.profile) && this.state.profileNames.length > 1, (el) => el.child(segmented("wf-profiles",
         this.state.profileNames.map((n) => [n, n]), this.profile.name, t, (name, cx) => cx.spawn(async (cx) => { await this.switchProfile(name, cx); cx.notify(); }))))
-      .child(button("wf-settings", "Settings", t, (cx) => { this.openSettings(cx); cx.notify(); }, { on: this.view === "settings" }))
-      .child(button("wf-refresh", "Refresh", t, (cx) => this.reload(cx)))
-      .child(button("wf-full", this.fullscreen ? "Exit fullscreen" : "Fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }, { on: this.fullscreen }))
-      .child(button("wf-close", "Close", t, () => this.close_()));
+      .child(h_flex().gap(2).items_center()
+        .child(iconButton("wf-settings", "settings", t, (cx) => { this.openSettings(cx); cx.notify(); }, { on: this.view === "settings" }))
+        .child(iconButton("wf-refresh", "refresh", t, (cx) => this.reload(cx)))
+        .child(iconButton("wf-full", this.fullscreen ? "exit-fullscreen" : "fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }))
+        .child(iconButton("wf-close", "close", t, () => this.close_())));
   }
 
   message(t, title, lines) {

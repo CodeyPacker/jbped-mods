@@ -21,7 +21,7 @@ Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `
 
 ## Settings
 
-The Settings button edits `wayfinder.json` for you, and each change is saved at once:
+The Settings icon (the gear) in the header edits `wayfinder.json` for you, and each change is saved at once:
 
 - Profiles: add, show, rename, reorder (the switcher follows this order) or remove (with a second click). The last Profile stays. A rename moves the Profile's `az` login folder and copies its cache to the new name (Herdr can't delete files, so the old cache file stays until you remove it).
 - Accounts in the shown Profile: add a GitHub user name or an Azure DevOps organization URL, or remove one (its Boards go with it). An Account that needs signing in shows the command.
