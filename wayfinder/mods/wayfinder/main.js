@@ -71,7 +71,9 @@ function checkRow(id, on, label, t, onClick) {
     .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(label));
 }
 
-const field = (state, t, w = 260) => Input.new(state).w(w).h(28).px(8).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_size(12).text_color(t.foreground);
+// The wrapper keeps the click from reaching the root, whose mouse-down would take the focus back.
+const field = (state, t, w = 260) => div().on_mouse_down("left", stop)
+  .child(Input.new(state).w(w).h(28).px(8).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_size(12).text_color(t.foreground));
 
 // Markdown link text: brackets would end the link early.
 const linkText = (s) => String(s ?? "").replace(/([[\]\\])/g, "\\$1");
@@ -631,50 +633,44 @@ export default class Wayfinder extends View {
         })),
     ]));
 
-    // Boards: the followed ones as Active Boards, then each Account's others (foldable, searchable).
-    const boardAccounts = p.accounts.filter((x) => can(providerFor(x), "boards"));
-    const match = (a) => {
-      const found = this.found[a.id]?.boards?.data ?? [];
+    // Boards: one card per Account. Its followed Boards first, a line, then the others (foldable, searchable).
+    out.push(heading("Boards"), note("Ticked Boards show in Wayfinder. With two or more, a switcher shows above the Board."));
+    for (const a of p.accounts.filter((x) => can(providerFor(x), "boards"))) {
+      const f = this.found[a.id]?.boards;
+      const found = f?.data ?? [];
       const mine = p.boards.filter((b) => b.account === a.id);
       const cfgFor = (d) => mine.find((b) => edits.showsBoard(b, a.id, d, Boolean(d.teamDefault)));
-      return { found, cfgFor };
-    };
-    out.push(heading("Active Boards"), note("The Boards Wayfinder shows. With two or more, a switcher shows above the Board."));
-    const active = p.boards.map((b) => {
-      const a = p.accounts.find((x) => x.id === b.account);
-      const open = this.statusOpen === b.id;
-      const tracked = b.trackedStatuses?.length ?? 0;
-      return [
-        h_flex().id(`wf-set-ab-${b.id}`).gap(8).items_center()
-          .child(checkRow(`wf-set-abc-${b.id}`, true, `${b.name ?? b.id}  ·  ${b.account}`, t, (cx) => this.saveConfig((raw) => edits.unfollowBoard(raw, p.name, b.id), cx)))
-          .when(Boolean(a) && can(providerFor(a), "statuses"), (el) => el.child(button(`wf-st-${b.id}`,
-            open ? "Done" : tracked ? `Edit displayed statuses (${tracked})` : "Edit displayed statuses", t,
-            (cx) => { this.statusOpen = open ? null : b.id; if (this.statusOpen && !this.statusLists[b.id]) this.loadStatuses(b.id, cx); cx.notify(); },
-            { on: open || tracked > 0 }))),
-        ...(open ? [this.statusEditor(t, p, b)] : []),
-      ];
-    }).flat();
-    out.push(card("wf-set-active", active.length ? active : [note("No Boards yet. Tick one below.")]));
-
-    out.push(heading("Other Boards"));
-    for (const a of boardAccounts) {
-      const f = this.found[a.id]?.boards;
-      const { found, cfgFor } = match(a);
       const folded = load(this.foldKey(a), "0") === "1";
       const search = this.inputs.boards[a.id];
-      const others = edits.matchBoards(found.filter((d) => !cfgFor(d)), search?.value());
-      const total = found.filter((d) => !cfgFor(d)).length;
+      const unfollowed = found.filter((d) => !cfgFor(d));
+      const others = edits.matchBoards(unfollowed, search?.value());
+      const active = mine.flatMap((b) => {
+        const open = this.statusOpen === b.id;
+        const tracked = b.trackedStatuses?.length ?? 0;
+        return [
+          h_flex().id(`wf-set-ab-${b.id}`).gap(8).items_center()
+            .child(checkRow(`wf-set-abc-${b.id}`, true, b.name ?? b.id, t, (cx) => this.saveConfig((raw) => edits.unfollowBoard(raw, p.name, b.id), cx)))
+            .when(can(providerFor(a), "statuses"), (el) => el.child(button(`wf-st-${b.id}`,
+              open ? "Done" : tracked ? `Edit displayed statuses (${tracked})` : "Edit displayed statuses", t,
+              (cx) => { this.statusOpen = open ? null : b.id; if (this.statusOpen && !this.statusLists[b.id]) this.loadStatuses(b.id, cx); cx.notify(); },
+              { on: open || tracked > 0 }))),
+          ...(open ? [this.statusEditor(t, p, b)] : []),
+        ];
+      });
       out.push(card(`wf-set-boards-${a.id}`, [
+        div().text_size(12).text_color(t.muted).child(who(a)),
+        ...(active.length ? active : [note("No Boards followed. Tick one below.")]),
+        div().h(1).my(4).bg(t.border),
         h_flex().id(`wf-set-bh-${a.id}`).gap(8).items_center().cursor_pointer()
           .on_mouse_down("left", stop).on_click((_e, cx) => { save(this.foldKey(a), folded ? "0" : "1"); cx.notify(); })
-          .child(div().flex_1().text_size(12).text_color(t.muted).child(`${who(a)}${f?.status === "ok" ? ` · ${total} more` : ""}`))
+          .child(div().flex_1().text_size(12).text_color(t.muted).child(`Other Boards${f?.status === "ok" ? ` · ${unfollowed.length}` : ""}`))
           .child(div().text_size(12).text_color(t.dim).hover((x) => x.text_color(t.foreground)).child(folded ? "Show" : "Hide")),
         ...(folded ? [] : [
           ...(search ? [field(search, t)] : []),
           ...(f?.status === "loading" ? [note("Finding boards…")] : []),
           ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
-          ...(f?.status === "ok" && !total ? [note(found.length ? "All followed." : "No boards found.")] : []),
-          ...(total && !others.length ? [note("No match.")] : []),
+          ...(f?.status === "ok" && !unfollowed.length ? [note(found.length ? "All followed." : "No boards found.")] : []),
+          ...(unfollowed.length && !others.length ? [note("No match.")] : []),
           ...others.map((d) => h_flex().child(checkRow(`wf-set-bo-${a.id}-${found.indexOf(d)}`, false, d.title, t,
             (cx) => this.saveConfig((raw) => edits.followBoard(raw, p.name, a.id, d), cx)))),
         ]),
