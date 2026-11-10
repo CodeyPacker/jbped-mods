@@ -154,3 +154,34 @@ export function removeAccount(raw, profileName, id) {
     p.boards = (p.boards ?? []).filter((b) => b.account !== id);
   });
 }
+
+// Renames a Profile in place (its position stays) and follows it with activeProfile. The caller moves
+// what is keyed by the name: the cache file, the az login folder, remembered view state.
+export function renameProfile(raw, from, to) {
+  if (!raw.profiles?.[from]) throw new Error(`No profile "${from}"`);
+  if (from === to) return clone(raw);
+  if (!PROFILE_NAME.test(to)) throw new Error("A profile name uses letters, digits, - and _ (up to 32)");
+  if (raw.profiles[to]) throw new Error(`Profile "${to}" already exists`);
+  const out = clone(raw);
+  out.profiles = Object.fromEntries(Object.entries(out.profiles).map(([k, v]) => [k === from ? to : k, v]));
+  if ((raw.activeProfile ?? Object.keys(raw.profiles)[0]) === from) out.activeProfile = to;
+  return out;
+}
+
+// Moves a Profile up or down. The order is the switcher's order.
+export function moveProfile(raw, name, by) {
+  const names = Object.keys(raw.profiles ?? {});
+  const i = names.indexOf(name);
+  if (i < 0) throw new Error(`No profile "${name}"`);
+  const order = move(names, i, by);
+  const out = clone(raw);
+  out.profiles = Object.fromEntries(order.map((k) => [k, out.profiles[k]]));
+  if (out.activeProfile == null) out.activeProfile = names[0]; // the first was active by default: keep it
+  return out;
+}
+
+// A Board list for a search: matches by title, without regard to case.
+export const matchBoards = (list, query) => {
+  const q = String(query ?? "").trim().toLowerCase();
+  return q ? list.filter((d) => d.title.toLowerCase().includes(q)) : list;
+};

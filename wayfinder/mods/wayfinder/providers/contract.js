@@ -10,6 +10,7 @@
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
 //     repos(account, io) -> string[]                // "repos": what can be followed, "owner/name" or "project/repo"
 //     statuses(account, ref, io) -> string[]        // "statuses": a Board's states, for Tracked Statuses
+//     renameProfile(from, to, io)                   // optional: move what the Provider keeps per Profile
 //     signInState(account, io, needs) -> { ok: true } | { ok: false, reason, command } // "signInState"
 //                  needs: { boards } (what the Profile uses the Account for, so scopes can be checked)
 //                  command: the exact shell command that fixes it, or null when there's none to run

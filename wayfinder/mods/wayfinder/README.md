@@ -23,10 +23,11 @@ Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Close`, `
 
 The Settings button edits `wayfinder.json` for you, and each change is saved at once:
 
-- Profiles: add one, show one, or remove one (with a second click). The last Profile stays. A Profile's name is also its cache file and `az` login folder, so it can't be renamed.
+- Profiles: add, show, rename, reorder (the switcher follows this order) or remove (with a second click). The last Profile stays. A rename moves the Profile's `az` login folder and copies its cache to the new name (Herdr can't delete files, so the old cache file stays until you remove it).
 - Accounts in the shown Profile: add a GitHub user name or an Azure DevOps organization URL, or remove one (its Boards go with it). An Account that needs signing in shows the command.
-- Boards: every Board each Account can see (GitHub Projects, and the Azure boards of every team you're on). Tick the ones to follow. For an Azure Board, Statuses lists its states: tick the ones to show as Columns and order them with the arrows (Tracked Statuses). None ticked means the board's own Columns.
-- Pull Request repos: per Account, All (every repo), Selected (only the ticked repos) or Ignored (every repo except the ticked ones). Selected and Ignored keep separate lists, so switching keeps both. The filter box narrows the list.
+- Active Boards: the Boards Wayfinder shows. Untick one to stop following it. For an Azure Board, "Edit displayed statuses" lists its states: tick the ones to show as Columns and order them with the arrows (Tracked Statuses). None ticked means the board's own Columns.
+- Other Boards: every other Board each Account can see (GitHub Projects, and the Azure boards of every team you're on), with a search box. Tick one to make it active. Each Account's list folds away, and Wayfinder remembers that.
+- Pull Request repos: per Account, All (every repo), Selected (only the ticked repos) or Ignored (every repo except the ticked ones), with a search box. Selected and Ignored keep separate lists, so switching keeps both.
 
 Refresh reloads the lists. A change that would make the file invalid is refused with the reason, and if the file changed elsewhere, Wayfinder reads it again instead of overwriting it.
 

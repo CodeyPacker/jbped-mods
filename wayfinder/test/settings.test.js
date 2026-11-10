@@ -106,3 +106,40 @@ test("the repo filter keeps an Account's PRs: all, only selected, all but ignore
   assert.equal(all.mine.length, 2);
   assert.deepEqual([none.mine, none.needsReview], [[], []]);
 });
+
+import { renameProfileData } from "../mods/wayfinder/flow.js";
+import { moveLoginArgs } from "../mods/wayfinder/providers/azure.js";
+
+test("rename a Profile in place; the active one follows; bad or taken names refused", () => {
+  const r = e.renameProfile(raw(), "work", "office");
+  assert.deepEqual(Object.keys(r.profiles), ["office", "home"]);
+  assert.equal(r.activeProfile, "office");
+  valid(r);
+  assert.equal(e.renameProfile(raw(), "home", "house").activeProfile, "work");
+  assert.throws(() => e.renameProfile(raw(), "work", "home"), /already exists/);
+  assert.throws(() => e.renameProfile(raw(), "work", "a b"), /letters, digits/);
+  assert.throws(() => e.renameProfile(raw(), "nope", "x"), /No profile/);
+});
+
+test("reorder Profiles; the default active one stays active", () => {
+  assert.deepEqual(Object.keys(e.moveProfile(raw(), "home", -1).profiles), ["home", "work"]);
+  assert.deepEqual(Object.keys(e.moveProfile(raw(), "home", 1).profiles), ["work", "home"]);
+  const noActive = { profiles: { a: {}, b: {} } };
+  const r = e.moveProfile(noActive, "b", -1);
+  assert.deepEqual([Object.keys(r.profiles), r.activeProfile], [["b", "a"], "a"]);
+});
+
+test("board search matches titles without regard to case", () => {
+  const list = [{ title: "Barracuda · Stories" }, { title: "Sonja · Epics" }];
+  assert.deepEqual(e.matchBoards(list, "  stor ").map((d) => d.title), ["Barracuda · Stories"]);
+  assert.equal(e.matchBoards(list, "").length, 2);
+});
+
+test("a rename moves each Provider's per-Profile data once, with names as argv", async () => {
+  assert.deepEqual(moveLoginArgs("work", "office").slice(2), ["wayfinder-mv", "work", "office"]);
+  assert.ok(!moveLoginArgs("a", "b")[1].includes("work"));
+  const calls = [];
+  const registry = { az: { renameProfile: async (from, to) => calls.push([from, to]) }, gh: {} };
+  await renameProfileData({ name: "work", accounts: [{ provider: "az" }, { provider: "az" }, { provider: "gh" }] }, "office", {}, registry);
+  assert.deepEqual(calls, [["work", "office"]]);
+});

@@ -7,9 +7,9 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
-import { parseConfig } from "./config.js";
+import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, boardStatuses, providerFor } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { shellInvocation } from "./command.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter } from "./providers/contract.js";
@@ -151,9 +151,10 @@ export default class Wayfinder extends View {
       profile: InputState.new({ placeholder: "new profile name" }),
       gh: InputState.new({ placeholder: "GitHub user name" }),
       ado: InputState.new({ placeholder: "https://dev.azure.com/<org>" }),
-      repo: InputState.new({ placeholder: "Filter repos" }),
+      boards: {}, // account id -> InputState: each list's search
+      repos: {},
     };
-    this.inputs.repo.on("change", (_e, cx) => cx.notify());
+    this.renaming = null; // { name, input }: the Profile being renamed
     this.reload(cx);
     cx.timer.every(60_000, (cx) => { if (this.watch(cx)) cx.notify(); }); // reads the layout only: no requests
     cx.spawn(async (cx) => {
@@ -261,7 +262,7 @@ export default class Wayfinder extends View {
         if (cp) this.prs = { status: "cached", ...cp };
       }
       cx.notify();
-      if (this.state.status === "ok") this.watch(cx);
+      if (this.state.status === "ok") { this.ensureInputs(); this.watch(cx); }
     });
   }
 
@@ -425,7 +426,67 @@ export default class Wayfinder extends View {
   openSettings(cx) {
     this.view = "settings";
     this.settingsError = null;
+    this.ensureInputs();
     this.loadSettings(cx);
+  }
+
+  // A search box per Account list. InputState needs a live host call, so never from render.
+  ensureInputs() {
+    for (const a of this.profile?.accounts ?? []) {
+      for (const [kind, placeholder] of [["boards", "Search boards"], ["repos", "Search repos"]]) {
+        if (this.inputs[kind][a.id]) continue;
+        const input = InputState.new({ placeholder });
+        input.on("change", (_e, cx) => cx.notify());
+        this.inputs[kind][a.id] = input;
+      }
+    }
+  }
+
+  // Whether an Account's list of other Boards is folded away. Remembered per Profile and Account.
+  foldKey(a) { return `wayfinder.settings.fold.${this.profile.name}.${a.id}`; }
+
+  startRename(name) {
+    const input = InputState.new({ value: name, placeholder: "profile name" });
+    input.on("submit", (_e, cx) => this.finishRename(cx));
+    this.renaming = { name, input };
+    input.focus();
+  }
+
+  // Renames the Profile in the file, then moves what is keyed by its name: the az login folder (through
+  // that Profile's runner), the cache (copied: Herdr can't delete files, so the old one stays), and the
+  // remembered Board and Mine choices.
+  finishRename(cx) {
+    const r = this.renaming, s = this.state;
+    if (!r || s.status !== "ok") return;
+    const from = r.name, to = r.input.value().trim();
+    this.renaming = null;
+    if (to === from) { cx.notify(); return; }
+    const rawProfile = s.config.profiles?.[from];
+    const platform = herdrWindow().platform;
+    this.saveConfig((raw) => edits.renameProfile(raw, from, to), cx, {
+      after: async () => {
+        const runner = from === s.profile.name ? s.runner : createRunner(rawProfile?.runner ?? defaultRunner(platform));
+        const accounts = rawProfile?.accounts ?? [];
+        try { await renameProfileData({ name: from, accounts }, to, { run: runner.run, fetch, profile: from }); } catch (e) {
+          this.settingsError = `Renamed, but ${e.message ?? e}. Sign in again for ${to}.`;
+        }
+        try {
+          const cache = await readTextFile(cacheFile(appHome(), from));
+          if (cache != null) await writeTextFile(cacheFile(appHome(), to), cache, null);
+        } catch { /* the cache is rebuilt on the next refresh */ }
+        const key = (k) => `wayfinder.${k}.${from}`;
+        const b = load(key("board"), null);
+        if (b != null) save(`wayfinder.board.${to}`, b);
+        for (const x of rawProfile?.boards ?? []) {
+          const m = load(`wayfinder.mine.${from}.${x.id}`, null);
+          if (m != null) save(`wayfinder.mine.${to}.${x.id}`, m);
+        }
+        for (const a of accounts) {
+          const f = load(`wayfinder.settings.fold.${from}.${a.id}`, null);
+          if (f != null) save(`wayfinder.settings.fold.${to}.${a.id}`, f);
+        }
+      },
+    });
   }
 
   // What each Account can offer: its Boards and its repos. Loaded once per open, or on Refresh.
@@ -466,7 +527,7 @@ export default class Wayfinder extends View {
   }
 
   // Applies `change(rawConfig)` and writes it. A change that leaves the config invalid is refused.
-  saveConfig(change, cx) {
+  saveConfig(change, cx, { after = null } = {}) {
     const s = this.state;
     const base = s.status === "ok" ? s.config : s.status === "missing" ? {} : null;
     if (!base) return;
@@ -480,7 +541,7 @@ export default class Wayfinder extends View {
     const expected = s.status === "ok" ? s.text : null;
     // Another active Profile or runner needs a full reload. Otherwise the change applies in place.
     const reload = s.status !== "ok" || parsed.profile.name !== s.profile.name || parsed.profile.runner !== s.profile.runner;
-    if (!reload) {
+    if (!reload && !after) {
       this.state = { ...s, text, config: parsed.config, profile: parsed.profile, profileNames: parsed.profileNames };
       if (this.prs) this.prs = { ...this.prs, status: "cached" }; // followed repos may have changed: refetch on show
     }
@@ -489,7 +550,8 @@ export default class Wayfinder extends View {
         this.settingsError = `Couldn't save (${e.message ?? e}). The file changed elsewhere, so it was read again.`;
         this.reload(cx); cx.notify(); return;
       }
-      if (reload) { this.reload(cx); cx.notify(); }
+      if (after) await after();
+      if (reload || after) { this.reload(cx); cx.notify(); }
     });
     cx.notify();
   }
@@ -512,21 +574,31 @@ export default class Wayfinder extends View {
     const out = [];
     if (this.settingsError) out.push(note(this.settingsError, t.blocked));
 
-    // Profiles
+    // Profiles: order is the switcher's order.
     const names = s.profileNames ?? [];
-    out.push(heading("Profiles"), note("Each Profile is a separate set of Accounts and Boards. Wayfinder shows one at a time."));
+    out.push(heading("Profiles"), note("Each Profile is a separate set of Accounts and Boards. Wayfinder shows one at a time, and the switcher lists them in this order."));
     out.push(card("wf-set-profiles", [
-      ...names.map((n) => h_flex().id(`wf-set-p-${n}`).gap(8).items_center()
-        .child(div().flex_1().text_size(12).text_color(t.foreground).child(n === p?.name ? `${n} (shown)` : n))
-        .when(n !== p?.name, (el) => el.child(button(`wf-use-${n}`, "Show", t, (cx) => cx.spawn(async (cx) => { await this.switchProfile(n, cx); cx.notify(); }))))
-        .when(names.length > 1, (el) => el.child(this.removeButton(`profile-${n}`, t, (cx) => this.saveConfig((raw) => edits.removeProfile(raw, n), cx))))),
+      ...names.map((n, i) => {
+        const renaming = this.renaming?.name === n;
+        return h_flex().id(`wf-set-p-${n}`).gap(6).items_center()
+          .when(renaming, (el) => el.child(field(this.renaming.input, t, 200))
+            .child(button(`wf-ren-ok-${n}`, "Save", t, (cx) => this.finishRename(cx), { on: true }))
+            .child(button(`wf-ren-no-${n}`, "Cancel", t, (cx) => { this.renaming = null; cx.notify(); }))
+            .child(div().flex_1()))
+          .when(!renaming, (el) => el.child(div().flex_1().text_size(12).text_color(t.foreground).child(n === p?.name ? `${n} (shown)` : n))
+            .when(n !== p?.name, (r) => r.child(button(`wf-use-${n}`, "Show", t, (cx) => cx.spawn(async (cx) => { await this.switchProfile(n, cx); cx.notify(); }))))
+            .child(button(`wf-ren-${n}`, "Rename", t, (cx) => { this.startRename(n); cx.notify(); })))
+          .child(button(`wf-pu-${n}`, "↑", t, (cx) => this.saveConfig((raw) => edits.moveProfile(raw, n, -1), cx)))
+          .child(button(`wf-pd-${n}`, "↓", t, (cx) => this.saveConfig((raw) => edits.moveProfile(raw, n, 1), cx)))
+          .when(names.length > 1, (el) => el.child(this.removeButton(`profile-${n}`, t, (cx) => this.saveConfig((raw) => edits.removeProfile(raw, n), cx))));
+      }),
       h_flex().gap(8).items_center().child(field(this.inputs.profile, t, 200))
         .child(button("wf-add-profile", "Add profile", t, (cx) => {
           const name = this.inputs.profile.value().trim();
           this.saveConfig((raw) => {
-            const out = edits.addProfile(raw, name);
-            if (!names.length) out.activeProfile = name;
-            return out;
+            const next = edits.addProfile(raw, name);
+            if (!names.length) next.activeProfile = name;
+            return next;
           }, cx);
           this.inputs.profile.set_value("");
         })),
@@ -550,56 +622,73 @@ export default class Wayfinder extends View {
       h_flex().gap(8).items_center().child(field(this.inputs.gh, t))
         .child(button("wf-add-gh", "Add GitHub account", t, (cx) => {
           this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "github", login: this.inputs.gh.value().trim() }), cx);
-          this.inputs.gh.set_value(""); this.checkSignIn(cx); this.loadSettings(cx);
+          this.inputs.gh.set_value(""); this.ensureInputs(); this.checkSignIn(cx); this.loadSettings(cx);
         })),
       h_flex().gap(8).items_center().child(field(this.inputs.ado, t))
         .child(button("wf-add-ado", "Add Azure account", t, (cx) => {
           this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "azure", org: this.inputs.ado.value().trim() }), cx);
-          this.inputs.ado.set_value(""); this.checkSignIn(cx); this.loadSettings(cx);
+          this.inputs.ado.set_value(""); this.ensureInputs(); this.checkSignIn(cx); this.loadSettings(cx);
         })),
     ]));
 
-    // Boards
-    out.push(heading("Boards"), note("Tick the Boards to follow. With two or more, a switcher shows above the Board."));
-    for (const a of p.accounts.filter((x) => can(providerFor(x), "boards"))) {
-      const f = this.found[a.id]?.boards;
-      const found = f?.data ?? [];
+    // Boards: the followed ones as Active Boards, then each Account's others (foldable, searchable).
+    const boardAccounts = p.accounts.filter((x) => can(providerFor(x), "boards"));
+    const match = (a) => {
+      const found = this.found[a.id]?.boards?.data ?? [];
       const mine = p.boards.filter((b) => b.account === a.id);
       const cfgFor = (d) => mine.find((b) => edits.showsBoard(b, a.id, d, Boolean(d.teamDefault)));
-      const unmatched = mine.filter((b) => !found.some((d) => cfgFor(d) === b));
-      const row = (key, on, label, toggle, b) => h_flex().id(`wf-set-b-${key}`).gap(8).items_center()
-        .child(checkRow(`wf-set-bc-${key}`, on, label, t, toggle))
-        .when(Boolean(b) && can(providerFor(a), "statuses"), (el) => el.child(button(`wf-st-${key}`, this.statusOpen === b.id ? "Hide statuses" : "Statuses",
-          t, (cx) => { this.statusOpen = this.statusOpen === b.id ? null : b.id; if (this.statusOpen && !this.statusLists[b.id]) this.loadStatuses(b.id, cx); cx.notify(); },
-          { on: this.statusOpen === b.id || Boolean(b?.trackedStatuses?.length) })));
-      const rows = [];
-      for (const [i, d] of found.entries()) {
-        const b = cfgFor(d);
-        rows.push(row(`${a.id}-${i}`, Boolean(b), d.title, (cx) => this.saveConfig((raw) => (b ? edits.unfollowBoard(raw, p.name, b.id) : edits.followBoard(raw, p.name, a.id, d)), cx), b));
-        if (b && this.statusOpen === b.id) rows.push(this.statusEditor(t, p, b));
-      }
-      for (const b of unmatched) {
-        rows.push(row(`${a.id}-cfg-${b.id}`, true, b.name ?? b.id, (cx) => this.saveConfig((raw) => edits.unfollowBoard(raw, p.name, b.id), cx), b));
-        if (this.statusOpen === b.id) rows.push(this.statusEditor(t, p, b));
-      }
+      return { found, cfgFor };
+    };
+    out.push(heading("Active Boards"), note("The Boards Wayfinder shows. With two or more, a switcher shows above the Board."));
+    const active = p.boards.map((b) => {
+      const a = p.accounts.find((x) => x.id === b.account);
+      const open = this.statusOpen === b.id;
+      const tracked = b.trackedStatuses?.length ?? 0;
+      return [
+        h_flex().id(`wf-set-ab-${b.id}`).gap(8).items_center()
+          .child(checkRow(`wf-set-abc-${b.id}`, true, `${b.name ?? b.id}  ·  ${b.account}`, t, (cx) => this.saveConfig((raw) => edits.unfollowBoard(raw, p.name, b.id), cx)))
+          .when(Boolean(a) && can(providerFor(a), "statuses"), (el) => el.child(button(`wf-st-${b.id}`,
+            open ? "Done" : tracked ? `Edit displayed statuses (${tracked})` : "Edit displayed statuses", t,
+            (cx) => { this.statusOpen = open ? null : b.id; if (this.statusOpen && !this.statusLists[b.id]) this.loadStatuses(b.id, cx); cx.notify(); },
+            { on: open || tracked > 0 }))),
+        ...(open ? [this.statusEditor(t, p, b)] : []),
+      ];
+    }).flat();
+    out.push(card("wf-set-active", active.length ? active : [note("No Boards yet. Tick one below.")]));
+
+    out.push(heading("Other Boards"));
+    for (const a of boardAccounts) {
+      const f = this.found[a.id]?.boards;
+      const { found, cfgFor } = match(a);
+      const folded = load(this.foldKey(a), "0") === "1";
+      const search = this.inputs.boards[a.id];
+      const others = edits.matchBoards(found.filter((d) => !cfgFor(d)), search?.value());
+      const total = found.filter((d) => !cfgFor(d)).length;
       out.push(card(`wf-set-boards-${a.id}`, [
-        note(who(a)),
-        ...(f?.status === "loading" ? [note("Finding boards…")] : []),
-        ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
-        ...(f?.status === "ok" && !found.length ? [note("No boards found.")] : []),
-        ...rows,
+        h_flex().id(`wf-set-bh-${a.id}`).gap(8).items_center().cursor_pointer()
+          .on_mouse_down("left", stop).on_click((_e, cx) => { save(this.foldKey(a), folded ? "0" : "1"); cx.notify(); })
+          .child(div().w(12).text_size(11).text_color(t.dim).child(folded ? "▸" : "▾"))
+          .child(div().flex_1().text_size(12).text_color(t.muted).child(`${who(a)} · ${f?.status === "ok" ? `${total} more` : ""}`)),
+        ...(folded ? [] : [
+          ...(search ? [field(search, t)] : []),
+          ...(f?.status === "loading" ? [note("Finding boards…")] : []),
+          ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
+          ...(f?.status === "ok" && !total ? [note(found.length ? "All followed." : "No boards found.")] : []),
+          ...(total && !others.length ? [note("No match.")] : []),
+          ...others.map((d) => h_flex().child(checkRow(`wf-set-bo-${a.id}-${found.indexOf(d)}`, false, d.title, t,
+            (cx) => this.saveConfig((raw) => edits.followBoard(raw, p.name, a.id, d), cx)))),
+        ]),
       ]));
     }
 
     // Pull Request repos
     out.push(heading("Pull Request repos"), note("All: every repo's Pull Requests. Selected: only the ticked repos. Ignored: every repo except the ticked ones."));
-    out.push(h_flex().gap(8).items_center().child(field(this.inputs.repo, t)));
-    const q = this.inputs.repo.value();
     for (const a of p.accounts.filter((x) => can(providerFor(x), "repos"))) {
       const f = this.found[a.id]?.repos;
       const rf = repoFilter(a);
       const ticked = rf.mode === "all" ? [] : rf[rf.mode];
-      const { rows, hidden } = edits.repoRows(f?.data ?? [], ticked, q);
+      const search = this.inputs.repos[a.id];
+      const { rows, hidden } = edits.repoRows(f?.data ?? [], ticked, search?.value());
       const summary = rf.mode === "all" ? "all repos"
         : rf.mode === "selected" ? (ticked.length ? `only ${ticked.length} selected` : "nothing selected, so no Pull Requests")
         : `all but ${ticked.length} ignored`;
@@ -609,11 +698,12 @@ export default class Wayfinder extends View {
             (mode, cx) => this.saveConfig((raw) => edits.setRepoMode(raw, p.name, a.id, mode), cx)))
           .child(note(`${who(a)}: ${summary}`)),
         ...(rf.mode === "all" ? [] : [
+          ...(search ? [field(search, t)] : []),
           ...(f?.status === "loading" ? [note("Listing repos…")] : []),
           ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
           ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, ticked.includes(r), r, t,
             (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
-          ...(hidden ? [note(`${hidden} more match. Type to narrow the list.`)] : []),
+          ...(hidden ? [note(`${hidden} more match. Search to narrow the list.`)] : []),
         ]),
       ]));
     }

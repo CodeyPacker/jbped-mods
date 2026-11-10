@@ -80,3 +80,9 @@ export async function boardStatuses(profile, boardCfg, io, registry = PROVIDERS)
   if (!can(provider, "statuses")) throw new Error(`Listing statuses on ${account.provider} isn't supported yet`);
   return provider.statuses(account, boardCfg.ref, io);
 }
+
+// A Profile rename: each Provider the Profile uses moves what it keeps under the old name.
+export async function renameProfileData(profile, to, io, registry = PROVIDERS) {
+  const providers = new Set(profile.accounts.map((a) => providerFor(a, registry)).filter((p) => typeof p?.renameProfile === "function"));
+  for (const p of providers) await p.renameProfile(profile.name, to, io);
+}

@@ -29,6 +29,11 @@ export const azDir = (profile) => String(profile ?? "default").replace(/[^A-Za-z
 export const azArgs = (profile, args) => ["-c", AZ_SH, "wayfinder-az", azDir(profile), "az", ...args];
 const az = (io, args, timeout = 30000) => io.run("sh", azArgs(io.profile, args), { timeout });
 
+// Moves a Profile's az login folder to its new name (a Profile rename). Nothing to move, or a folder
+// already there, leaves both as they are. A fixed script: the names are argv.
+const MV_SH = 'b="$HOME/.config/wayfinder/azure"; if [ -d "$b/$1" ] && [ ! -e "$b/$2" ]; then mv "$b/$1" "$b/$2"; fi';
+export const moveLoginArgs = (from, to) => ["-c", MV_SH, "wayfinder-mv", azDir(from), azDir(to)];
+
 export function loginCommand(profile) {
   const d = `~/.config/wayfinder/azure/${azDir(profile)}`;
   return `AZURE_CONFIG_DIR=${d} AZURE_DEVOPS_EXT_CONFIG_DIR=${d}/azuredevops az login --allow-no-subscriptions`;
@@ -231,6 +236,12 @@ export const azure = {
       org, project: ref.project, columnField: ref.columnField ?? null, parent,
       comments: mapComments(page, webUrl(org, ref.project, id)), pullRequests: [...prs, ...links.github],
     });
+  },
+
+  // Called when a Profile is renamed: its az login folder follows.
+  async renameProfile(from, to, io) {
+    const r = await io.run("sh", moveLoginArgs(from, to), { timeout: 20000 });
+    if (r.code !== 0) throw new Error(`Couldn't move the az login: ${firstLine(r)}`);
   },
 
   async signInState(_account, io) {
