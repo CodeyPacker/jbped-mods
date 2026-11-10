@@ -72,6 +72,7 @@ function checkRow(id, on, label, t, onClick) {
 }
 
 // The wrapper keeps the click from reaching the root, whose mouse-down would take the focus back.
+const FOLD_PARTS = ["", "boards", "repos", "repos.others"];
 const field = (state, t, w = 260) => div().on_mouse_down("left", stop)
   .child(Input.new(state).w(w).h(28).px(8).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_size(12).text_color(t.foreground));
 
@@ -444,8 +445,9 @@ export default class Wayfinder extends View {
     }
   }
 
-  // Whether an Account's list of other Boards is folded away. Remembered per Profile and Account.
-  foldKey(a) { return `wayfinder.settings.fold.${this.profile.name}.${a.id}`; }
+  // Whether part of an Account's Settings is folded away. Remembered per Profile and Account.
+  // "" is the other Boards, "boards" and "repos" the whole cards, "repos.others" the other repos.
+  foldKey(a, part = "", profile = this.profile.name) { return `wayfinder.settings.fold.${profile}.${a.id}${part ? `.${part}` : ""}`; }
 
   startRename(name) {
     const input = InputState.new({ value: name, placeholder: "profile name" });
@@ -484,8 +486,10 @@ export default class Wayfinder extends View {
           if (m != null) save(`wayfinder.mine.${to}.${x.id}`, m);
         }
         for (const a of accounts) {
-          const f = load(`wayfinder.settings.fold.${from}.${a.id}`, null);
-          if (f != null) save(`wayfinder.settings.fold.${to}.${a.id}`, f);
+          for (const part of FOLD_PARTS) {
+            const f = load(this.foldKey(a, part, from), null);
+            if (f != null) save(this.foldKey(a, part, to), f);
+          }
         }
       },
     });
@@ -573,6 +577,15 @@ export default class Wayfinder extends View {
     const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
     const card = (id, kids) => v_flex().id(id).p(12).gap(6).rounded(8).bg(t.surface).border_1().border_color(t.border).children(kids);
     const who = (a) => `${a.id} · ${a.provider === "azure" ? a.org : a.login}`;
+    const line = () => div().h(1).my(4).bg(t.border);
+    // A clickable row that folds what follows it. Returns [row, folded].
+    const fold = (id, a, part, label, color = t.muted) => {
+      const folded = load(this.foldKey(a, part), "0") === "1";
+      return [h_flex().id(id).gap(8).items_center().cursor_pointer()
+        .on_mouse_down("left", stop).on_click((_e, cx) => { save(this.foldKey(a, part), folded ? "0" : "1"); cx.notify(); })
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(color).child(label))
+        .child(div().text_size(12).text_color(t.dim).hover((x) => x.text_color(t.foreground)).child(folded ? "Show" : "Hide")), folded];
+    };
     const out = [];
     if (this.settingsError) out.push(note(this.settingsError, t.blocked));
 
@@ -640,7 +653,6 @@ export default class Wayfinder extends View {
       const found = f?.data ?? [];
       const mine = p.boards.filter((b) => b.account === a.id);
       const cfgFor = (d) => mine.find((b) => edits.showsBoard(b, a.id, d, Boolean(d.teamDefault)));
-      const folded = load(this.foldKey(a), "0") === "1";
       const search = this.inputs.boards[a.id];
       const unfollowed = found.filter((d) => !cfgFor(d));
       const others = edits.matchBoards(unfollowed, search?.value());
@@ -657,22 +669,23 @@ export default class Wayfinder extends View {
           ...(open ? [this.statusEditor(t, p, b)] : []),
         ];
       });
+      const [cardRow, cardFolded] = fold(`wf-set-bc-${a.id}`, a, "boards", `${who(a)} · ${mine.length} followed`, t.foreground);
+      const [othersRow, folded] = fold(`wf-set-bh-${a.id}`, a, "", `Other Boards${f?.status === "ok" ? ` · ${unfollowed.length}` : ""}`);
       out.push(card(`wf-set-boards-${a.id}`, [
-        div().text_size(12).text_color(t.muted).child(who(a)),
-        ...(active.length ? active : [note("No Boards followed. Tick one below.")]),
-        div().h(1).my(4).bg(t.border),
-        h_flex().id(`wf-set-bh-${a.id}`).gap(8).items_center().cursor_pointer()
-          .on_mouse_down("left", stop).on_click((_e, cx) => { save(this.foldKey(a), folded ? "0" : "1"); cx.notify(); })
-          .child(div().flex_1().text_size(12).text_color(t.muted).child(`Other Boards${f?.status === "ok" ? ` · ${unfollowed.length}` : ""}`))
-          .child(div().text_size(12).text_color(t.dim).hover((x) => x.text_color(t.foreground)).child(folded ? "Show" : "Hide")),
-        ...(folded ? [] : [
-          ...(search ? [field(search, t)] : []),
-          ...(f?.status === "loading" ? [note("Finding boards…")] : []),
-          ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
-          ...(f?.status === "ok" && !unfollowed.length ? [note(found.length ? "All followed." : "No boards found.")] : []),
-          ...(unfollowed.length && !others.length ? [note("No match.")] : []),
-          ...others.map((d) => h_flex().child(checkRow(`wf-set-bo-${a.id}-${found.indexOf(d)}`, false, d.title, t,
-            (cx) => this.saveConfig((raw) => edits.followBoard(raw, p.name, a.id, d), cx)))),
+        cardRow,
+        ...(cardFolded ? [] : [
+          ...(active.length ? active : [note("No Boards followed. Tick one below.")]),
+          line(),
+          othersRow,
+          ...(folded ? [] : [
+            ...(search ? [field(search, t)] : []),
+            ...(f?.status === "loading" ? [note("Finding boards…")] : []),
+            ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
+            ...(f?.status === "ok" && !unfollowed.length ? [note(found.length ? "All followed." : "No boards found.")] : []),
+            ...(unfollowed.length && !others.length ? [note("No match.")] : []),
+            ...others.map((d) => h_flex().child(checkRow(`wf-set-bo-${a.id}-${found.indexOf(d)}`, false, d.title, t,
+              (cx) => this.saveConfig((raw) => edits.followBoard(raw, p.name, a.id, d), cx)))),
+          ]),
         ]),
       ]));
     }
@@ -684,22 +697,39 @@ export default class Wayfinder extends View {
       const rf = repoFilter(a);
       const ticked = rf.mode === "all" ? [] : rf[rf.mode];
       const search = this.inputs.repos[a.id];
-      const { rows, hidden } = edits.repoRows(f?.data ?? [], ticked, search?.value());
+      const all = f?.data ?? [];
+      // The ticked repos first, then the others to search. A ticked repo no longer listed still shows.
+      const { rows, hidden } = edits.repoRows(all.filter((r) => !ticked.includes(r)), [], search?.value());
+      const untickedCount = all.filter((r) => !ticked.includes(r)).length;
       const summary = rf.mode === "all" ? "all repos"
         : rf.mode === "selected" ? (ticked.length ? `only ${ticked.length} selected` : "nothing selected, so no Pull Requests")
         : `all but ${ticked.length} ignored`;
+      const [cardRow, cardFolded] = fold(`wf-set-rc-${a.id}`, a, "repos", `${who(a)} · ${summary}`, t.foreground);
+      const [othersRow, folded] = fold(`wf-set-rh-${a.id}`, a, "repos.others", `Other repos${f?.status === "ok" ? ` · ${untickedCount}` : ""}`);
+      const tickLabel = rf.mode === "selected" ? "Selected repos" : "Ignored repos";
       out.push(card(`wf-set-repos-${a.id}`, [
-        h_flex().gap(10).items_center()
-          .child(segmented(`wf-rm-${a.id}`, [["all", "All"], ["selected", "Selected"], ["ignored", "Ignored"]], rf.mode, t,
-            (mode, cx) => this.saveConfig((raw) => edits.setRepoMode(raw, p.name, a.id, mode), cx)))
-          .child(note(`${who(a)}: ${summary}`)),
-        ...(rf.mode === "all" ? [] : [
-          ...(search ? [field(search, t)] : []),
-          ...(f?.status === "loading" ? [note("Listing repos…")] : []),
-          ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
-          ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, ticked.includes(r), r, t,
-            (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
-          ...(hidden ? [note(`${hidden} more match. Search to narrow the list.`)] : []),
+        cardRow,
+        ...(cardFolded ? [] : [
+          h_flex().child(segmented(`wf-rm-${a.id}`, [["all", "All"], ["selected", "Selected"], ["ignored", "Ignored"]], rf.mode, t,
+            (mode, cx) => this.saveConfig((raw) => edits.setRepoMode(raw, p.name, a.id, mode), cx))),
+          ...(rf.mode === "all" ? [] : [
+            note(tickLabel),
+            ...(ticked.length ? ticked.map((r) => h_flex().child(checkRow(`wf-set-rt-${a.id}-${r}`, true, r, t,
+              (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx))))
+              : [note(rf.mode === "selected" ? "None selected. Tick one below." : "None ignored. Tick one below.")]),
+            line(),
+            othersRow,
+            ...(folded ? [] : [
+              ...(search ? [field(search, t)] : []),
+              ...(f?.status === "loading" ? [note("Listing repos…")] : []),
+              ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
+              ...(f?.status === "ok" && !untickedCount ? [note("All ticked.")] : []),
+              ...(untickedCount && !rows.length ? [note("No match.")] : []),
+              ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, false, r, t,
+                (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
+              ...(hidden ? [note(`${hidden} more match. Search to narrow the list.`)] : []),
+            ]),
+          ]),
         ]),
       ]));
     }
