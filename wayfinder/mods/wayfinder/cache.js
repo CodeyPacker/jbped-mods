@@ -1,5 +1,5 @@
 // The cache (D25): each Profile's last Board data in data/wayfinder-cache-<profile>.json, shown at
-// once on open and replaced by a background refresh. Pull Request data joins it later.
+// once on open and replaced by a background refresh. Pull Requests are cached the same way, once per Profile.
 export const POLL_MS = 30 * 60 * 1000; // refresh while shown
 export const SHOW_GAP_MS = 60 * 1000; // a refresh on show skips data newer than this
 const VERSION = 1;
@@ -34,6 +34,19 @@ export function withBoard(cache, boards, b, data, at) {
   const prev = out[b.id];
   if (!(prev && prev.at > at)) out[b.id] = { key: boardKey(b), at, data };
   return { ...cache, version: VERSION, boards: out };
+}
+
+// PR data is valid only for the same Accounts: `key` names them (prsKey).
+export const prsKey = (accounts) => JSON.stringify(accounts.map((a) => [a.id, a.provider, a.login ?? a.org ?? null]));
+
+export function cachedPrs(cache, key) {
+  const e = cache.prs;
+  return e && e.key === key && typeof e.at === "number" && Array.isArray(e.data) ? { at: e.at, data: e.data } : null;
+}
+
+export function withPrs(cache, key, data, at) {
+  if (cache.prs?.key === key && cache.prs.at > at) return cache;
+  return { ...cache, version: VERSION, prs: { key, at, data } };
 }
 
 export function formatAge(ms) {

@@ -39,6 +39,17 @@ export async function signInStates(profile, io, registry = PROVIDERS) {
   return out;
 }
 
+// Every Account's Pull Requests, in Profile order: [{ account (id), ...PullRequests } | { account, error }].
+// Accounts whose Provider has none are left out, and one failing never stops the others.
+export async function loadPullRequests(profile, io, registry = PROVIDERS) {
+  const accounts = profile.accounts.filter((a) => can(providerFor(a, registry), "pullRequests"));
+  return Promise.all(accounts.map(async (account) => {
+    try { return { account: account.id, ...(await providerFor(account, registry).pullRequests(account, io)) }; } catch (e) {
+      return { account: account.id, error: String(e.message ?? e) };
+    }
+  }));
+}
+
 // The detail panel's Ticket for a TicketSummary on that Board.
 export async function loadTicket(profile, boardCfg, summary, io, registry = PROVIDERS) {
   const { account, provider } = resolve(profile, boardCfg, registry);

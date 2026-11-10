@@ -169,6 +169,28 @@ export function mapTicket(data, ref) {
   };
 }
 
+// Both PR sections in one request: search allows 30 requests a minute.
+const PR_LIST_FIELDS = `... on PullRequest { id number title url isDraft updatedAt author { login ... on User { name } } repository { nameWithOwner } }`;
+export const PRS_QUERY = `query($mine: String!, $review: String!) {
+  viewer { login }
+  mine: search(type: ISSUE, query: $mine, first: ${PAGE}) { issueCount nodes { ${PR_LIST_FIELDS} } }
+  review: search(type: ISSUE, query: $review, first: ${PAGE}) { issueCount nodes { ${PR_LIST_FIELDS} } }
+}`;
+
+export const prSearches = (login) => ({
+  mine: `is:pr is:open archived:false author:${login} sort:updated-desc`,
+  review: `is:pr is:open archived:false review-requested:${login} sort:updated-desc`,
+});
+
+export function mapPrs(nodes) {
+  return (nodes ?? []).filter((n) => n?.number != null && n.repository).map((n) => ({
+    key: n.id, id: `${n.repository.nameWithOwner.split("/")[1]}#${n.number}`, title: n.title ?? "", url: n.url ?? null,
+    repo: n.repository.nameWithOwner, draft: Boolean(n.isDraft),
+    author: { id: n.author?.login ?? "ghost", name: n.author?.name || n.author?.login || "ghost" },
+    updatedAt: n.updatedAt ?? null,
+  }));
+}
+
 export function projectOf(data) {
   return data?.repositoryOwner?.projectV2 ?? null;
 }
@@ -203,7 +225,7 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "signInState"],
+  capabilities: ["boards", "board", "ticket", "pullRequests", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -237,6 +259,16 @@ export const github = {
     const tickets = mapItems(nodes);
     for (const t of tickets) Object.assign(t.ref, { statusField: vars.status, priorityField: vars.priority });
     return { title: project.title, url: project.url, me, columns: mapColumns(project.field, tickets), tickets };
+  },
+
+  async pullRequests(account, io) {
+    if (!GH_LOGIN.test(String(account.login))) throw new Error(`"${account.login}" isn't a GitHub user name`);
+    const d = await graphql(account, io, PRS_QUERY, prSearches(account.login));
+    const mine = mapPrs(d.mine?.nodes), needsReview = mapPrs(d.review?.nodes);
+    return {
+      me: d.viewer.login, mine, needsReview,
+      more: { mine: Math.max(0, (d.mine?.issueCount ?? 0) - mine.length), needsReview: Math.max(0, (d.review?.issueCount ?? 0) - needsReview.length) },
+    };
   },
 
   // ref: a TicketSummary's ref from board().

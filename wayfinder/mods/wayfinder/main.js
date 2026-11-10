@@ -9,10 +9,10 @@ import { v_flex, h_flex, TextView } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, signInStates } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates } from "./flow.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, initials, trackColumns } from "./providers/contract.js";
-import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, formatAge, isShown, due } from "./cache.js";
+import { byColumn, byRepo, initials, trackColumns } from "./providers/contract.js";
+import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
@@ -80,6 +80,17 @@ function card(tk, t, selected, onClick) {
         .rounded(10).bg(t.raised).border_1().border_color(t.border).text_size(9).font_semibold().text_color(t.muted).child(initials(a.name))))));
 }
 
+function prRow(pr, t) {
+  return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
+    .child(v_flex().flex_1().min_w(0).gap(4)
+      .child(h_flex().gap(8).items_center().min_w(0)
+        .when(pr.draft, (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
+        .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
+      .child(div().text_size(11).text_color(t.dim).truncate()
+        .child(`${pr.id} · ${pr.author.name}${pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}` : ""}`)))
+    .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
+}
+
 // Loading placeholders: grey bars in the shape of what's coming, pulsing (native animation, no timer).
 const bar = (t, w, h = 10) => div().w(w).h(h).flex_none().rounded(4).bg(t.raised);
 const pulse = (el) => el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
@@ -116,6 +127,7 @@ export default class Wayfinder extends View {
     this.lastRefresh = null;
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
     this.tickets = {}; // ticket key -> { status, data, error }
+    this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
     this.reload(cx);
     cx.timer.every(60_000, (cx) => { if (this.watch(cx)) cx.notify(); }); // reads the layout only: no requests
     cx.spawn(async (cx) => {
@@ -160,11 +172,13 @@ export default class Wayfinder extends View {
     return true;
   }
 
-  // Sign-in states and the selected Board (or the CLI checks without one), plus a Ticket a reload left open.
+  // Sign-in states and the shown view's data: the selected Board (or the CLI checks without one) or the
+  // Pull Requests. Plus a Ticket a reload left open.
   refresh(cx) {
     this.lastRefresh = Date.now();
     this.checkSignIn(cx);
-    if (this.board) this.fetchBoard(this.board, cx);
+    if (this.view === "prs") this.fetchPrs(cx);
+    else if (this.board) this.fetchBoard(this.board, cx);
     else cx.spawn((cx) => this.check(cx));
     if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
   }
@@ -189,6 +203,7 @@ export default class Wayfinder extends View {
     this.state = { status: "loading" };
     this.boards = {};
     this.tickets = {};
+    this.prs = null;
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     this.lastRefresh = null;
     if (this.selected) this.fetchTicketLater = true;
@@ -213,6 +228,8 @@ export default class Wayfinder extends View {
           const c = cachedBoard(cache, b);
           if (c) this.boards[b.id] = { status: "cached", ...c };
         }
+        const cp = cachedPrs(cache, prsKey(parsed.profile.accounts));
+        if (cp) this.prs = { status: "cached", ...cp };
       }
       cx.notify();
       if (this.state.status === "ok") this.watch(cx);
@@ -236,17 +253,42 @@ export default class Wayfinder extends View {
       const at = Date.now();
       this.boards[b.id] = { status: "ok", data, at, tried };
       cx.notify();
-      await this.saveCache(profile, b, data, at);
+      await this.saveCache(profile, (c) => withBoard(c, profile.boards, b, data, at));
     });
   }
 
+  // One request per Account. Accounts that fail show their error and the rest still list (D19).
+  fetchPrs(cx) {
+    const prev = this.prs, profile = this.profile, tried = Date.now();
+    this.prs = { status: "loading", data: prev?.data ?? null, at: prev?.at ?? null, tried };
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      const data = await loadPullRequests(profile, io);
+      if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+      const at = Date.now();
+      this.prs = { status: "ok", data, at, tried };
+      cx.notify();
+      await this.saveCache(profile, (c) => withPrs(c, prsKey(profile.accounts), data, at));
+    });
+  }
+
+  // The view's data, when it has none yet, only a cached copy, or one older than a minute.
+  showView(key, cx) {
+    this.view = key; save(VIEW_KEY, key);
+    if (!this.profile) return;
+    const e = key === "prs" ? this.prs : this.board && this.boards[this.board.id];
+    const stale = !e || e.status === "cached" || (e.status !== "loading" && due(e.tried, Date.now(), { showing: true }));
+    if (key === "prs" && stale) this.fetchPrs(cx);
+    else if (key === "board" && this.board && stale) this.fetchBoard(this.board, cx);
+  }
+
   // Best effort: a failed write leaves the old cache, and the next refresh writes again.
-  async saveCache(profile, b, data, at) {
+  async saveCache(profile, update) {
     const path = cacheFile(appHome(), profile.name);
     for (let i = 0; i < 2; i++) { // a second try when another copy wrote in between
       let cur = null;
       try { cur = await readTextFile(path); } catch { /* unreadable: start over */ }
-      try { await writeTextFile(path, serializeCache(withBoard(parseCache(cur), profile.boards, b, data, at)), cur); return; } catch { /* stale snapshot */ }
+      try { await writeTextFile(path, serializeCache(update(parseCache(cur))), cur); return; } catch { /* stale snapshot */ }
     }
   }
 
@@ -353,7 +395,7 @@ export default class Wayfinder extends View {
     return h_flex().h(44).px(12).gap(10).flex_none().items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Wayfinder"))
       .child(segmented("wf-view", [["board", "Board"], ["prs", "Pull Requests"]], this.view, t, (key, cx) => {
-        this.view = key; save(VIEW_KEY, key); cx.notify();
+        this.showView(key, cx); cx.notify();
       }))
       .child(div().flex_1())
       .when(Boolean(this.profile) && this.state.profileNames.length > 1, (el) => el.child(segmented("wf-profiles",
@@ -475,7 +517,44 @@ export default class Wayfinder extends View {
     }
     if (s.status === "invalid") return this.message(t, "The configuration has problems", [s.path, ...s.errors]);
     if (this.view === "board") return this.boardView(t);
-    return this.message(t, "Pull Requests", ["Pull Requests arrive in a later step."]);
+    return this.prsView(t);
+  }
+
+  // Two sections (D6), each grouped by Account, then repo.
+  prsView(t) {
+    const p = this.profile, entry = this.prs ?? { status: "loading" };
+    const bar = h_flex().h(40).px(16).gap(10).flex_none().items_center()
+      .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Pull Requests"))
+      .child(div().flex_1())
+      .when(entry.status === "loading" || Boolean(entry.at), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim)
+        .child(entry.status === "loading" ? (entry.data ? "Refreshing…" : "Loading…") : `Updated ${formatAge(Date.now() - entry.at)}`)));
+    const signedOut = (id) => this.signIn?.[id]?.ok === false;
+    const lists = entry.data ?? [];
+    const ok = lists.filter((l) => !l.error && !signedOut(l.account));
+    const accounts = new Map(p.accounts.map((a) => [a.id, a]));
+    const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
+    const section = (title, field) => {
+      const total = ok.reduce((n, l) => n + l[field].length, 0);
+      const groups = ok.filter((l) => l[field].length > 0).flatMap((l) => {
+        const a = accounts.get(l.account);
+        return [
+          ...(ok.length > 1 ? [div().pt(4).text_size(12).text_color(t.dim).child(`${l.account} · ${a?.login ?? a?.org ?? ""}`)] : []),
+          ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
+            .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
+            .children(g.prs.map((pr) => prRow(pr, t)))),
+          ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
+        ];
+      });
+      return v_flex().gap(8).child(div().text_size(12).font_semibold().text_color(t.muted).child(`${title} (${total})`))
+        .children(total === 0 ? [note("None")] : groups);
+    };
+    const top = [
+      ...p.accounts.filter((a) => signedOut(a.id)).map((a) => this.signInCard(t, a, this.signIn[a.id])),
+      ...lists.filter((l) => l.error && !signedOut(l.account)).map((l) => note(`${l.account}: couldn't load Pull Requests: ${l.error}`, t.blocked)),
+    ];
+    const body = entry.data ? [section("Mine", "mine"), section("Needs my review", "needsReview")] : (entry.status === "loading" ? [] : [note("No Pull Requests yet.")]);
+    return v_flex().size_full().min_h(0).child(bar)
+      .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body]));
   }
 
   render(cx) {

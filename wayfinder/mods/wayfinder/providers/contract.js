@@ -38,6 +38,11 @@
 //   comments   [{ author, body (markdown), createdAt (ISO), url }], oldest first
 //   moreComments  how many older comments weren't fetched
 //   pullRequests  [{ id, title, url (null when unknown), state: "open" | "closed" | "merged" | null, draft }]
+//
+// PullRequests  pullRequests()'s answer (D6): { me, mine: PrSummary[], needsReview: PrSummary[], more: { mine, needsReview } }
+//   mine       open and draft PRs the Account authored; needsReview: open PRs that ask it for a review
+//   more       how many more matched than were fetched
+// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt (ISO) }
 
 export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "signInState", "move", "update"];
 
@@ -66,6 +71,16 @@ export function byColumn(board, { mine = false } = {}) {
     groups.get(t.columnId)?.push(t);
   }
   return board.columns.map((c) => ({ column: c, tickets: groups.get(c.id) }));
+}
+
+// PRs grouped by repo, repos by name, each repo's PRs newest first.
+export function byRepo(prs) {
+  const groups = new Map();
+  for (const pr of [...prs].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))) {
+    if (!groups.has(pr.repo)) groups.set(pr.repo, []);
+    groups.get(pr.repo).push(pr);
+  }
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([repo, list]) => ({ repo, prs: list }));
 }
 
 // The Board with one Column per Tracked Status (D21), in the given order. States match without regard
