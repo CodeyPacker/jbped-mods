@@ -12,7 +12,7 @@ import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, boardStatuses, providerFor } from "./flow.js";
 import * as edits from "./settings.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, byRepo, initials, trackColumns, can } from "./providers/contract.js";
+import { byColumn, byRepo, initials, trackColumns, can, repoFilter } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -592,20 +592,29 @@ export default class Wayfinder extends View {
     }
 
     // Pull Request repos
-    out.push(heading("Pull Request repos"), note("Follow repos to see only their Pull Requests. Following none shows them all."));
+    out.push(heading("Pull Request repos"), note("All: every repo's Pull Requests. Selected: only the ticked repos. Ignored: every repo except the ticked ones."));
     out.push(h_flex().gap(8).items_center().child(field(this.inputs.repo, t)));
     const q = this.inputs.repo.value();
     for (const a of p.accounts.filter((x) => can(providerFor(x), "repos"))) {
       const f = this.found[a.id]?.repos;
-      const followed = a.followedRepos ?? [];
-      const { rows, hidden } = edits.repoRows(f?.data ?? [], followed, q);
+      const rf = repoFilter(a);
+      const ticked = rf.mode === "all" ? [] : rf[rf.mode];
+      const { rows, hidden } = edits.repoRows(f?.data ?? [], ticked, q);
+      const summary = rf.mode === "all" ? "all repos"
+        : rf.mode === "selected" ? (ticked.length ? `only ${ticked.length} selected` : "nothing selected, so no Pull Requests")
+        : `all but ${ticked.length} ignored`;
       out.push(card(`wf-set-repos-${a.id}`, [
-        note(`${who(a)}: ${followed.length ? `following ${followed.length}` : "following all repos"}`),
-        ...(f?.status === "loading" ? [note("Listing repos…")] : []),
-        ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
-        ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, followed.includes(r), r, t,
-          (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
-        ...(hidden ? [note(`${hidden} more match. Type to narrow the list.`)] : []),
+        h_flex().gap(10).items_center()
+          .child(segmented(`wf-rm-${a.id}`, [["all", "All"], ["selected", "Selected"], ["ignored", "Ignored"]], rf.mode, t,
+            (mode, cx) => this.saveConfig((raw) => edits.setRepoMode(raw, p.name, a.id, mode), cx)))
+          .child(note(`${who(a)}: ${summary}`)),
+        ...(rf.mode === "all" ? [] : [
+          ...(f?.status === "loading" ? [note("Listing repos…")] : []),
+          ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
+          ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, ticked.includes(r), r, t,
+            (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
+          ...(hidden ? [note(`${hidden} more match. Type to narrow the list.`)] : []),
+        ]),
       ]));
     }
     return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);

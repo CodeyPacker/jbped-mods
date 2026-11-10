@@ -86,7 +86,7 @@ test("Azure PR list entries map to summaries dated by creation", () => {
   assert.deepEqual(g[0].prs.map((p) => p.id), ["web!3", "web!1"]);
 });
 
-test("Azure lists each configured project with the creator and reviewer filters for the signed-in user", async () => {
+test("Azure lists every project (or the selected repos' projects) with the creator and reviewer filters for the signed-in user", async () => {
   const urls = [];
   const io = {
     profile: "work",
@@ -97,6 +97,7 @@ test("Azure lists each configured project with the creator and reviewer filters 
       const u = new URL(url);
       let body;
       if (u.pathname.endsWith("/_apis/connectionData")) body = { authenticatedUser: { id: "u-me" } };
+      else if (u.pathname.endsWith("/_apis/projects")) body = { value: [{ name: "A" }, { name: "B c" }] };
       else {
         const project = decodeURIComponent(u.pathname.split("/")[2]);
         assert.equal(u.searchParams.get("searchCriteria.status"), "active");
@@ -108,10 +109,14 @@ test("Azure lists each configured project with the creator and reviewer filters 
       return { status: 200, ok: true, text: async () => JSON.stringify(body) };
     },
   };
-  const r = await azure.pullRequests({ org: ORG, projects: ["A", "B c"] }, io);
+  const r = await azure.pullRequests({ org: ORG }, io);
   assert.equal(urls.filter((x) => x.includes("/pullrequests")).length, 4);
   assert.ok(urls.some((x) => x.startsWith(`${ORG}/B%20c/_apis/git/pullrequests?`)));
   assert.deepEqual(r.mine.map((p) => [p.repo, p.id, p.draft]), [["A/web", "web!1", true]]);
   assert.deepEqual(r.needsReview.map((p) => p.repo), ["A/api", "B c/api"]); // the user's own PRs drop out
   assert.equal(r.me, "u-me");
+  urls.length = 0;
+  await azure.pullRequests({ org: ORG, prRepos: { mode: "selected", selected: ["B c/api"] } }, io);
+  assert.equal(urls.some((x) => x.includes("/_apis/projects")), false);
+  assert.deepEqual(urls.filter((x) => x.includes("/pullrequests")).map((x) => new URL(x).pathname.split("/")[2]), ["B%20c", "B%20c"]);
 });

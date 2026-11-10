@@ -60,8 +60,11 @@ function checkProfile(name, p, platform, errors) {
       if (!validOrg(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
       if (a.projects != null && (!Array.isArray(a.projects) || !a.projects.every(isStr))) errors.push(`${where}.projects: a list of project names`);
     }
-    if (a.followedRepos != null && (!Array.isArray(a.followedRepos) || !a.followedRepos.every((r) => isStr(r) && r.includes("/")))) {
-      errors.push(`${where}.followedRepos: a list of "owner/name" (GitHub) or "project/repo" (Azure) names`);
+    if (a.prRepos != null) {
+      const f = a.prRepos, names = (v) => v == null || (Array.isArray(v) && v.every((r) => isStr(r) && r.includes("/")));
+      if (!isObj(f) || (f.mode != null && !["all", "selected", "ignored"].includes(f.mode)) || !names(f.selected) || !names(f.ignored)) {
+        errors.push(`${where}.prRepos: { "mode": "all" | "selected" | "ignored", "selected": [...], "ignored": [...] } with "owner/name" (GitHub) or "project/repo" (Azure) names`);
+      }
     }
   });
   repos.forEach((r, i) => {

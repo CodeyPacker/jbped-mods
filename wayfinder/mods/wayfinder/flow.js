@@ -1,7 +1,7 @@
 // The single Wayfinder flow (ADR 0001): picks the Provider for an Account and calls the contract.
 // It never branches on which Provider it's talking to.
 import { PROVIDERS } from "./providers/index.js";
-import { can } from "./providers/contract.js";
+import { can, keepsRepo } from "./providers/contract.js";
 
 export function accountFor(profile, boardCfg) {
   return profile.accounts.find((a) => a.id === boardCfg.account) ?? null;
@@ -41,14 +41,13 @@ export async function signInStates(profile, io, registry = PROVIDERS) {
 
 // Every Account's Pull Requests, in Profile order: [{ account (id), ...PullRequests } | { account, error }].
 // Accounts whose Provider has none are left out, and one failing never stops the others. An Account with
-// followedRepos shows PRs from those repos only.
+// a repo filter (prRepos) shows only the PRs it keeps.
 export async function loadPullRequests(profile, io, registry = PROVIDERS) {
   const accounts = profile.accounts.filter((a) => can(providerFor(a, registry), "pullRequests"));
   return Promise.all(accounts.map(async (account) => {
     try {
       const r = await providerFor(account, registry).pullRequests(account, io);
-      const followed = new Set(account.followedRepos ?? []);
-      const keep = (list) => (followed.size ? list.filter((pr) => followed.has(pr.repo)) : list);
+      const keep = (list) => list.filter((pr) => keepsRepo(account, pr.repo));
       return { account: account.id, ...r, mine: keep(r.mine), needsReview: keep(r.needsReview) };
     } catch (e) {
       return { account: account.id, error: String(e.message ?? e) };

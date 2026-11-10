@@ -44,16 +44,26 @@ test("Tracked Statuses tick, reorder, and clear to the Board's own Columns", () 
   assert.equal("trackedStatuses" in e.setTrackedStatuses(r, "work", "team", []).profiles.work.boards[0], false);
 });
 
-test("followed repos toggle, sorted; none left removes the field", () => {
-  let r = e.toggleRepo(raw(), "work", "gh", "o/web");
+test("PR repos: All, Selected or Ignored, each mode with its own list", () => {
+  assert.throws(() => e.toggleRepo(raw(), "work", "gh", "o/web"), /Selected or Ignored first/);
+  let r = e.setRepoMode(raw(), "work", "gh", "selected");
+  r = e.toggleRepo(r, "work", "gh", "o/web");
   r = e.toggleRepo(r, "work", "gh", "o/api");
-  assert.deepEqual(r.profiles.work.accounts[0].followedRepos, ["o/api", "o/web"]);
+  assert.deepEqual(r.profiles.work.accounts[0].prRepos, { mode: "selected", selected: ["o/api", "o/web"] });
   valid(r);
-  r = e.toggleRepo(e.toggleRepo(r, "work", "gh", "o/api"), "work", "gh", "o/web");
-  assert.equal("followedRepos" in r.profiles.work.accounts[0], false);
+  r = e.toggleRepo(e.setRepoMode(r, "work", "gh", "ignored"), "work", "gh", "o/bot");
+  assert.deepEqual(r.profiles.work.accounts[0].prRepos, { mode: "ignored", selected: ["o/api", "o/web"], ignored: ["o/bot"] });
+  valid(r);
+  r = e.setRepoMode(r, "work", "gh", "all");
+  assert.equal(r.profiles.work.accounts[0].prRepos.mode, "all"); // lists kept for later
+  r = e.toggleRepo(e.toggleRepo(e.toggleRepo(e.setRepoMode(r, "work", "gh", "selected"), "work", "gh", "o/api"), "work", "gh", "o/web"), "work", "gh", "o/web");
+  r = e.toggleRepo(e.setRepoMode(r, "work", "gh", "ignored"), "work", "gh", "o/bot");
+  assert.equal("prRepos" in e.setRepoMode(e.toggleRepo(e.setRepoMode(r, "work", "gh", "selected"), "work", "gh", "o/web"), "work", "gh", "all").profiles.work.accounts[0], false);
+  assert.throws(() => e.setRepoMode(raw(), "work", "gh", "some"), /Unknown repo mode/);
   const rows = e.repoRows(["a/x", "b/y", "c/z"], ["b/y", "gone/q"], "z", 50);
   assert.deepEqual(rows, { rows: ["b/y", "gone/q", "c/z"], hidden: 0 });
   assert.equal(e.repoRows(["a/1", "a/2", "a/3"], [], "", 2).hidden, 1);
+  assert.ok(parseConfig(JSON.stringify({ profiles: { p: { accounts: [{ id: "a", provider: "github", login: "x", prRepos: { mode: "some" } }] } } }), "linux").errors.some((x) => /prRepos/.test(x)));
 });
 
 test("Profiles add and remove; the last stays; removing the active one picks another", () => {
@@ -82,10 +92,17 @@ test("Accounts add with an id from their name, no duplicates, and removing one d
   assert.deepEqual([gone.accounts.map((a) => a.id), gone.boards], [["gh"], []]);
 });
 
-test("followed repos filter an Account's PRs; none followed shows all", async () => {
+test("the repo filter keeps an Account's PRs: all, only selected, all but ignored", async () => {
   const pr = (repo) => ({ repo });
   const registry = { x: { capabilities: ["pullRequests"], pullRequests: async () => ({ me: "m", mine: [pr("o/a"), pr("o/b")], needsReview: [pr("o/b")], more: { mine: 0, needsReview: 0 } }) } };
-  const [f, all] = await loadPullRequests({ accounts: [{ id: "1", provider: "x", followedRepos: ["o/b"] }, { id: "2", provider: "x" }] }, {}, registry);
-  assert.deepEqual([f.mine, f.needsReview], [[pr("o/b")], [pr("o/b")]]);
+  const [sel, ign, all, none] = await loadPullRequests({ accounts: [
+    { id: "1", provider: "x", prRepos: { mode: "selected", selected: ["o/b"], ignored: ["o/a"] } },
+    { id: "2", provider: "x", prRepos: { mode: "ignored", selected: ["o/b"], ignored: ["o/b"] } },
+    { id: "3", provider: "x", prRepos: { mode: "all", ignored: ["o/b"] } },
+    { id: "4", provider: "x", prRepos: { mode: "selected" } },
+  ] }, {}, registry);
+  assert.deepEqual([sel.mine, sel.needsReview], [[pr("o/b")], [pr("o/b")]]);
+  assert.deepEqual([ign.mine, ign.needsReview], [[pr("o/a")], []]);
   assert.equal(all.mine.length, 2);
+  assert.deepEqual([none.mine, none.needsReview], [[], []]);
 });

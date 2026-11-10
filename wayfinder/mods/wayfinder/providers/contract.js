@@ -76,6 +76,21 @@ export function byColumn(board, { mine = false } = {}) {
   return board.columns.map((c) => ({ column: c, tickets: groups.get(c.id) }));
 }
 
+// An Account's PR repo filter (prRepos): "all" (the default), "selected" (only those) or "ignored" (all
+// but those). Each mode keeps its own list, so switching modes loses nothing.
+export const REPO_MODES = ["all", "selected", "ignored"];
+export function repoFilter(account) {
+  const f = account?.prRepos ?? {};
+  const mode = REPO_MODES.includes(f.mode) ? f.mode : "all";
+  return { mode, selected: f.selected ?? [], ignored: f.ignored ?? [] };
+}
+export function keepsRepo(account, repo) {
+  const f = repoFilter(account);
+  if (f.mode === "selected") return f.selected.includes(repo);
+  if (f.mode === "ignored") return !f.ignored.includes(repo);
+  return true;
+}
+
 // PRs grouped by repo, repos by name, each repo's PRs newest first.
 export function byRepo(prs) {
   const groups = new Map();
@@ -84,7 +99,7 @@ export function byRepo(prs) {
     if (!groups.has(pr.repo)) groups.set(pr.repo, []);
     groups.get(pr.repo).push(pr);
   }
-  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([repo, list]) => ({ repo, prs: list }));
+  return [...groups].sort(([a], [b]) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b)).map(([repo, list]) => ({ repo, prs: list }));
 }
 
 // The Board with one Column per Tracked Status (D21), in the given order. States match without regard

@@ -72,9 +72,9 @@ test("provider-specific account fields are required", () => {
   assert.ok(r.errors.some((e) => /\.org/.test(e)));
   assert.ok(r.errors.some((e) => /\.projects/.test(e)));
   assert.ok(r.errors.some((e) => /\.provider/.test(e)));
-  // projects is optional (Settings finds Boards across the organization); followedRepos must be "a/b" names
+  // projects is optional (Settings finds Boards across the organization); prRepos names must be "a/b"
   assert.deepEqual(parse({ profiles: { p: { accounts: [{ id: "b", provider: "azure", org: "https://dev.azure.com/x" }] } } }).errors, []);
-  assert.ok(parse({ profiles: { p: { accounts: [{ id: "a", provider: "github", login: "x", followedRepos: ["nope"] }] } } }).errors.some((e) => /followedRepos/.test(e)));
+  assert.ok(parse({ profiles: { p: { accounts: [{ id: "a", provider: "github", login: "x", prRepos: { mode: "ignored", ignored: ["nope"] } }] } } }).errors.some((e) => /prRepos/.test(e)));
 });
 
 test("duplicate ids and bad runners are errors", () => {

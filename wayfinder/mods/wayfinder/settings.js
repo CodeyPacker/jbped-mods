@@ -1,5 +1,6 @@
 // Settings edits to wayfinder.json (#17). Pure: no Herdr imports. Each function takes the raw config
 // and returns a changed copy, so the original stays as read. Only the named Profile changes.
+const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
@@ -66,24 +67,41 @@ export function move(list, i, by) {
   return out;
 }
 
-// Follows or unfollows a repo for an Account's PRs. No followed repos means all of them.
-export function toggleRepo(raw, profileName, accountId, repo) {
+function prRepos(raw, profileName, accountId, fn) {
   return edit(raw, profileName, (p) => {
     const a = (p.accounts ?? []).find((x) => x.id === accountId);
     if (!a) throw new Error(`No account "${accountId}"`);
-    const list = a.followedRepos ?? [];
-    const next = list.includes(repo) ? list.filter((r) => r !== repo) : [...list, repo].sort((x, y) => x.localeCompare(y));
-    if (next.length) a.followedRepos = next; else delete a.followedRepos;
+    const f = { mode: "all", selected: [], ignored: [], ...(a.prRepos ?? {}) };
+    fn(f);
+    const out = { mode: f.mode };
+    if (f.selected.length) out.selected = f.selected;
+    if (f.ignored.length) out.ignored = f.ignored;
+    if (out.mode === "all" && !out.selected && !out.ignored) delete a.prRepos; else a.prRepos = out;
   });
 }
 
-// Repos to list for a search: followed ones first, then up to `limit` matches.
-export function repoRows(all, followed, query, limit = 50) {
+// "all", "selected" or "ignored". Both lists stay as they are.
+export function setRepoMode(raw, profileName, accountId, mode) {
+  if (!["all", "selected", "ignored"].includes(mode)) throw new Error(`Unknown repo mode "${mode}"`);
+  return prRepos(raw, profileName, accountId, (f) => { f.mode = mode; });
+}
+
+// Ticks or unticks a repo in the current mode's list (selected or ignored), kept sorted.
+export function toggleRepo(raw, profileName, accountId, repo) {
+  return prRepos(raw, profileName, accountId, (f) => {
+    if (f.mode === "all") throw new Error("Choose Selected or Ignored first");
+    const list = f[f.mode];
+    f[f.mode] = list.includes(repo) ? list.filter((r) => r !== repo) : [...list, repo].sort(byName);
+  });
+}
+
+// Repos to list for a search: ticked ones first, then up to `limit` matches.
+export function repoRows(all, ticked, query, limit = 50) {
   const q = String(query ?? "").trim().toLowerCase();
-  const f = new Set(followed);
-  const extra = followed.filter((r) => !all.includes(r));
+  const f = new Set(ticked);
+  const extra = ticked.filter((r) => !all.includes(r));
   const rest = all.filter((r) => !f.has(r) && (!q || r.toLowerCase().includes(q)));
-  return { rows: [...followed.filter((r) => all.includes(r)), ...extra, ...rest.slice(0, limit)], hidden: Math.max(0, rest.length - limit) };
+  return { rows: [...ticked.filter((r) => all.includes(r)), ...extra, ...rest.slice(0, limit)], hidden: Math.max(0, rest.length - limit) };
 }
 
 // Profiles and Accounts. A Profile's name is also its cache file and az login folder, so it can't be renamed.

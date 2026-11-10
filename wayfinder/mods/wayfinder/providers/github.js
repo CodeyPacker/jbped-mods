@@ -2,6 +2,7 @@
 // Auth: `gh auth token --user <login>` through the Profile's runner, then GraphQL over fetch, so
 // the token never appears on a command line and `gh auth switch` is never used (ADR 0002).
 import { NO_COLUMN } from "./contract.js";
+const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const API = "https://api.github.com/graphql";
 const PAGE = 100, MAX_PAGES = 20;
@@ -276,7 +277,7 @@ export const github = {
       if (!r.pageInfo.hasNextPage) break;
       after = r.pageInfo.endCursor;
     }
-    return [...new Set(out)].sort((a, b) => a.localeCompare(b));
+    return [...new Set(out)].sort(byName);
   },
 
   async pullRequests(account, io) {

@@ -11,6 +11,8 @@
 // Ticket detail converts the HTML fields to markdown. Bugs show their repro steps as the description.
 // Linked Azure PRs are fetched. GitHub PR links show by URL only (R5).
 import { htmlToMarkdown } from "./html.js";
+import { repoFilter } from "./contract.js";
+const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
 const API_VERSION = "7.1";
@@ -188,8 +190,8 @@ export const azure = {
   id: "azure",
   capabilities: ["boards", "board", "ticket", "pullRequests", "repos", "statuses", "signInState"],
 
-  // Azure lists PRs one project at a time: two calls per project (the followed repos' projects, else the
-  // configured ones). The reviewer filter
+  // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
+  // every project). The reviewer filter
   // matches only the user, not reviews asked of a team the user is on.
   async pullRequests(account, io) {
     const org = orgUrl(account), tok = await token(account, io);
@@ -198,8 +200,11 @@ export const azure = {
     const list = (project, filter) => rest(org, tok, io,
       `${seg(project)}/_apis/git/pullrequests?searchCriteria.status=active&searchCriteria.${filter}=${seg(me)}&$top=${MAX_PR_LIST}`)
       .then((d) => (d.value ?? []).map((pr) => mapPrSummary(pr, org)));
-    const followed = account.followedRepos ?? [];
-    const projects = followed.length ? [...new Set(followed.map((r) => r.slice(0, r.lastIndexOf("/"))))] : account.projects ?? [];
+    // Selected repos: only their projects. Otherwise every project in the organization.
+    const f = repoFilter(account);
+    const projects = f.mode === "selected"
+      ? [...new Set(f.selected.map((r) => r.slice(0, r.lastIndexOf("/"))))]
+      : ((await rest(org, tok, io, "_apis/projects?$top=500")).value ?? []).map((p) => p.name);
     const [mine, review] = await Promise.all(["creatorId", "reviewerId"].map((f) => Promise.all(projects.map((p) => list(p, f)))));
     return { me, mine: mine.flat(), needsReview: review.flat().filter((pr) => pr.author.id !== me), more: { mine: 0, needsReview: 0 } };
   },
@@ -246,14 +251,14 @@ export const azure = {
         title: `${t.name} · ${b.name}`, url: `${org}/${seg(t.projectName)}/_boards/board/t/${seg(t.name)}/${seg(b.name)}`,
         ref: { project: t.projectName, team: t.name, board: b.name },
       }))).catch(() => [])));
-    return lists.flat().sort((a, b) => a.title.localeCompare(b.title));
+    return lists.flat().sort((a, b) => byName(a.title, b.title));
   },
 
   // Every repo in the organization as "project/repo", for following (PR filter).
   async repos(account, io) {
     const org = orgUrl(account), tok = await token(account, io);
     const d = await rest(org, tok, io, "_apis/git/repositories");
-    return (d.value ?? []).filter((r) => !r.isDisabled).map((r) => `${r.project?.name ?? ""}/${r.name}`).sort((a, b) => a.localeCompare(b));
+    return (d.value ?? []).filter((r) => !r.isDisabled).map((r) => `${r.project?.name ?? ""}/${r.name}`).sort(byName);
   },
 
   // The states a Board's work item types use, in process order, for Tracked Statuses. "Removed" is never on a Board.
