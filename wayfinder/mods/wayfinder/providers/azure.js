@@ -16,7 +16,7 @@ const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
 const API_VERSION = "7.1";
 const PREVIEW = "7.1-preview"; // connectionData has no GA version
 const COMMENTS_VERSION = "7.1-preview.4"; // the comments API is preview only: pinned here (R4)
-const COMMENTS = 100, MAX_PRS = 20;
+const COMMENTS = 100, MAX_PRS = 20, MAX_PR_LIST = 100;
 const MAX_ITEMS = 2000, BATCH = 200;
 const DONE_DAYS = 30; // items in the last Column show only if they changed this recently
 
@@ -137,6 +137,19 @@ export function mapPr(pr) {
   };
 }
 
+// A PR list entry (one project's /pullrequests) into a PrSummary. Azure has no updated time, only created.
+export function mapPrSummary(pr, org) {
+  const repo = pr.repository ?? {}, project = repo.project?.name ?? "";
+  const c = pr.createdBy ?? {};
+  return {
+    key: `${repo.id ?? repo.name}!${pr.pullRequestId}`, id: `${repo.name ?? ""}!${pr.pullRequestId}`, title: pr.title ?? "",
+    url: repo.name ? `${org}/${seg(project)}/_git/${seg(repo.name)}/pullrequest/${pr.pullRequestId}` : null,
+    repo: `${project}/${repo.name ?? ""}`, draft: Boolean(pr.isDraft),
+    author: { id: c.id ?? "", name: c.displayName ?? c.uniqueName ?? "" },
+    updatedAt: null, createdAt: pr.creationDate ?? null,
+  };
+}
+
 // Comments oldest first, from a page fetched newest first.
 export function mapComments(page, url) {
   const list = (page?.comments ?? []).slice().sort((a, b) => String(a.createdDate).localeCompare(String(b.createdDate)));
@@ -172,7 +185,21 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "signInState"],
+  capabilities: ["boards", "board", "ticket", "pullRequests", "signInState"],
+
+  // Azure lists PRs one project at a time: two calls per configured project. The reviewer filter
+  // matches only the user, not reviews asked of a team the user is on.
+  async pullRequests(account, io) {
+    const org = orgUrl(account), tok = await token(account, io);
+    const me = (await rest(org, tok, io, "_apis/connectionData", null, PREVIEW)).authenticatedUser?.id;
+    if (!me) throw new Error("Azure DevOps didn't say who is signed in");
+    const list = (project, filter) => rest(org, tok, io,
+      `${seg(project)}/_apis/git/pullrequests?searchCriteria.status=active&searchCriteria.${filter}=${seg(me)}&$top=${MAX_PR_LIST}`)
+      .then((d) => (d.value ?? []).map((pr) => mapPrSummary(pr, org)));
+    const projects = account.projects ?? [];
+    const [mine, review] = await Promise.all(["creatorId", "reviewerId"].map((f) => Promise.all(projects.map((p) => list(p, f)))));
+    return { me, mine: mine.flat(), needsReview: review.flat().filter((pr) => pr.author.id !== me), more: { mine: 0, needsReview: 0 } };
+  },
 
   // ref: a TicketSummary's ref from board().
   async ticket(account, ref, io) {

@@ -68,3 +68,50 @@ test("PRs cache per Profile, only for the same Accounts, beside Boards", () => {
   assert.equal(cachedPrs(c, prsKey([{ ...accounts[0], login: "bob" }])), null);
   assert.equal(withPrs(c, key, [], 50).prs.at, 100); // older data loses
 });
+
+import { azure, mapPrSummary } from "../mods/wayfinder/providers/azure.js";
+
+const ORG = "https://dev.azure.com/acme";
+const azPr = (id, project, repo, extra = {}) => ({
+  pullRequestId: id, title: `A${id}`, isDraft: false, creationDate: `2026-11-0${id}T00:00:00Z`,
+  createdBy: { id: "u-ann", displayName: "Ann Lee" }, repository: { id: `r-${repo}`, name: repo, project: { name: project } }, ...extra,
+});
+
+test("Azure PR list entries map to summaries dated by creation", () => {
+  assert.deepEqual(mapPrSummary(azPr(4, "My Proj", "web", { isDraft: true }), ORG), {
+    key: "r-web!4", id: "web!4", title: "A4", url: `${ORG}/My%20Proj/_git/web/pullrequest/4`, repo: "My Proj/web", draft: true,
+    author: { id: "u-ann", name: "Ann Lee" }, updatedAt: null, createdAt: "2026-11-04T00:00:00Z",
+  });
+  const g = byRepo([mapPrSummary(azPr(1, "P", "web"), ORG), mapPrSummary(azPr(3, "P", "web"), ORG)]);
+  assert.deepEqual(g[0].prs.map((p) => p.id), ["web!3", "web!1"]);
+});
+
+test("Azure lists each configured project with the creator and reviewer filters for the signed-in user", async () => {
+  const urls = [];
+  const io = {
+    profile: "work",
+    run: async () => ({ code: 0, stdout: "tok\n", stderr: "" }),
+    fetch: async (url, opts) => {
+      urls.push(url);
+      assert.equal(opts.headers.Authorization, "Bearer tok");
+      const u = new URL(url);
+      let body;
+      if (u.pathname.endsWith("/_apis/connectionData")) body = { authenticatedUser: { id: "u-me" } };
+      else {
+        const project = decodeURIComponent(u.pathname.split("/")[2]);
+        assert.equal(u.searchParams.get("searchCriteria.status"), "active");
+        assert.equal(u.searchParams.get("api-version"), "7.1");
+        body = u.searchParams.get("searchCriteria.creatorId") === "u-me"
+          ? { value: project === "A" ? [azPr(1, "A", "web", { createdBy: { id: "u-me", displayName: "Me" }, isDraft: true })] : [] }
+          : { value: [azPr(2, project, "api"), azPr(3, project, "self", { createdBy: { id: "u-me" } })] };
+      }
+      return { status: 200, ok: true, text: async () => JSON.stringify(body) };
+    },
+  };
+  const r = await azure.pullRequests({ org: ORG, projects: ["A", "B c"] }, io);
+  assert.equal(urls.filter((x) => x.includes("/pullrequests")).length, 4);
+  assert.ok(urls.some((x) => x.startsWith(`${ORG}/B%20c/_apis/git/pullrequests?`)));
+  assert.deepEqual(r.mine.map((p) => [p.repo, p.id, p.draft]), [["A/web", "web!1", true]]);
+  assert.deepEqual(r.needsReview.map((p) => p.repo), ["A/api", "B c/api"]); // the user's own PRs drop out
+  assert.equal(r.me, "u-me");
+});

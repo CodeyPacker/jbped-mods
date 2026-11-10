@@ -80,6 +80,9 @@ function card(tk, t, selected, onClick) {
         .rounded(10).bg(t.raised).border_1().border_color(t.border).text_size(9).font_semibold().text_color(t.muted).child(initials(a.name))))));
 }
 
+const prAge = (pr) => pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}`
+  : pr.createdAt ? ` · opened ${formatAge(Date.now() - Date.parse(pr.createdAt))}` : "";
+
 function prRow(pr, t) {
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
     .child(v_flex().flex_1().min_w(0).gap(4)
@@ -87,7 +90,7 @@ function prRow(pr, t) {
         .when(pr.draft, (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
       .child(div().text_size(11).text_color(t.dim).truncate()
-        .child(`${pr.id} · ${pr.author.name}${pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}` : ""}`)))
+        .child(`${pr.id} · ${pr.author.name}${prAge(pr)}`)))
     .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
 }
 

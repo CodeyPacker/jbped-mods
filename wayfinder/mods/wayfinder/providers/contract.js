@@ -42,7 +42,8 @@
 // PullRequests  pullRequests()'s answer (D6): { me, mine: PrSummary[], needsReview: PrSummary[], more: { mine, needsReview } }
 //   mine       open and draft PRs the Account authored; needsReview: open PRs that ask it for a review
 //   more       how many more matched than were fetched
-// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt (ISO) }
+// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt? }
+//   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
 
 export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "signInState", "move", "update"];
 
@@ -76,7 +77,8 @@ export function byColumn(board, { mine = false } = {}) {
 // PRs grouped by repo, repos by name, each repo's PRs newest first.
 export function byRepo(prs) {
   const groups = new Map();
-  for (const pr of [...prs].sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))) {
+  const when = (pr) => String(pr.updatedAt ?? pr.createdAt ?? "");
+  for (const pr of [...prs].sort((a, b) => when(b).localeCompare(when(a)))) {
     if (!groups.has(pr.repo)) groups.set(pr.repo, []);
     groups.get(pr.repo).push(pr);
   }
