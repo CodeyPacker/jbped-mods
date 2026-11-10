@@ -58,7 +58,10 @@ function checkProfile(name, p, platform, errors) {
     if (a.provider === "github" && !isStr(a.login)) errors.push(`${where}.login: the gh account name`);
     if (a.provider === "azure") {
       if (!validOrg(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
-      if (!Array.isArray(a.projects) || !a.projects.every(isStr)) errors.push(`${where}.projects: a list of project names`);
+      if (a.projects != null && (!Array.isArray(a.projects) || !a.projects.every(isStr))) errors.push(`${where}.projects: a list of project names`);
+    }
+    if (a.followedRepos != null && (!Array.isArray(a.followedRepos) || !a.followedRepos.every((r) => isStr(r) && r.includes("/")))) {
+      errors.push(`${where}.followedRepos: a list of "owner/name" (GitHub) or "project/repo" (Azure) names`);
     }
   });
   repos.forEach((r, i) => {

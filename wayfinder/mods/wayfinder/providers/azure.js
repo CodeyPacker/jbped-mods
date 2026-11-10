@@ -15,6 +15,7 @@ import { htmlToMarkdown } from "./html.js";
 const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
 const API_VERSION = "7.1";
 const PREVIEW = "7.1-preview"; // connectionData has no GA version
+const TEAMS_VERSION = "7.1-preview.3"; // the org-wide team list is preview only
 const COMMENTS_VERSION = "7.1-preview.4"; // the comments API is preview only: pinned here (R4)
 const COMMENTS = 100, MAX_PRS = 20, MAX_PR_LIST = 100;
 const MAX_ITEMS = 2000, BATCH = 200;
@@ -185,9 +186,10 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "pullRequests", "signInState"],
+  capabilities: ["boards", "board", "ticket", "pullRequests", "repos", "statuses", "signInState"],
 
-  // Azure lists PRs one project at a time: two calls per configured project. The reviewer filter
+  // Azure lists PRs one project at a time: two calls per project (the followed repos' projects, else the
+  // configured ones). The reviewer filter
   // matches only the user, not reviews asked of a team the user is on.
   async pullRequests(account, io) {
     const org = orgUrl(account), tok = await token(account, io);
@@ -196,7 +198,8 @@ export const azure = {
     const list = (project, filter) => rest(org, tok, io,
       `${seg(project)}/_apis/git/pullrequests?searchCriteria.status=active&searchCriteria.${filter}=${seg(me)}&$top=${MAX_PR_LIST}`)
       .then((d) => (d.value ?? []).map((pr) => mapPrSummary(pr, org)));
-    const projects = account.projects ?? [];
+    const followed = account.followedRepos ?? [];
+    const projects = followed.length ? [...new Set(followed.map((r) => r.slice(0, r.lastIndexOf("/"))))] : account.projects ?? [];
     const [mine, review] = await Promise.all(["creatorId", "reviewerId"].map((f) => Promise.all(projects.map((p) => list(p, f)))));
     return { me, mine: mine.flat(), needsReview: review.flat().filter((pr) => pr.author.id !== me), more: { mine: 0, needsReview: 0 } };
   },
@@ -233,16 +236,36 @@ export const azure = {
     return { ok: false, reason: /expired|AADSTS700082|refresh token/i.test(msg) ? "The az login expired" : "Not signed in to Azure for this Profile", command: loginCommand(io.profile) };
   },
 
+  // Boards of every team the user is on, across the organization (not only the configured projects).
   async boards(account, io) {
-    const org = orgUrl(account), tok = await token(account, io), out = [];
-    for (const project of account.projects) {
-      const teams = (await rest(org, tok, io, `_apis/projects/${seg(project)}/teams?$mine=true`)).value;
-      for (const t of teams) {
-        const boards = (await rest(org, tok, io, `${seg(project)}/${seg(t.name)}/_apis/work/boards`)).value;
-        for (const b of boards) out.push({ title: `${t.name} · ${b.name}`, url: `${org}/${seg(project)}/_boards/board/t/${seg(t.name)}/${seg(b.name)}`, ref: { project, team: t.name, board: b.name } });
-      }
-    }
-    return out;
+    const org = orgUrl(account), tok = await token(account, io);
+    const teams = (await rest(org, tok, io, "_apis/teams?$mine=true&$top=500", null, TEAMS_VERSION)).value ?? [];
+    const lists = await Promise.all(teams.map((t) => rest(org, tok, io, `${seg(t.projectName)}/${seg(t.name)}/_apis/work/boards`)
+      .then((d) => (d.value ?? []).map((b, i) => ({
+        teamDefault: i === 0, // what a Board config without "board" shows
+        title: `${t.name} · ${b.name}`, url: `${org}/${seg(t.projectName)}/_boards/board/t/${seg(t.name)}/${seg(b.name)}`,
+        ref: { project: t.projectName, team: t.name, board: b.name },
+      }))).catch(() => [])));
+    return lists.flat().sort((a, b) => a.title.localeCompare(b.title));
+  },
+
+  // Every repo in the organization as "project/repo", for following (PR filter).
+  async repos(account, io) {
+    const org = orgUrl(account), tok = await token(account, io);
+    const d = await rest(org, tok, io, "_apis/git/repositories");
+    return (d.value ?? []).filter((r) => !r.isDisabled).map((r) => `${r.project?.name ?? ""}/${r.name}`).sort((a, b) => a.localeCompare(b));
+  },
+
+  // The states a Board's work item types use, in process order, for Tracked Statuses. "Removed" is never on a Board.
+  async statuses(account, ref, io) {
+    if (typeof ref.project !== "string" || typeof ref.team !== "string") throw new Error(`An Azure Board's ref needs "project" and "team"`);
+    const org = orgUrl(account), tok = await token(account, io), p = seg(ref.project);
+    const pt = `${p}/${seg(ref.team)}`;
+    const boardId = ref.board ?? (await rest(org, tok, io, `${pt}/_apis/work/boards`)).value?.[0]?.name;
+    if (!boardId) throw new Error(`Team "${ref.team}" has no boards`);
+    const { types } = boardShape(await rest(org, tok, io, `${pt}/_apis/work/boards/${seg(boardId)}`));
+    const lists = await Promise.all(types.map((ty) => rest(org, tok, io, `${p}/_apis/wit/workitemtypes/${seg(ty)}/states`).then((d) => d.value ?? [])));
+    return [...new Set(lists.flat().map((s) => s.name))].filter((n) => n && n !== "Removed");
   },
 
   // ref: { project, team, board? }. board is the board's name or id, by default the team's first.

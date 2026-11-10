@@ -1,0 +1,138 @@
+// Settings edits to wayfinder.json (#17). Pure: no Herdr imports. Each function takes the raw config
+// and returns a changed copy, so the original stays as read. Only the named Profile changes.
+
+const clone = (v) => JSON.parse(JSON.stringify(v));
+
+function edit(raw, profileName, fn) {
+  const out = clone(raw);
+  const p = out.profiles?.[profileName];
+  if (!p) throw new Error(`No profile "${profileName}"`);
+  fn(p);
+  return out;
+}
+
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// Whether a Board config shows a discovered Board. An Azure config without "board" means the team's
+// first board, which `firstOfTeam` says.
+export function showsBoard(cfg, accountId, found, firstOfTeam = false) {
+  if (cfg.account !== accountId) return false;
+  const a = cfg.ref ?? {}, b = found.ref;
+  if ("team" in b) {
+    return a.project === b.project && a.team === b.team && (a.board == null ? firstOfTeam : a.board === b.board);
+  }
+  return same({ owner: a.owner, number: a.number }, { owner: b.owner, number: b.number });
+}
+
+// A Board id from its title, unique in the Profile.
+export function boardId(title, taken) {
+  const base = String(title).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "board";
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  return id;
+}
+
+export function followBoard(raw, profileName, accountId, found) {
+  return edit(raw, profileName, (p) => {
+    p.boards ??= [];
+    const id = boardId(found.title, new Set(p.boards.map((b) => b.id)));
+    // found.ref names the board, so the config keeps showing it even if the team's default changes.
+    p.boards.push({ id, account: accountId, name: found.title, ref: clone(found.ref) });
+  });
+}
+
+export function unfollowBoard(raw, profileName, id) {
+  return edit(raw, profileName, (p) => { p.boards = (p.boards ?? []).filter((b) => b.id !== id); });
+}
+
+// An empty list removes the field: the Board shows the Provider's own columns.
+export function setTrackedStatuses(raw, profileName, id, statuses) {
+  return edit(raw, profileName, (p) => {
+    const b = (p.boards ?? []).find((x) => x.id === id);
+    if (!b) throw new Error(`No board "${id}"`);
+    if (statuses?.length) b.trackedStatuses = [...statuses]; else delete b.trackedStatuses;
+  });
+}
+
+// Ticks or unticks a status, keeping the order of the rest. A new one goes last.
+export const toggleStatus = (list, s) => (list.includes(s) ? list.filter((x) => x !== s) : [...list, s]);
+
+// Moves item i by `by` places, within bounds.
+export function move(list, i, by) {
+  const j = i + by;
+  if (i < 0 || i >= list.length || j < 0 || j >= list.length) return list;
+  const out = [...list];
+  [out[i], out[j]] = [out[j], out[i]];
+  return out;
+}
+
+// Follows or unfollows a repo for an Account's PRs. No followed repos means all of them.
+export function toggleRepo(raw, profileName, accountId, repo) {
+  return edit(raw, profileName, (p) => {
+    const a = (p.accounts ?? []).find((x) => x.id === accountId);
+    if (!a) throw new Error(`No account "${accountId}"`);
+    const list = a.followedRepos ?? [];
+    const next = list.includes(repo) ? list.filter((r) => r !== repo) : [...list, repo].sort((x, y) => x.localeCompare(y));
+    if (next.length) a.followedRepos = next; else delete a.followedRepos;
+  });
+}
+
+// Repos to list for a search: followed ones first, then up to `limit` matches.
+export function repoRows(all, followed, query, limit = 50) {
+  const q = String(query ?? "").trim().toLowerCase();
+  const f = new Set(followed);
+  const extra = followed.filter((r) => !all.includes(r));
+  const rest = all.filter((r) => !f.has(r) && (!q || r.toLowerCase().includes(q)));
+  return { rows: [...followed.filter((r) => all.includes(r)), ...extra, ...rest.slice(0, limit)], hidden: Math.max(0, rest.length - limit) };
+}
+
+// Profiles and Accounts. A Profile's name is also its cache file and az login folder, so it can't be renamed.
+export const PROFILE_NAME = /^[A-Za-z0-9_-]{1,32}$/;
+
+export function addProfile(raw, name, runner) {
+  if (!PROFILE_NAME.test(name)) throw new Error("A profile name uses letters, digits, - and _ (up to 32)");
+  if (raw.profiles?.[name]) throw new Error(`Profile "${name}" already exists`);
+  const out = clone(raw);
+  out.profiles ??= {};
+  out.profiles[name] = { ...(runner ? { runner } : {}), accounts: [], repos: [], boards: [] };
+  return out;
+}
+
+// The last Profile stays. Removing the active one makes the first other one active.
+export function removeProfile(raw, name) {
+  const names = Object.keys(raw.profiles ?? {});
+  if (!names.includes(name)) throw new Error(`No profile "${name}"`);
+  if (names.length < 2) throw new Error("The last profile can't be removed");
+  const out = clone(raw);
+  delete out.profiles[name];
+  if ((out.activeProfile ?? names[0]) === name) out.activeProfile = Object.keys(out.profiles)[0];
+  return out;
+}
+
+export function accountId(provider, name, taken) {
+  const base = `${provider === "azure" ? "ado" : "gh"}-${String(name).toLowerCase().replace(/^https:\/\/(dev\.azure\.com\/)?/, "").replace(/\.visualstudio\.com.*$/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  return id;
+}
+
+// account: { provider: "github", login } or { provider: "azure", org }. Checking it is parseConfig's job.
+export function addAccount(raw, profileName, account) {
+  return edit(raw, profileName, (p) => {
+    p.accounts ??= [];
+    const key = account.provider === "azure" ? "org" : "login";
+    const value = String(account[key] ?? "").trim().replace(/\/+$/, "");
+    if (!value) throw new Error(account.provider === "azure" ? "Enter the organization URL" : "Enter the GitHub user name");
+    if (p.accounts.some((a) => a.provider === account.provider && String(a[key]).toLowerCase() === value.toLowerCase())) throw new Error("That account is already in this profile");
+    const id = accountId(account.provider, value, new Set(p.accounts.map((a) => a.id)));
+    p.accounts.push(account.provider === "azure" ? { id, provider: "azure", org: value, projects: [] } : { id, provider: "github", login: value });
+  });
+}
+
+// Removing an Account removes its Boards too.
+export function removeAccount(raw, profileName, id) {
+  return edit(raw, profileName, (p) => {
+    p.accounts = (p.accounts ?? []).filter((a) => a.id !== id);
+    p.boards = (p.boards ?? []).filter((b) => b.account !== id);
+  });
+}

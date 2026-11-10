@@ -40,11 +40,17 @@ export async function signInStates(profile, io, registry = PROVIDERS) {
 }
 
 // Every Account's Pull Requests, in Profile order: [{ account (id), ...PullRequests } | { account, error }].
-// Accounts whose Provider has none are left out, and one failing never stops the others.
+// Accounts whose Provider has none are left out, and one failing never stops the others. An Account with
+// followedRepos shows PRs from those repos only.
 export async function loadPullRequests(profile, io, registry = PROVIDERS) {
   const accounts = profile.accounts.filter((a) => can(providerFor(a, registry), "pullRequests"));
   return Promise.all(accounts.map(async (account) => {
-    try { return { account: account.id, ...(await providerFor(account, registry).pullRequests(account, io)) }; } catch (e) {
+    try {
+      const r = await providerFor(account, registry).pullRequests(account, io);
+      const followed = new Set(account.followedRepos ?? []);
+      const keep = (list) => (followed.size ? list.filter((pr) => followed.has(pr.repo)) : list);
+      return { account: account.id, ...r, mine: keep(r.mine), needsReview: keep(r.needsReview) };
+    } catch (e) {
       return { account: account.id, error: String(e.message ?? e) };
     }
   }));
@@ -55,4 +61,23 @@ export async function loadTicket(profile, boardCfg, summary, io, registry = PROV
   const { account, provider } = resolve(profile, boardCfg, registry);
   if (!can(provider, "ticket")) throw new Error(`Ticket details from ${account.provider} aren't supported yet`);
   return provider.ticket(account, summary.ref, io);
+}
+
+// Settings discovery. Each rejects with a message fit to show.
+export async function discoverBoards(account, io, registry = PROVIDERS) {
+  const provider = providerFor(account, registry);
+  if (!can(provider, "boards")) throw new Error(`Finding boards on ${account.provider} isn't supported yet`);
+  return provider.boards(account, io);
+}
+
+export async function discoverRepos(account, io, registry = PROVIDERS) {
+  const provider = providerFor(account, registry);
+  if (!can(provider, "repos")) throw new Error(`Listing repos on ${account.provider} isn't supported yet`);
+  return provider.repos(account, io);
+}
+
+export async function boardStatuses(profile, boardCfg, io, registry = PROVIDERS) {
+  const { account, provider } = resolve(profile, boardCfg, registry);
+  if (!can(provider, "statuses")) throw new Error(`Listing statuses on ${account.provider} isn't supported yet`);
+  return provider.statuses(account, boardCfg.ref, io);
 }

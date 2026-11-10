@@ -191,6 +191,12 @@ export function mapPrs(nodes) {
   }));
 }
 
+// Repos the login can reach (own, collaborator, org member), for following (PR filter).
+export const REPOS_QUERY = `query($after: String) {
+  viewer { repositories(first: ${PAGE}, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
+    pageInfo { hasNextPage endCursor } nodes { nameWithOwner isArchived } } }
+}`;
+
 export function projectOf(data) {
   return data?.repositoryOwner?.projectV2 ?? null;
 }
@@ -225,7 +231,7 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "pullRequests", "signInState"],
+  capabilities: ["boards", "board", "ticket", "pullRequests", "repos", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -259,6 +265,18 @@ export const github = {
     const tickets = mapItems(nodes);
     for (const t of tickets) Object.assign(t.ref, { statusField: vars.status, priorityField: vars.priority });
     return { title: project.title, url: project.url, me, columns: mapColumns(project.field, tickets), tickets };
+  },
+
+  async repos(account, io) {
+    const out = [];
+    let after = null;
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const r = (await graphql(account, io, REPOS_QUERY, { after })).viewer.repositories;
+      out.push(...r.nodes.filter((n) => n && !n.isArchived).map((n) => n.nameWithOwner));
+      if (!r.pageInfo.hasNextPage) break;
+      after = r.pageInfo.endCursor;
+    }
+    return [...new Set(out)].sort((a, b) => a.localeCompare(b));
   },
 
   async pullRequests(account, io) {

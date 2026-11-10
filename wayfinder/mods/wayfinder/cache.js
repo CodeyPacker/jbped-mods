@@ -36,8 +36,8 @@ export function withBoard(cache, boards, b, data, at) {
   return { ...cache, version: VERSION, boards: out };
 }
 
-// PR data is valid only for the same Accounts: `key` names them (prsKey).
-export const prsKey = (accounts) => JSON.stringify(accounts.map((a) => [a.id, a.provider, a.login ?? a.org ?? null]));
+// PR data is valid only for the same Accounts and followed repos: `key` names them (prsKey).
+export const prsKey = (accounts) => JSON.stringify(accounts.map((a) => [a.id, a.provider, a.login ?? a.org ?? null, a.followedRepos ?? null, a.projects ?? null]));
 
 export function cachedPrs(cache, key) {
   const e = cache.prs;

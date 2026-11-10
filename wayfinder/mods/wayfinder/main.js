@@ -5,13 +5,14 @@
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, TextView } from "gpui-base";
+import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, boardStatuses, providerFor } from "./flow.js";
+import * as edits from "./settings.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, byRepo, initials, trackColumns } from "./providers/contract.js";
+import { byColumn, byRepo, initials, trackColumns, can } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -61,6 +62,16 @@ function segmented(id, options, value, t, onPick) {
       .child(div().truncate().child(label));
   }));
 }
+
+function checkRow(id, on, label, t, onClick) {
+  return h_flex().id(id).flex_1().min_w(0).h(28).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+    .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => onClick(cx))
+    .child(h_flex().w(14).h(14).flex_none().justify_center().items_center().rounded(3).border_1()
+      .border_color(on ? t.accent : t.input).bg(on ? t.accent : t.background).text_size(10).text_color(t.background).when(on, (el) => el.child("✓")))
+    .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(label));
+}
+
+const field = (state, t, w = 260) => Input.new(state).w(w).h(28).px(8).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_size(12).text_color(t.foreground);
 
 // Markdown link text: brackets would end the link early.
 const linkText = (s) => String(s ?? "").replace(/([[\]\\])/g, "\\$1");
@@ -131,6 +142,18 @@ export default class Wayfinder extends View {
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
     this.tickets = {}; // ticket key -> { status, data, error }
     this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
+    this.found = {}; // settings: account id -> { boards: { status, data, error }, repos: { ... } }
+    this.statusLists = {}; // settings: board id -> { status, data, error }
+    this.statusOpen = null; // settings: the board id whose statuses are shown
+    this.confirm = null; // settings: the remove button waiting for a second click
+    this.settingsError = null;
+    this.inputs = {
+      profile: InputState.new({ placeholder: "new profile name" }),
+      gh: InputState.new({ placeholder: "GitHub user name" }),
+      ado: InputState.new({ placeholder: "https://dev.azure.com/<org>" }),
+      repo: InputState.new({ placeholder: "Filter repos" }),
+    };
+    this.inputs.repo.on("change", (_e, cx) => cx.notify());
     this.reload(cx);
     cx.timer.every(60_000, (cx) => { if (this.watch(cx)) cx.notify(); }); // reads the layout only: no requests
     cx.spawn(async (cx) => {
@@ -180,7 +203,8 @@ export default class Wayfinder extends View {
   refresh(cx) {
     this.lastRefresh = Date.now();
     this.checkSignIn(cx);
-    if (this.view === "prs") this.fetchPrs(cx);
+    if (this.view === "settings") this.loadSettings(cx, true);
+    else if (this.view === "prs") this.fetchPrs(cx);
     else if (this.board) this.fetchBoard(this.board, cx);
     else cx.spawn((cx) => this.check(cx));
     if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
@@ -207,6 +231,8 @@ export default class Wayfinder extends View {
     this.boards = {};
     this.tickets = {};
     this.prs = null;
+    this.found = {};
+    this.statusLists = {};
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     this.lastRefresh = null;
     if (this.selected) this.fetchTicketLater = true;
@@ -247,12 +273,12 @@ export default class Wayfinder extends View {
     cx.spawn(async (cx) => {
       let data = null;
       try { data = await loadBoard(profile, b, io); } catch (e) {
-        if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+        if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
         this.boards[b.id] = { status: "error", data: prev?.data ?? null, at: prev?.at ?? null, tried, error: String(e.message ?? e) };
         cx.notify();
         return;
       }
-      if (this.profile !== profile) return;
+      if (this.profile?.name !== profile.name) return;
       const at = Date.now();
       this.boards[b.id] = { status: "ok", data, at, tried };
       cx.notify();
@@ -267,7 +293,7 @@ export default class Wayfinder extends View {
     const io = this.io();
     cx.spawn(async (cx) => {
       const data = await loadPullRequests(profile, io);
-      if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+      if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
       const at = Date.now();
       this.prs = { status: "ok", data, at, tried };
       cx.notify();
@@ -299,7 +325,7 @@ export default class Wayfinder extends View {
     const profile = this.profile, io = this.io();
     cx.spawn(async (cx) => {
       const states = await signInStates(profile, io);
-      if (this.profile !== profile) return; // a reload replaced the Profile meanwhile
+      if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
       this.signIn = states;
       cx.notify();
     });
@@ -348,7 +374,7 @@ export default class Wayfinder extends View {
       try { next = { status: "ok", data: await loadTicket(p, b, sel.summary, io) }; } catch (e) {
         next = { status: "error", data: this.tickets[key]?.data ?? null, error: String(e.message ?? e) };
       }
-      if (this.profile !== p) return; // a reload replaced the Profile meanwhile
+      if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.tickets[key] = next;
       cx.notify();
     });
@@ -394,6 +420,214 @@ export default class Wayfinder extends View {
     this.reload(cx);
   }
 
+  // ---- Settings (#17): edits wayfinder.json. Each change is written at once, in order.
+
+  openSettings(cx) {
+    this.view = "settings";
+    this.settingsError = null;
+    this.loadSettings(cx);
+  }
+
+  // What each Account can offer: its Boards and its repos. Loaded once per open, or on Refresh.
+  loadSettings(cx, force = false) {
+    const p = this.profile;
+    if (!p) return;
+    const io = this.io();
+    for (const a of p.accounts) {
+      const f = (this.found[a.id] ??= {});
+      const provider = providerFor(a);
+      for (const [key, cap, fn] of [["boards", "boards", discoverBoards], ["repos", "repos", discoverRepos]]) {
+        if (!can(provider, cap) || (!force && f[key] && f[key].status !== "error")) continue;
+        f[key] = { status: "loading", data: f[key]?.data ?? null };
+        cx.spawn(async (cx) => {
+          let next;
+          try { next = { status: "ok", data: await fn(a, io) }; } catch (e) { next = { status: "error", data: f[key]?.data ?? null, error: String(e.message ?? e) }; }
+          if (this.profile?.name !== p.name || this.found[a.id] !== f) return;
+          f[key] = next;
+          cx.notify();
+        });
+      }
+    }
+    if (force) { this.statusLists = {}; if (this.statusOpen) this.loadStatuses(this.statusOpen, cx); }
+  }
+
+  loadStatuses(boardId, cx) {
+    const p = this.profile, b = p?.boards.find((x) => x.id === boardId);
+    if (!b) return;
+    this.statusLists[boardId] = { status: "loading" };
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      let next;
+      try { next = { status: "ok", data: await boardStatuses(p, b, io) }; } catch (e) { next = { status: "error", error: String(e.message ?? e) }; }
+      if (this.profile?.name !== p.name) return;
+      this.statusLists[boardId] = next;
+      cx.notify();
+    });
+  }
+
+  // Applies `change(rawConfig)` and writes it. A change that leaves the config invalid is refused.
+  saveConfig(change, cx) {
+    const s = this.state;
+    const base = s.status === "ok" ? s.config : s.status === "missing" ? {} : null;
+    if (!base) return;
+    let raw;
+    try { raw = change(base); } catch (e) { this.settingsError = String(e.message ?? e); cx.notify(); return; }
+    const text = JSON.stringify(raw, null, 2) + "\n";
+    const parsed = parseConfig(text, herdrWindow().platform);
+    if (parsed.errors.length) { this.settingsError = parsed.errors[0]; cx.notify(); return; }
+    this.settingsError = null;
+    this.confirm = null;
+    const expected = s.status === "ok" ? s.text : null;
+    // Another active Profile or runner needs a full reload. Otherwise the change applies in place.
+    const reload = s.status !== "ok" || parsed.profile.name !== s.profile.name || parsed.profile.runner !== s.profile.runner;
+    if (!reload) {
+      this.state = { ...s, text, config: parsed.config, profile: parsed.profile, profileNames: parsed.profileNames };
+      if (this.prs) this.prs = { ...this.prs, status: "cached" }; // followed repos may have changed: refetch on show
+    }
+    this.writes = (this.writes ?? Promise.resolve()).then(async () => {
+      try { await writeTextFile(s.path, text, expected); } catch (e) {
+        this.settingsError = `Couldn't save (${e.message ?? e}). The file changed elsewhere, so it was read again.`;
+        this.reload(cx); cx.notify(); return;
+      }
+      if (reload) { this.reload(cx); cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  // A remove button: the first click asks, the second removes.
+  removeButton(id, t, onRemove) {
+    const armed = this.confirm === id;
+    return button(`wf-rm-${id}`, armed ? "Click again to remove" : "Remove", t, (cx) => {
+      if (armed) onRemove(cx); else this.confirm = id;
+      cx.notify();
+    }, { on: armed });
+  }
+
+  settingsView(t) {
+    const s = this.state, p = this.profile;
+    const heading = (text) => div().pt(8).text_size(13).font_semibold().text_color(t.foreground).child(text);
+    const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
+    const card = (id, kids) => v_flex().id(id).p(12).gap(6).rounded(8).bg(t.surface).border_1().border_color(t.border).children(kids);
+    const who = (a) => `${a.id} · ${a.provider === "azure" ? a.org : a.login}`;
+    const out = [];
+    if (this.settingsError) out.push(note(this.settingsError, t.blocked));
+
+    // Profiles
+    const names = s.profileNames ?? [];
+    out.push(heading("Profiles"), note("Each Profile is a separate set of Accounts and Boards. Wayfinder shows one at a time."));
+    out.push(card("wf-set-profiles", [
+      ...names.map((n) => h_flex().id(`wf-set-p-${n}`).gap(8).items_center()
+        .child(div().flex_1().text_size(12).text_color(t.foreground).child(n === p?.name ? `${n} (shown)` : n))
+        .when(n !== p?.name, (el) => el.child(button(`wf-use-${n}`, "Show", t, (cx) => cx.spawn(async (cx) => { await this.switchProfile(n, cx); cx.notify(); }))))
+        .when(names.length > 1, (el) => el.child(this.removeButton(`profile-${n}`, t, (cx) => this.saveConfig((raw) => edits.removeProfile(raw, n), cx))))),
+      h_flex().gap(8).items_center().child(field(this.inputs.profile, t, 200))
+        .child(button("wf-add-profile", "Add profile", t, (cx) => {
+          const name = this.inputs.profile.value().trim();
+          this.saveConfig((raw) => {
+            const out = edits.addProfile(raw, name);
+            if (!names.length) out.activeProfile = name;
+            return out;
+          }, cx);
+          this.inputs.profile.set_value("");
+        })),
+    ]));
+    if (!p) return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);
+
+    // Accounts
+    out.push(heading(`Accounts in ${p.name}`), note("Wayfinder signs in through the gh and az CLIs and stores no secrets."));
+    out.push(card("wf-set-accounts", [
+      ...(p.accounts.length ? [] : [note("No accounts yet.")]),
+      ...p.accounts.flatMap((a) => {
+        const si = this.signIn?.[a.id];
+        return [
+          h_flex().id(`wf-set-a-${a.id}`).gap(8).items_center()
+            .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(who(a)))
+            .child(div().text_size(11).text_color(si?.ok === false ? t.blocked : t.dim).child(si ? (si.ok ? "signed in" : "sign in needed") : ""))
+            .child(this.removeButton(`account-${a.id}`, t, (cx) => this.saveConfig((raw) => edits.removeAccount(raw, p.name, a.id), cx))),
+          ...(si && !si.ok ? [this.signInCard(t, a, si)] : []),
+        ];
+      }),
+      h_flex().gap(8).items_center().child(field(this.inputs.gh, t))
+        .child(button("wf-add-gh", "Add GitHub account", t, (cx) => {
+          this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "github", login: this.inputs.gh.value().trim() }), cx);
+          this.inputs.gh.set_value(""); this.checkSignIn(cx); this.loadSettings(cx);
+        })),
+      h_flex().gap(8).items_center().child(field(this.inputs.ado, t))
+        .child(button("wf-add-ado", "Add Azure account", t, (cx) => {
+          this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "azure", org: this.inputs.ado.value().trim() }), cx);
+          this.inputs.ado.set_value(""); this.checkSignIn(cx); this.loadSettings(cx);
+        })),
+    ]));
+
+    // Boards
+    out.push(heading("Boards"), note("Tick the Boards to follow. With two or more, a switcher shows above the Board."));
+    for (const a of p.accounts.filter((x) => can(providerFor(x), "boards"))) {
+      const f = this.found[a.id]?.boards;
+      const found = f?.data ?? [];
+      const mine = p.boards.filter((b) => b.account === a.id);
+      const cfgFor = (d) => mine.find((b) => edits.showsBoard(b, a.id, d, Boolean(d.teamDefault)));
+      const unmatched = mine.filter((b) => !found.some((d) => cfgFor(d) === b));
+      const row = (key, on, label, toggle, b) => h_flex().id(`wf-set-b-${key}`).gap(8).items_center()
+        .child(checkRow(`wf-set-bc-${key}`, on, label, t, toggle))
+        .when(Boolean(b) && can(providerFor(a), "statuses"), (el) => el.child(button(`wf-st-${key}`, this.statusOpen === b.id ? "Hide statuses" : "Statuses",
+          t, (cx) => { this.statusOpen = this.statusOpen === b.id ? null : b.id; if (this.statusOpen && !this.statusLists[b.id]) this.loadStatuses(b.id, cx); cx.notify(); },
+          { on: this.statusOpen === b.id || Boolean(b?.trackedStatuses?.length) })));
+      const rows = [];
+      for (const [i, d] of found.entries()) {
+        const b = cfgFor(d);
+        rows.push(row(`${a.id}-${i}`, Boolean(b), d.title, (cx) => this.saveConfig((raw) => (b ? edits.unfollowBoard(raw, p.name, b.id) : edits.followBoard(raw, p.name, a.id, d)), cx), b));
+        if (b && this.statusOpen === b.id) rows.push(this.statusEditor(t, p, b));
+      }
+      for (const b of unmatched) {
+        rows.push(row(`${a.id}-cfg-${b.id}`, true, b.name ?? b.id, (cx) => this.saveConfig((raw) => edits.unfollowBoard(raw, p.name, b.id), cx), b));
+        if (this.statusOpen === b.id) rows.push(this.statusEditor(t, p, b));
+      }
+      out.push(card(`wf-set-boards-${a.id}`, [
+        note(who(a)),
+        ...(f?.status === "loading" ? [note("Finding boards…")] : []),
+        ...(f?.status === "error" ? [note(`Couldn't list boards: ${f.error}`, t.blocked)] : []),
+        ...(f?.status === "ok" && !found.length ? [note("No boards found.")] : []),
+        ...rows,
+      ]));
+    }
+
+    // Pull Request repos
+    out.push(heading("Pull Request repos"), note("Follow repos to see only their Pull Requests. Following none shows them all."));
+    out.push(h_flex().gap(8).items_center().child(field(this.inputs.repo, t)));
+    const q = this.inputs.repo.value();
+    for (const a of p.accounts.filter((x) => can(providerFor(x), "repos"))) {
+      const f = this.found[a.id]?.repos;
+      const followed = a.followedRepos ?? [];
+      const { rows, hidden } = edits.repoRows(f?.data ?? [], followed, q);
+      out.push(card(`wf-set-repos-${a.id}`, [
+        note(`${who(a)}: ${followed.length ? `following ${followed.length}` : "following all repos"}`),
+        ...(f?.status === "loading" ? [note("Listing repos…")] : []),
+        ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
+        ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, followed.includes(r), r, t,
+          (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
+        ...(hidden ? [note(`${hidden} more match. Type to narrow the list.`)] : []),
+      ]));
+    }
+    return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);
+  }
+
+  // A Board's Tracked Statuses: ticked ones in Column order with up and down, then the rest.
+  statusEditor(t, p, b) {
+    const st = this.statusLists[b.id];
+    const tracked = b.trackedStatuses ?? [];
+    const set = (list, cx) => this.saveConfig((raw) => edits.setTrackedStatuses(raw, p.name, b.id, list), cx);
+    const rest = (st?.data ?? []).filter((x) => !tracked.some((y) => y.toLowerCase() === x.toLowerCase()));
+    return v_flex().id(`wf-st-ed-${b.id}`).ml(22).p(8).gap(2).rounded(6).bg(t.background).border_1().border_color(t.border)
+      .child(div().text_size(11).text_color(t.dim).child(tracked.length ? "Each ticked status is one Column, in this order." : "None ticked: the Board's own Columns."))
+      .when(st?.status === "loading", (el) => el.child(div().text_size(11).text_color(t.dim).child("Loading statuses…")))
+      .when(st?.status === "error", (el) => el.child(div().text_size(11).text_color(t.blocked).child(`Couldn't list statuses: ${st?.error}`)))
+      .children(tracked.map((x, i) => h_flex().id(`wf-st-t-${b.id}-${i}`).gap(4).items_center()
+        .child(checkRow(`wf-st-c-${b.id}-${i}`, true, x, t, (cx) => set(edits.toggleStatus(tracked, x), cx)))
+        .child(button(`wf-st-up-${b.id}-${i}`, "↑", t, (cx) => set(edits.move(tracked, i, -1), cx)))
+        .child(button(`wf-st-dn-${b.id}-${i}`, "↓", t, (cx) => set(edits.move(tracked, i, 1), cx)))))
+      .children(rest.map((x, i) => h_flex().child(checkRow(`wf-st-r-${b.id}-${i}`, false, x, t, (cx) => set(edits.toggleStatus(tracked, x), cx)))));
+  }
+
   header(t) {
     return h_flex().h(44).px(12).gap(10).flex_none().items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Wayfinder"))
@@ -403,6 +637,7 @@ export default class Wayfinder extends View {
       .child(div().flex_1())
       .when(Boolean(this.profile) && this.state.profileNames.length > 1, (el) => el.child(segmented("wf-profiles",
         this.state.profileNames.map((n) => [n, n]), this.profile.name, t, (name, cx) => cx.spawn(async (cx) => { await this.switchProfile(name, cx); cx.notify(); }))))
+      .child(button("wf-settings", "Settings", t, (cx) => { this.openSettings(cx); cx.notify(); }, { on: this.view === "settings" }))
       .child(button("wf-refresh", "Refresh", t, (cx) => this.reload(cx)))
       .child(button("wf-full", this.fullscreen ? "Exit fullscreen" : "Fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }, { on: this.fullscreen }))
       .child(button("wf-close", "Close", t, () => this.close_()));
@@ -513,8 +748,9 @@ export default class Wayfinder extends View {
   body(t) {
     const s = this.state;
     if (s.status === "loading") return this.message(t, "Loading…", []);
+    if (this.view === "settings" && s.status !== "invalid") return this.settingsView(t);
     if (s.status === "missing") {
-      return this.message(t, "No configuration yet", [`Create ${s.path} and press Refresh. A minimal file:`])
+      return this.message(t, "No configuration yet", [`Open Settings to add a profile, or create ${s.path} and press Refresh. A minimal file:`])
         .child(div().p(10).rounded(6).bg(t.surface).border_1().border_color(t.border).text_size(12)
           .child(TextView.markdown("wf-example", "```json\n" + EXAMPLE + "\n```").selectable(true)));
     }

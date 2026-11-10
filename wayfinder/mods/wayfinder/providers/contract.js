@@ -4,10 +4,12 @@
 //   {
 //     id: "github" | "azure",
 //     capabilities: string[],                       // which of CAPABILITIES it supports
-//     boards(account, io)  -> BoardRef[]            // what it can show, for discovery
+//     boards(account, io)  -> BoardRef[]            // what it can show, for discovery: { title, url, ref, teamDefault? }
 //     board(account, ref, io) -> Board
 //     ticket(account, ref, io) -> Ticket            // "ticket"
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
+//     repos(account, io) -> string[]                // "repos": what can be followed, "owner/name" or "project/repo"
+//     statuses(account, ref, io) -> string[]        // "statuses": a Board's states, for Tracked Statuses
 //     signInState(account, io, needs) -> { ok: true } | { ok: false, reason, command } // "signInState"
 //                  needs: { boards } (what the Profile uses the Account for, so scopes can be checked)
 //                  command: the exact shell command that fixes it, or null when there's none to run
@@ -45,7 +47,7 @@
 // PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt? }
 //   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
 
-export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "signInState", "move", "update"];
+export const CAPABILITIES = ["boards", "board", "ticket", "pullRequests", "repos", "statuses", "signInState", "move", "update"];
 
 export const NO_COLUMN = "__none__";
 

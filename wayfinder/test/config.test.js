@@ -67,11 +67,14 @@ test("boards must reference known accounts and repos", () => {
 });
 
 test("provider-specific account fields are required", () => {
-  const r = parse({ profiles: { p: { accounts: [{ id: "a", provider: "github" }, { id: "b", provider: "azure" }, { id: "c", provider: "jira" }] } } });
+  const r = parse({ profiles: { p: { accounts: [{ id: "a", provider: "github" }, { id: "b", provider: "azure", projects: "P" }, { id: "c", provider: "jira" }] } } });
   assert.ok(r.errors.some((e) => /\.login/.test(e)));
   assert.ok(r.errors.some((e) => /\.org/.test(e)));
   assert.ok(r.errors.some((e) => /\.projects/.test(e)));
   assert.ok(r.errors.some((e) => /\.provider/.test(e)));
+  // projects is optional (Settings finds Boards across the organization); followedRepos must be "a/b" names
+  assert.deepEqual(parse({ profiles: { p: { accounts: [{ id: "b", provider: "azure", org: "https://dev.azure.com/x" }] } } }).errors, []);
+  assert.ok(parse({ profiles: { p: { accounts: [{ id: "a", provider: "github", login: "x", followedRepos: ["nope"] }] } } }).errors.some((e) => /followedRepos/.test(e)));
 });
 
 test("duplicate ids and bad runners are errors", () => {
