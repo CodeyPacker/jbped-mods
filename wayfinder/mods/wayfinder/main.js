@@ -185,6 +185,7 @@ export default class Wayfinder extends View {
   mineKey(b) { return `wayfinder.mine.${this.profile.name}.${b.id}`; }
 
   reload(cx) {
+    const before = this.profile?.name ?? this.lastProfile;
     this.state = { status: "loading" };
     this.boards = {};
     this.tickets = {};
@@ -200,6 +201,10 @@ export default class Wayfinder extends View {
       this.state = parsed.errors.length
         ? { status: "invalid", path, errors: parsed.errors }
         : { status: "ok", path, text, ...parsed, runner: createRunner(parsed.profile.runner) };
+      // Another Profile: its Ticket detail must not carry over, even to a Board with the same id (D10).
+      const now = parsed.profile?.name ?? null;
+      if (now !== before) { this.selected = null; this.fetchTicketLater = false; }
+      this.lastProfile = now;
       if (this.state.status === "ok") {
         let cached = null;
         try { cached = await readTextFile(cacheFile(appHome(), parsed.profile.name)); } catch { /* no cache */ }
@@ -294,9 +299,12 @@ export default class Wayfinder extends View {
     this.tickets[key] = { status: "loading", data: this.tickets[key]?.data ?? null };
     const io = this.io();
     cx.spawn(async (cx) => {
-      try { this.tickets[key] = { status: "ok", data: await loadTicket(p, b, sel.summary, io) }; } catch (e) {
-        this.tickets[key] = { status: "error", data: this.tickets[key]?.data ?? null, error: String(e.message ?? e) };
+      let next;
+      try { next = { status: "ok", data: await loadTicket(p, b, sel.summary, io) }; } catch (e) {
+        next = { status: "error", data: this.tickets[key]?.data ?? null, error: String(e.message ?? e) };
       }
+      if (this.profile !== p) return; // a reload replaced the Profile meanwhile
+      this.tickets[key] = next;
       cx.notify();
     });
   }
@@ -327,8 +335,14 @@ export default class Wayfinder extends View {
     if (s.status !== "ok") return;
     const names = s.profileNames;
     if (names.length < 2) { notify({ title: "Wayfinder", body: "Only one profile is configured.", level: "info" }); return; }
-    const next = names[(names.indexOf(s.profile.name) + 1) % names.length];
-    const updated = JSON.stringify({ ...s.config, activeProfile: next }, null, 2) + "\n";
+    await this.switchProfile(names[(names.indexOf(s.profile.name) + 1) % names.length], cx);
+  }
+
+  // Saves the choice as the config's activeProfile, so it holds across restarts, then shows it.
+  async switchProfile(name, cx) {
+    const s = this.state;
+    if (s.status !== "ok" || name === s.profile.name || !s.profileNames.includes(name)) return;
+    const updated = JSON.stringify({ ...s.config, activeProfile: name }, null, 2) + "\n";
     try { await writeTextFile(s.path, updated, s.text); } catch (e) {
       notify({ title: "Wayfinder", body: `Couldn't switch profile: ${e.message ?? e}`, level: "error" });
     }
@@ -342,7 +356,8 @@ export default class Wayfinder extends View {
         this.view = key; save(VIEW_KEY, key); cx.notify();
       }))
       .child(div().flex_1())
-      .when(Boolean(this.profile), (el) => el.child(div().text_size(12).text_color(t.muted).child(this.profile.name)))
+      .when(Boolean(this.profile) && this.state.profileNames.length > 1, (el) => el.child(segmented("wf-profiles",
+        this.state.profileNames.map((n) => [n, n]), this.profile.name, t, (name, cx) => cx.spawn(async (cx) => { await this.switchProfile(name, cx); cx.notify(); }))))
       .child(button("wf-refresh", "Refresh", t, (cx) => this.reload(cx)))
       .child(button("wf-full", this.fullscreen ? "Exit fullscreen" : "Fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }, { on: this.fullscreen }))
       .child(button("wf-close", "Close", t, () => this.close_()));
