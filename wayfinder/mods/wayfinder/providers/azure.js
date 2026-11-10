@@ -29,6 +29,13 @@ export const azDir = (profile) => String(profile ?? "default").replace(/[^A-Za-z
 export const azArgs = (profile, args) => ["-c", AZ_SH, "wayfinder-az", azDir(profile), "az", ...args];
 const az = (io, args, timeout = 30000) => io.run("sh", azArgs(io.profile, args), { timeout });
 
+// Downloads an attachment to a file through az (which signs the request), unless the file is there.
+// A Windows path (Herdr's home on Windows, the runner in WSL) is converted. A fixed script: url, path
+// and resource are argv.
+const DL_SH = 'p="$2"; case "$p" in [A-Za-z]:*) p=$(wslpath -u "$p") || exit 1;; esac; [ -s "$p" ] && exit 0; mkdir -p "$(dirname "$p")" && az rest --resource "$3" --url "$1" --output-file "$p.part" && mv "$p.part" "$p"';
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp)$/i;
+export const isImageName = (name) => IMAGE_EXT.test(String(name ?? ""));
+
 // Moves a Profile's az login folder to its new name (a Profile rename). Nothing to move, or a folder
 // already there, leaves both as they are. A fixed script: the names are argv.
 const MV_SH = 'b="$HOME/.config/wayfinder/azure"; if [ -d "$b/$1" ] && [ ! -e "$b/$2" ]; then mv "$b/$1" "$b/$2"; fi';
@@ -170,6 +177,24 @@ export function mapComments(page, url) {
   };
 }
 
+// A work item's attached image files (not the ones shown inline: those are in the text).
+export function attachedImages(relations) {
+  return (relations ?? []).filter((r) => r.rel === "AttachedFile" && isImageName(r.attributes?.name))
+    .map((r) => ({ url: `${r.url}?fileName=${encodeURIComponent(r.attributes.name)}`, name: r.attributes.name }));
+}
+
+// The local file name for an attachment URL in this organization, or null for any other URL.
+export function imageName(account, url) {
+  const org = String(account.org ?? "").replace(/\/$/, "");
+  if (!validOrg(org) || !String(url).startsWith(`${org}/`)) return null;
+  const [path, query = ""] = String(url).split("#")[0].split("?");
+  const m = /\/_apis\/wit\/attachments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(path);
+  let file = "";
+  try { file = decodeURIComponent(/(?:^|&)fileName=([^&]*)/i.exec(query)?.[1] ?? ""); } catch { /* bad escape: no name */ }
+  const ext = IMAGE_EXT.exec(file);
+  return m && ext ? `${m[1].toLowerCase()}.${ext[1].toLowerCase()}` : null;
+}
+
 export function mapTicket(w, { org, project, columnField = null, parent = null, comments = { comments: [], moreComments: 0 }, pullRequests = [] }) {
   const f = w.fields ?? {}, type = f["System.WorkItemType"] ?? "";
   const a = f["System.AssignedTo"], p = f["Microsoft.VSTS.Common.Priority"];
@@ -188,12 +213,13 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
     acceptanceCriteria: ac in f ? htmlToMarkdown(f[ac]) : null,
     ...comments,
     pullRequests,
+    images: attachedImages(w.relations),
   };
 }
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "pullRequests", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "pullRequests", "repos", "statuses", "signInState"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -212,6 +238,17 @@ export const azure = {
       : ((await rest(org, tok, io, "_apis/projects?$top=500")).value ?? []).map((p) => p.name);
     const [mine, review] = await Promise.all(["creatorId", "reviewerId"].map((f) => Promise.all(projects.map((p) => list(p, f)))));
     return { me, mine: mine.flat(), needsReview: review.flat().filter((pr) => pr.author.id !== me), more: { mine: 0, needsReview: 0 } };
+  },
+
+  imageName,
+
+  // Saves an attachment image (an imageName URL) to `path`. A file already there is kept.
+  async downloadImage(account, url, path, io) {
+    if (!imageName(account, url)) throw new Error("Not an attachment of this organization");
+    const full = `${url}${url.includes("?") ? "&" : "?"}api-version=${API_VERSION}`;
+    // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
+    const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
+    if (r.code !== 0) throw new Error(firstLine(r) || `az answered ${r.code}`);
   },
 
   // ref: a TicketSummary's ref from board().

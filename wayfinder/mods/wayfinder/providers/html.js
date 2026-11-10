@@ -10,7 +10,8 @@ const decode = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+\d*);/gi, (m, e) => {
   }
   return ENTITIES[e.toLowerCase()] ?? m;
 });
-const escape = (s) => s.replace(/([\\`*_[\]<>#|~])/g, "\\$1");
+// "!" too, so text before a link can never turn it into an image.
+const escape = (s) => s.replace(/([\\`*_[\]<>#|~!])/g, "\\$1");
 const safeUrl = (u) => (/^(https?:|mailto:)/i.test(u ?? "") ? u.replace(/[()\s]/g, encodeURIComponent) : null);
 const attr = (tag, name) => {
   const m = new RegExp(`\\s${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
@@ -66,7 +67,7 @@ export function htmlToMarkdown(html) {
         if (close) { const href = links.pop(); if (href) out += `](<${href}>)`; break; }
         { const href = attr(tok, "data-vss-mention") ? null : safeUrl(attr(tok, "href")); links.push(href); if (href) out += "["; }
         break;
-      case "img": { const u = safeUrl(attr(tok, "src")); if (u) out += `[${escape(attr(tok, "alt") || "image")}](<${u}>)`; break; }
+      case "img": { const u = safeUrl(attr(tok, "src")); if (u) out += `![${escape(attr(tok, "alt") || "image")}](<${u}>)`; break; }
       default: break; // span, font, u and the rest: text only
     }
   }

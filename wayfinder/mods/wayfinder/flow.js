@@ -62,6 +62,30 @@ export async function loadTicket(profile, boardCfg, summary, io, registry = PROV
   return provider.ticket(account, summary.ref, io);
 }
 
+// Images in a Ticket's text (markdown ![alt](<url>)) and its attached images.
+export const IMAGE_MD = /!\[((?:\\.|[^\]\\])*)\]\(<([^>]+)>\)/g;
+export function ticketImages(ticket) {
+  const texts = [ticket.description, ticket.acceptanceCriteria, ...(ticket.comments ?? []).map((c) => c.body)];
+  const urls = texts.flatMap((s) => [...String(s ?? "").matchAll(IMAGE_MD)].map((m) => m[2]));
+  return [...new Set([...urls, ...(ticket.images ?? []).map((i) => i.url)])];
+}
+
+// Downloads a Ticket's images into `dir`, `limit` at a time. Calls onImage(url, name | null, error)
+// as each finishes, after onStart(url). URLs the Provider doesn't own are skipped: they show as links.
+export async function loadImages(profile, boardCfg, ticket, dir, io, onImage, { limit = 4, onStart = () => {}, registry = PROVIDERS } = {}) {
+  const { account, provider } = resolve(profile, boardCfg, registry);
+  if (!can(provider, "images")) return;
+  const queue = ticketImages(ticket).map((url) => [url, provider.imageName(account, url)]).filter(([, n]) => n);
+  for (const [url] of queue) onStart(url);
+  const worker = async () => {
+    for (let job; (job = queue.shift());) {
+      const [url, name] = job;
+      try { await provider.downloadImage(account, url, `${dir}/${name}`, io); onImage(url, name, null); } catch (e) { onImage(url, null, String(e.message ?? e)); }
+    }
+  };
+  await Promise.all(Array.from({ length: limit }, worker));
+}
+
 // Settings discovery. Each rejects with a message fit to show.
 export async function discoverBoards(account, io, registry = PROVIDERS) {
   const provider = providerFor(account, registry);

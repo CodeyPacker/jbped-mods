@@ -20,7 +20,7 @@ test("lists, nested and ordered", () => {
 
 test("headings, links, images, code", () => {
   assert.equal(md('<h2>Steps</h2><p>See <a href="https://x.test/a b">the doc</a>.</p>'), "## Steps\n\nSee [the doc](<https://x.test/a%20b>).");
-  assert.equal(md('<img src="https://dev.azure.com/o/_apis/wit/attachments/1" alt="shot">'), "[shot](<https://dev.azure.com/o/_apis/wit/attachments/1>)");
+  assert.equal(md('<img src="https://dev.azure.com/o/_apis/wit/attachments/1" alt="shot">'), "![shot](<https://dev.azure.com/o/_apis/wit/attachments/1>)");
   assert.equal(md("<p>run <code>npm test</code></p><pre>a  b\n  c</pre>"), "run `npm test`\n\n```\na  b\n  c\n```");
 });
 
@@ -33,4 +33,8 @@ test("text can't turn into markdown or HTML", () => {
   assert.equal(md("<p>a *b* _c_ [d](e) &lt;script&gt; # h</p>"), "a \\*b\\* \\_c\\_ \\[d\\](e) \\<script\\> \\# h");
   assert.equal(md("<b>x&#1;y</b>"), "**xy**");
   assert.equal(md("<script>alert(1)</script><style>p{}</style>ok"), "ok");
+});
+
+test("a ! in text never turns a link into an image", () => {
+  assert.equal(md('Wow!<a href="https://x.test">x</a>'), "Wow\\![x](<https://x.test>)");
 });

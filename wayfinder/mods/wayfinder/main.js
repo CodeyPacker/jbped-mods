@@ -4,12 +4,12 @@
 // stops showing. Esc closes the Ticket detail panel, then leaves fullscreen.
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { shellInvocation } from "./command.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter } from "./providers/contract.js";
@@ -17,6 +17,7 @@ import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPr
 
 const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
+const IMAGE_DIR = "data/wayfinder-images"; // under Herdr's home: image() reads from there
 const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
 const SITE = { github: "GitHub", azure: "Azure" }; // for the Board's "View in …" link
 
@@ -153,6 +154,7 @@ export default class Wayfinder extends View {
     this.lastRefresh = null;
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
     this.tickets = {}; // ticket key -> { status, data, error }
+    this.images = {}; // image url -> { status, file, error }: saved files stay across reloads
     this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
     this.found = {}; // settings: account id -> { boards: { status, data, error }, repos: { ... } }
     this.statusLists = {}; // settings: board id -> { status, data, error }
@@ -389,6 +391,18 @@ export default class Wayfinder extends View {
       }
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.tickets[key] = next;
+      if (next.status === "ok") this.fetchImages(p, b, next.data, io, cx);
+      cx.notify();
+    });
+  }
+
+  // A Ticket's images, saved under Herdr's home so image() can show them. Each shows as it arrives.
+  fetchImages(p, b, ticket, io, cx) {
+    cx.spawn(async (cx) => {
+      await loadImages(p, b, ticket, `${appHome()}/${IMAGE_DIR}`, io, (url, name, error) => {
+        this.images[url] = name ? { status: "ok", file: `${IMAGE_DIR}/${name}` } : { status: "error", error };
+        cx.notify();
+      }, { onStart: (url) => { if (!this.images[url]) this.images[url] = { status: "loading" }; } });
       cx.notify();
     });
   }
@@ -840,6 +854,25 @@ export default class Wayfinder extends View {
     const tk = entry.data;
     const k = sum.key;
     const md = (id, text) => div().text_size(13).text_color(t.foreground).child(TextView.markdown(`wf-${id}-${k}`, text).selectable(true));
+    // Text with its images shown in place. One not saved (yet) shows as a link.
+    const pic = (url, alt) => {
+      const im = this.images[url];
+      if (im?.status === "ok") return div().max_w_full().rounded(6).overflow_hidden().border_1().border_color(t.border).child(image(im.file).max_w_full());
+      return div().text_size(12).text_color(t.dim).child(im?.status === "error" ? `Couldn't load image: ${im.error}` : `Loading ${alt || "image"}…`);
+    };
+    const rich = (id, text) => {
+      const parts = [];
+      let at = 0, n = 0;
+      for (const m of String(text).matchAll(IMAGE_MD)) {
+        const before = text.slice(at, m.index);
+        if (before.trim()) parts.push(md(`${id}-${n++}`, before));
+        const alt = m[1].replace(/\\(.)/g, "$1");
+        parts.push(this.images[m[2]] ? pic(m[2], alt) : md(`${id}-${n++}`, link(alt || "image", m[2])));
+        at = m.index + m[0].length;
+      }
+      if (String(text).slice(at).trim() || !parts.length) parts.push(md(`${id}-${n}`, String(text).slice(at)));
+      return v_flex().gap(8).children(parts);
+    };
     const section = (title) => div().pt(8).text_size(11).font_semibold().text_color(t.dim).child(title.toUpperCase());
     const row = (label, value) => h_flex().gap(8).items_start().text_size(12)
       .child(div().w(84).flex_none().text_color(t.dim).child(label))
@@ -865,8 +898,10 @@ export default class Wayfinder extends View {
           .child(row("Parent", tk.parent ? `${tk.parent.id} ${tk.parent.title}` : null)))
         .when(Boolean(tk.url), (el) => el.child(md("url", link("Open in browser", tk.url))))
         .child(section(tk.descriptionLabel ?? "Description"))
-        .child(tk.description.trim() ? md("desc", tk.description) : div().text_size(12).text_color(t.dim).child("No description."))
-        .when(tk.acceptanceCriteria != null, (el) => el.child(section("Acceptance criteria")).child(md("ac", tk.acceptanceCriteria ?? "")))
+        .child(tk.description.trim() ? rich("desc", tk.description) : div().text_size(12).text_color(t.dim).child("No description."))
+        .when(tk.acceptanceCriteria != null, (el) => el.child(section("Acceptance criteria")).child(rich("ac", tk.acceptanceCriteria ?? "")))
+        .when((tk.images ?? []).length > 0, (el) => el.child(section(`Attached images (${tk.images.length})`))
+          .children(tk.images.map((im) => v_flex().gap(4).child(div().text_size(11).text_color(t.dim).child(im.name)).child(pic(im.url, im.name)))))
         .child(section(`Pull requests (${tk.pullRequests.length})`))
         .when(tk.pullRequests.length > 0, (el) => el.child(md("prs", tk.pullRequests
           .map((pr) => `- ${link(`${pr.id} ${pr.title}`, pr.url)}${pr.draft || pr.state ? ` · ${pr.draft ? "draft" : pr.state}` : ""}`).join("\n"))))
@@ -874,7 +909,7 @@ export default class Wayfinder extends View {
         .when(tk.moreComments > 0, (el) => el.child(md("more", link(`${tk.moreComments} older comments`, tk.url))))
         .children(tk.comments.map((c, i) => v_flex().gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
           .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
-          .child(md(`c${i}`, c.body))));
+          .child(rich(`c${i}`, c.body))));
     }
     return v_flex().id("wf-ticket").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border)
       .child(head).child(body);
