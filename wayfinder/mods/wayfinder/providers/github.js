@@ -112,6 +112,7 @@ export function mapItems(nodes) {
       type: TYPE[c.__typename] ?? c.__typename,
       url: c.url ?? null,
       columnId: n.status?.optionId ?? NO_COLUMN,
+      status: n.status?.name ?? null,
       assignees: people(c),
       priority: n.priority?.name ?? null,
     });

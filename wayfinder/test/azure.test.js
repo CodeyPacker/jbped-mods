@@ -62,7 +62,7 @@ test("work items map to TicketSummaries in their team's Column", () => {
   ], BOARD, { org: ORG, project: "My Proj" });
   assert.deepEqual(a, {
     ref: { id: 7, project: "My Proj", columnField: COLUMN_FIELD }, key: "7", id: "7", title: "T7", type: "User Story", url: `${ORG}/My%20Proj/_workitems/edit/7`,
-    columnId: "Review", assignees: [{ id: "u1", name: "Ann Lee" }], priority: "P2",
+    columnId: "Review", status: "Active", assignees: [{ id: "u1", name: "Ann Lee" }], priority: "P2",
   });
   assert.equal(b.columnId, "Doing");
   assert.deepEqual(b.assignees, []);

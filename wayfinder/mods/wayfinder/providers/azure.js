@@ -102,6 +102,7 @@ export function mapWorkItems(items, board, { org, project }) {
       ref: { id: w.id, project, columnField },
       key: String(w.id), id: String(w.id), title: f["System.Title"] ?? "", type: f["System.WorkItemType"] ?? "", url,
       columnId: (columnField && f[columnField]) || byState(f["System.WorkItemType"], f["System.State"]),
+      status: f["System.State"] ?? null,
       assignees: a ? [{ id: a.id, name: a.displayName ?? a.uniqueName ?? "" }] : [],
       priority: p != null ? `P${p}` : null,
     };

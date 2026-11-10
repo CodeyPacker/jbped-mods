@@ -23,7 +23,7 @@ test("items map to TicketSummaries", () => {
   assert.deepEqual(t, {
     ref: { itemId: "item-12", contentId: "c-12", kind: "Issue", url: "https://github.com/o/web/issues/12" },
     key: "item-12", id: "web#12", title: "T12", type: "Issue", url: "https://github.com/o/web/issues/12",
-    columnId: "doing", assignees: [{ id: "ann", name: "Ann Lee" }], priority: "P1",
+    columnId: "doing", status: "doing", assignees: [{ id: "ann", name: "Ann Lee" }], priority: "P1",
   });
 });
 

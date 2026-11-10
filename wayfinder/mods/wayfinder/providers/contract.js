@@ -24,6 +24,7 @@
 //   id         what people call it: "#12", "web#12", "4521"
 //   title, type, url
 //   columnId   the Column it's in (Column.id)
+//   status     the Provider's state name (Azure State, GitHub Status), or null
 //   assignees  [{ id, name }]
 //   priority   string | null
 // }
@@ -65,4 +66,20 @@ export function byColumn(board, { mine = false } = {}) {
     groups.get(t.columnId)?.push(t);
   }
   return board.columns.map((c) => ({ column: c, tickets: groups.get(c.id) }));
+}
+
+// The Board with one Column per Tracked Status (D21), in the given order. States match without regard
+// to case. Tickets in other states drop out, so two states sharing one web-board column split in two.
+export function trackColumns(board, statuses) {
+  const columns = [], seen = new Set();
+  for (const s of statuses ?? []) {
+    const id = `status:${s.toLowerCase()}`;
+    if (!seen.has(id)) { seen.add(id); columns.push({ id, name: s }); }
+  }
+  const tickets = [];
+  for (const t of board.tickets) {
+    const id = t.status == null ? null : `status:${String(t.status).toLowerCase()}`;
+    if (seen.has(id)) tickets.push({ ...t, columnId: id });
+  }
+  return { ...board, columns, tickets };
 }

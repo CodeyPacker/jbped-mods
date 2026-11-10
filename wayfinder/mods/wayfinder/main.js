@@ -11,7 +11,7 @@ import { parseConfig } from "./config.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, signInStates } from "./flow.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, initials } from "./providers/contract.js";
+import { byColumn, initials, trackColumns } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -388,7 +388,7 @@ export default class Wayfinder extends View {
       content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : skeletonColumns(t);
     } else {
       content = h_flex().id("wf-columns").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
-        .children(byColumn(entry.data, { mine }).map(({ column, tickets }) =>
+        .children(byColumn(b.trackedStatuses?.length ? trackColumns(entry.data, b.trackedStatuses) : entry.data, { mine }).map(({ column, tickets }) =>
           v_flex().id(`wf-col-${column.id}`).w(COLUMN_W).flex_none().max_h_full().rounded(10).bg(t.chrome).border_1().border_color(t.border)
             .child(h_flex().h(36).px(12).gap(8).flex_none().items_center()
               .child(div().text_size(12).font_semibold().text_color(t.foreground).truncate().child(column.name))
