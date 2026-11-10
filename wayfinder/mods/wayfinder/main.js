@@ -226,10 +226,6 @@ export default class Wayfinder extends View {
     if (!this.shownNow()) { this.hidden = true; return false; }
     const showing = this.hidden;
     this.hidden = false;
-    // Back to fullscreen if it was on at Close. After this render: watch runs during render.
-    if (showing && load(WANT_FULL_KEY, "0") === "1" && !this.fullscreen) {
-      cx.timer.after(0, () => { if (this.shownNow() && !this.fullscreen) { this.setFullscreen(true, { remember: false }); } });
-    }
     if (this.profile && due(this.lastRefresh, Date.now(), { showing })) this.refresh(cx);
     return true;
   }
@@ -990,8 +986,21 @@ export default class Wayfinder extends View {
       .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body]));
   }
 
+  // Shown while fullscreen is wanted but off (Close, the tab bar, another panel left it): back to
+  // fullscreen. By state, not by noticing a hide, so a quick hide and show counts too. Deferred: the
+  // layout can't change during render.
+  restoreFullscreen(cx) {
+    if (this.restoring || this.fullscreen || load(WANT_FULL_KEY, "0") !== "1") return;
+    this.restoring = true;
+    cx.timer.after(0, () => {
+      this.restoring = false;
+      if (this.shownNow() && !this.fullscreen && load(WANT_FULL_KEY, "0") === "1") this.setFullscreen(true, { remember: false });
+    });
+  }
+
   render(cx) {
     if (this.hidden) this.watch(cx); // just shown: refresh in the background
+    this.restoreFullscreen(cx);
     const t = theme();
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
