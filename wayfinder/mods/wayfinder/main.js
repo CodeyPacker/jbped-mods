@@ -19,6 +19,7 @@ const VIEW_KEY = "wayfinder.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
 const IMAGE_DIR = "data/wayfinder-images"; // under Herdr's home: image() reads from there
 const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
+const WANT_FULL_KEY = "wayfinder.wantFullscreen"; // the last fullscreen choice, kept across Close
 const SITE = { github: "GitHub", azure: "Azure" }; // for the Board's "View in …" link
 
 function findNode(node, id) {
@@ -42,8 +43,15 @@ const EXAMPLE = `{
 
 const stop = (_e, cx) => cx.stop_propagation();
 // localStorage holds per-viewer niceties only; it can be missing, so every access is guarded.
-const load = (k, fallback) => { try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; } };
-const save = (k, v) => { try { localStorage.setItem(k, v); } catch { /* nicety only */ } };
+// Remembered view state lives in Herdr's shared state: saved across restarts and the same for every
+// copy (localStorage is per copy, so a Wayfinder in another space or layout started blank). A value
+// only localStorage has is still read.
+const load = (k, fallback) => {
+  const v = shared(k);
+  if (v != null) return v;
+  try { return localStorage.getItem(k) ?? fallback; } catch { return fallback; }
+};
+const save = (k, v) => setShared(k, v);
 
 // A header action as an icon, like Herdr's pane actions. `on` marks the one that is open.
 function iconButton(id, icon, t, onClick, { on = false } = {}) {
@@ -146,7 +154,7 @@ function skeletonTicket(t) {
 export default class Wayfinder extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
-    this.view = load(VIEW_KEY, "board") === "prs" ? "prs" : "board";
+    this.view = ["prs", "settings"].includes(load(VIEW_KEY, "board")) ? load(VIEW_KEY, "board") : "board";
     this.state = { status: "loading" };
     this.checks = null;
     this.boards = {}; // board id -> { status: "cached" | "loading" | "ok" | "error", data, at, tried, error }
@@ -170,7 +178,13 @@ export default class Wayfinder extends View {
     };
     this.renaming = null; // { name, input }: the Profile being renamed
     this.reload(cx);
-    cx.timer.every(60_000, (cx) => { if (this.watch(cx)) cx.notify(); }); // reads the layout only: no requests
+    // Reads the layout only (due() gates requests), often enough that a show from anywhere is noticed.
+    // Redraws on a show, and once a minute while shown (the "Updated" age).
+    let drawn = 0;
+    cx.timer.every(2_000, (cx) => {
+      const was = this.hidden;
+      if (this.watch(cx) && (was || Date.now() - drawn >= 60_000)) { drawn = Date.now(); cx.notify(); }
+    });
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfinder\./, "");
@@ -186,7 +200,9 @@ export default class Wayfinder extends View {
 
   get fullscreen() { return Boolean(shared(FULL_KEY)); }
 
-  setFullscreen(on) {
+  // `remember` false leaves the wish as it was: Close leaves fullscreen but the next show goes back.
+  setFullscreen(on, { remember = true } = {}) {
+    if (remember) save(WANT_FULL_KEY, on ? "1" : "0");
     const full = shared(FULL_KEY);
     if (on && !full) {
       const px = findNode(layout(), "panel")?.size?.px;
@@ -200,7 +216,8 @@ export default class Wayfinder extends View {
     }
   }
 
-  close_() { this.setFullscreen(false); run("layout.hide", { id: "panel" }); }
+  // Hidden from now: the next show is noticed at once (it refreshes, and goes back to fullscreen).
+  close_() { this.setFullscreen(false, { remember: false }); run("layout.hide", { id: "panel" }); this.hidden = true; }
 
   shownNow() { return isShown(layout(), (n) => n.content?.mod === "wayfinder"); }
 
@@ -209,6 +226,10 @@ export default class Wayfinder extends View {
     if (!this.shownNow()) { this.hidden = true; return false; }
     const showing = this.hidden;
     this.hidden = false;
+    // Back to fullscreen if it was on at Close. After this render: watch runs during render.
+    if (showing && load(WANT_FULL_KEY, "0") === "1" && !this.fullscreen) {
+      cx.timer.after(0, () => { if (this.shownNow() && !this.fullscreen) { this.setFullscreen(true, { remember: false }); } });
+    }
     if (this.profile && due(this.lastRefresh, Date.now(), { showing })) this.refresh(cx);
     return true;
   }
@@ -450,7 +471,7 @@ export default class Wayfinder extends View {
   // ---- Settings (#17): edits wayfinder.json. Each change is written at once, in order.
 
   openSettings(cx) {
-    this.view = "settings";
+    this.view = "settings"; save(VIEW_KEY, "settings");
     this.settingsError = null;
     this.ensureInputs();
     this.loadSettings(cx);
@@ -843,7 +864,10 @@ export default class Wayfinder extends View {
     const panel = this.selected?.boardId === b.id && !(si && !si.ok) ? this.ticketPanel(t) : null;
     // The detail panel takes the full height under the header, beside the Board's bar and Columns.
     return h_flex().size_full().items_start()
-      .child(v_flex().flex_1().min_w(0).h_full().child(bar).child(content))
+      // A click on the Board outside a card closes the detail panel. Cards and buttons stop their own.
+      .child(v_flex().id("wf-board-area").flex_1().min_w(0).h_full()
+        .on_click((_e, cx) => { if (this.selected) { this.closeTicket(); cx.notify(); } })
+        .child(bar).child(content))
       .when(Boolean(panel), (el) => el.child(panel));
   }
 
