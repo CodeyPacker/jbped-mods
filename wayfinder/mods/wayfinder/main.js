@@ -667,8 +667,8 @@ export default class Wayfinder extends View {
       out.push(card(`wf-set-boards-${a.id}`, [
         h_flex().id(`wf-set-bh-${a.id}`).gap(8).items_center().cursor_pointer()
           .on_mouse_down("left", stop).on_click((_e, cx) => { save(this.foldKey(a), folded ? "0" : "1"); cx.notify(); })
-          .child(div().w(12).text_size(11).text_color(t.dim).child(folded ? "▸" : "▾"))
-          .child(div().flex_1().text_size(12).text_color(t.muted).child(`${who(a)} · ${f?.status === "ok" ? `${total} more` : ""}`)),
+          .child(div().flex_1().text_size(12).text_color(t.muted).child(`${who(a)}${f?.status === "ok" ? ` · ${total} more` : ""}`))
+          .child(div().text_size(12).text_color(t.dim).hover((x) => x.text_color(t.foreground)).child(folded ? "Show" : "Hide")),
         ...(folded ? [] : [
           ...(search ? [field(search, t)] : []),
           ...(f?.status === "loading" ? [note("Finding boards…")] : []),
