@@ -25,5 +25,5 @@ rm -f "$tmp" "$tmp.lock"
 # second as the entry ("racily clean"), and that file would never be captured.
 if [ -f "$1/index" ]; then cp -p "$1/index" "$tmp"; fi
 cd "$2"
-GIT_INDEX_FILE="$tmp" git --no-optional-locks add -A
+GIT_INDEX_FILE="$tmp" git --no-optional-locks -c core.safecrlf=false add -A
 GIT_INDEX_FILE="$tmp" git write-tree

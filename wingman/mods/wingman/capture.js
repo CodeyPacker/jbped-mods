@@ -32,6 +32,12 @@ export function hostPath(cwd) {
 /** A temp file of fsx.writeText's (`.wingman-<token>.tmp`): never reviewed, even if a snapshot catches one. */
 export const isWriteTemp = (rel) => /(^|\/)\.wingman-[0-9a-z]+\.tmp$/.test(rel);
 
+/** The end of a noisy error text: its last few lines, at most `max` characters, so it can't fill the panel. */
+export function tailText(text, lines = 3, max = 300) {
+  const t = String(text ?? "").trim().split(/\r?\n/).filter((l) => l.trim()).slice(-lines).join("\n");
+  return t.length > max ? `…${t.slice(-max)}` : t;
+}
+
 let snapshotText = null; // snapshot.sh, read once, for machines that don't have it
 
 export class Capture {
@@ -52,7 +58,7 @@ export class Capture {
       ? await exec("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", `${dir}/snapshot.ps1`, gitDir, root])
       : await exec("sh", [`${dir}/snapshot.sh`, gitDir, root]);
     const tree = r.stdout.trim().split(/\s+/).pop();
-    if (r.code !== 0 || !/^[0-9a-f]{40,64}$/.test(tree ?? "")) throw new Error(`snapshot failed: ${(r.stderr || r.stdout).trim()}`);
+    if (r.code !== 0 || !/^[0-9a-f]{40,64}$/.test(tree ?? "")) throw new Error(`snapshot failed: ${tailText(r.stderr || r.stdout)}`);
     return tree;
   }
 

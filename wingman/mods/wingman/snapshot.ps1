@@ -23,7 +23,11 @@ try {
   if (Test-Path -LiteralPath $real) { Copy-Item -Force -LiteralPath $real -Destination $tmp }
   $env:GIT_INDEX_FILE = $tmp
   Set-Location -LiteralPath $WorkTree
-  git --no-optional-locks add -A
+  # git's stderr (a CRLF warning, say) must not fail the run: when the caller redirects stderr, Windows
+  # PowerShell turns each line into an error record that "Stop" would make fatal. The exit code decides.
+  $ErrorActionPreference = "Continue"
+  # core.safecrlf=false only silences the line-ending warning, it does not change what is hashed.
+  git --no-optional-locks -c core.safecrlf=false add -A
   $code = $LASTEXITCODE
   if ($code -eq 0) { git write-tree; $code = $LASTEXITCODE }
 } finally {
