@@ -5,11 +5,11 @@
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
@@ -170,6 +170,12 @@ export default class Wayfinder extends View {
     this.images = {}; // image url -> { status, file, error }: saved files stay across reloads
     this.launch = null; // the Launch dialog: { key, selected: repo ids, exists: names | null, status, error, message }
     this.reviews = {}; // pr key -> { status: "busy" | "error", message, error }
+    this.editing = null; // the title being edited: { key, input, status, error }
+    this.commentBox = TextareaState.new({ placeholder: "Write a comment (markdown)", rows: 3 });
+    this.commentBox.set_auto_grow(3, 10);
+    this.commentBox.on("focus", () => { this.typing = true; });
+    this.commentBox.on("blur", () => { this.typing = false; });
+    this.commenting = null; // { key, status, error }
     this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
     this.found = {}; // settings: account id -> { boards: { status, data, error }, repos: { ... } }
     this.statusLists = {}; // settings: board id -> { status, data, error }
@@ -968,6 +974,62 @@ export default class Wayfinder extends View {
       .when(m?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(m.error)));
   }
 
+  canUpdate(b) {
+    const a = this.profile.accounts.find((x) => x.id === b.account);
+    return Boolean(a) && can(providerFor(a), "update");
+  }
+
+  // Title editing (#16): an input in place of the title, saved with Enter or Save.
+  startEdit(sum, title) {
+    const input = InputState.new({ value: title });
+    input.on("submit", (_e, cx) => { this.saveTitle(cx); cx.notify(); });
+    input.on("focus", () => { this.typing = true; });
+    input.on("blur", () => { this.typing = false; });
+    this.editing = { key: sum.key, input, status: "idle" };
+    input.focus();
+  }
+
+  saveTitle(cx) {
+    const E = this.editing, sel = this.selected, p = this.profile;
+    const b = p.boards.find((x) => x.id === sel?.boardId);
+    if (!E || !b || E.status === "busy" || E.key !== sel.summary.key) return;
+    const title = E.input.value().trim();
+    E.status = "busy"; E.error = null;
+    const io = this.io(), sum = sel.summary;
+    cx.spawn(async (cx) => {
+      try {
+        await updateTicket(p, b, sum, { title }, io);
+        if (this.editing === E) { this.editing = null; this.typing = false; }
+        const entry = this.boards[b.id];
+        if (entry?.data) entry.data = { ...entry.data, tickets: entry.data.tickets.map((x) => (x.key === sum.key ? { ...x, title } : x)) };
+        if (this.selected?.summary.key === sum.key) { this.selected = { ...this.selected, summary: { ...this.selected.summary, title } }; this.fetchTicket(cx); }
+      } catch (e) {
+        E.status = "error"; E.error = `Couldn't save the title: ${e.message ?? e}`;
+      }
+      cx.notify();
+    });
+  }
+
+  postComment(cx) {
+    const sel = this.selected, p = this.profile, b = p.boards.find((x) => x.id === sel?.boardId);
+    if (!b || this.commenting?.status === "busy") return;
+    const text = this.commentBox.value().trim();
+    if (!text) return;
+    const C = this.commenting = { key: sel.summary.key, status: "busy" };
+    const io = this.io(), sum = sel.summary;
+    cx.spawn(async (cx) => {
+      try {
+        await commentOnTicket(p, b, sum, text, io);
+        this.commentBox.set_value("");
+        this.commenting = null;
+        if (this.selected?.summary.key === sum.key) this.fetchTicket(cx);
+      } catch (e) {
+        C.status = "error"; C.error = `Couldn't post the comment: ${e.message ?? e}`;
+      }
+      cx.notify();
+    });
+  }
+
   // Launch (#13, D5, D18). The repos offered are the Board's, else the Profile's.
   launchRepos() {
     const p = this.profile, b = p.boards.find((x) => x.id === this.selected?.boardId);
@@ -1089,6 +1151,31 @@ export default class Wayfinder extends View {
     });
   }
 
+  titleRow(t, sum, tk) {
+    const title = (tk ?? sum).title, E = this.editing?.key === sum.key ? this.editing : null;
+    const b = this.profile.boards.find((x) => x.id === this.selected.boardId);
+    if (E) {
+      return v_flex().gap(6)
+        .child(h_flex().gap(6).items_center().child(field(E.input, t, 300))
+          .child(button("wf-title-save", E.status === "busy" ? "Saving…" : "Save", t, (cx) => { this.saveTitle(cx); cx.notify(); }, { on: true }))
+          .child(button("wf-title-cancel", "Cancel", t, (cx) => { this.editing = null; this.typing = false; cx.notify(); })))
+        .when(E.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(E.error)));
+    }
+    return h_flex().gap(8).items_start()
+      .child(div().flex_1().min_w(0).text_size(16).font_semibold().text_color(t.foreground).child(title))
+      .when(Boolean(tk) && Boolean(b) && this.canUpdate(b), (el) => el.child(button("wf-title-edit", "Edit", t, (cx) => { this.startEdit(sum, title); cx.notify(); })));
+  }
+
+  commentForm(t, k) {
+    const C = this.commenting?.key === k ? this.commenting : null;
+    return v_flex().gap(6)
+      .child(div().on_mouse_down("left", stop).rounded(6).border(1).border_color(t.input).bg(t.background).p(6).text_size(12).text_color(t.foreground)
+        .child(Textarea.new(this.commentBox).w_full()))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().text_size(12).text_color(C?.status === "error" ? t.blocked : t.dim).child(C?.status === "error" ? C.error : ""))
+        .child(button("wf-comment-post", C?.status === "busy" ? "Posting…" : "Post comment", t, (cx) => { this.postComment(cx); cx.notify(); }, { on: true })));
+  }
+
   // The detail panel (D11, D23): the summary shows at once, the rest when the Ticket arrives.
   ticketPanel(t) {
     const sum = this.selected.summary;
@@ -1129,9 +1216,10 @@ export default class Wayfinder extends View {
       .child(button("wf-ticket-close", "Close", t, (cx) => { this.closeTicket(); cx.notify(); }));
 
     const body = v_flex().id(`wf-ticket-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
-      .child(div().text_size(16).font_semibold().text_color(t.foreground).child((tk ?? sum).title))
+      .child(this.titleRow(t, sum, tk))
       .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
       .when(!tk && entry.status === "loading", (el) => el.child(skeletonTicket(t)));
+    const ub = this.profile.boards.find((x) => x.id === this.selected.boardId);
     if (tk && this.launch?.key === k) body.child(this.launchCard(t, tk));
     const mb = this.profile.boards.find((x) => x.id === this.selected.boardId);
     const mr = mb && this.moveRow(t, mb, sum);
@@ -1154,6 +1242,7 @@ export default class Wayfinder extends View {
         .when(tk.pullRequests.length > 0, (el) => el.child(md("prs", tk.pullRequests
           .map((pr) => `- ${link(`${pr.id} ${pr.title}`, pr.url)}${pr.draft || pr.state ? ` · ${pr.draft ? "draft" : pr.state}` : ""}`).join("\n"))))
         .child(section(`Comments (${tk.comments.length + tk.moreComments})`))
+        .when(Boolean(ub) && this.canUpdate(ub), (el) => el.child(this.commentForm(t, k)))
         .when(tk.moreComments > 0, (el) => el.child(md("more", link(`${tk.moreComments} older comments`, tk.url))))
         .children(tk.comments.map((c, i) => v_flex().gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
           .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
@@ -1238,6 +1327,7 @@ export default class Wayfinder extends View {
           if (this.selected) this.closeTicket(); else this.setFullscreen(false);
           cx.notify(); return;
         }
+        if (this.typing) return; // keys in a text box are for the text
         if (this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
       })
       .child(this.header(t))

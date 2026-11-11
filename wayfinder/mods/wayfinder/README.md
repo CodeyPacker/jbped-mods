@@ -26,6 +26,10 @@ The detail panel's "Move to" row moves a Ticket to another Column, and Shift wit
 - Azure: a Tracked Statuses Column sets the work item's State. A Column of the team's board sets the State that Column maps for the item's type, plus the board's own Column field.
 - GitHub: sets the item's Status option. It needs the `project` scope: `gh auth refresh -h github.com -s project`.
 
+## Edit and comment
+
+In the detail panel, Edit beside the title changes it (Enter or Save), and the box under Comments posts a markdown comment. Both reload the Ticket after. GitHub draft issues can't take comments. Writing on GitHub needs the `repo` scope, which `gh auth login` gives by default.
+
 ## Launch and Review
 
 - **Launch** (in a Ticket's detail panel) lists the Board's repos (its `repos`, else every repo in the Profile) and marks those with a worktree already. "Add repo…" picks a local clone and adds it to the Profile and the Board. Launch fetches each repo and adds a worktree at `~/.herdr/worktrees/<id>-<slug>/<repo>` on branch `<id>-<slug>` from the default branch, then opens a space named `<id> <title>` there with the agent, and the Ticket (description, acceptance criteria, repos) as its first message. Launching again reuses the worktrees, and selects the space while it is open.

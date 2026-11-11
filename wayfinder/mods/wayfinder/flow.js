@@ -150,3 +150,16 @@ export async function moveTicket(profile, boardCfg, data, ticket, columnId, io, 
   if (!can(provider, "move")) throw new Error(`Moving cards on ${account.provider} isn't supported yet`);
   return provider.move(account, ticket.ref, moveTarget(data, boardCfg, columnId), ticket, io);
 }
+
+// Edits a Ticket's title, or posts a comment on it (#16).
+export async function updateTicket(profile, boardCfg, ticket, fields, io, registry = PROVIDERS) {
+  const { account, provider } = resolve(profile, boardCfg, registry);
+  if (!can(provider, "update")) throw new Error(`Editing cards on ${account.provider} isn't supported yet`);
+  return provider.update(account, ticket.ref, fields, io);
+}
+
+export async function commentOnTicket(profile, boardCfg, ticket, text, io, registry = PROVIDERS) {
+  const { account, provider } = resolve(profile, boardCfg, registry);
+  if (!can(provider, "update")) throw new Error(`Comments on ${account.provider} aren't supported yet`);
+  return provider.comment(account, ticket.ref, text, io);
+}

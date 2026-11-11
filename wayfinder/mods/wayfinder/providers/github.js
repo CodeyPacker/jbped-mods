@@ -199,6 +199,14 @@ export const MOVE_MUTATION = `mutation($project: ID!, $item: ID!, $field: ID!, $
   updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
 }`;
 
+// Title edits by content type, and comments (#16). Drafts can't take comments.
+export const TITLE_MUTATIONS = {
+  Issue: `mutation($id: ID!, $title: String!) { updateIssue(input: { id: $id, title: $title }) { issue { id } } }`,
+  PullRequest: `mutation($id: ID!, $title: String!) { updatePullRequest(input: { pullRequestId: $id, title: $title }) { pullRequest { id } } }`,
+  DraftIssue: `mutation($id: ID!, $title: String!) { updateProjectV2DraftIssue(input: { draftIssueId: $id, title: $title }) { draftIssue { id } } }`,
+};
+export const COMMENT_MUTATION = `mutation($id: ID!, $body: String!) { addComment(input: { subjectId: $id, body: $body }) { subject { id } } }`;
+
 export const REVIEW_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequest { headRefName baseRefName body isCrossRepository
     closingIssuesReferences(first: 20) { nodes { number title body } } } }
@@ -251,7 +259,7 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "move", "pullRequests", "review", "repos", "signInState"],
+  capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "review", "repos", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -297,6 +305,21 @@ export const github = {
       after = r.pageInfo.endCursor;
     }
     return [...new Set(out)].sort(byName);
+  },
+
+  async update(account, ref, fields, io) {
+    const title = String(fields.title ?? "").trim(), m = TITLE_MUTATIONS[ref.kind];
+    if (!m || !ref.contentId) throw new Error("This card can't be edited here");
+    if (!title) throw new Error("A title can't be empty");
+    await graphql(account, io, m, { id: ref.contentId, title });
+  },
+
+  async comment(account, ref, text, io) {
+    const body = String(text ?? "").trim();
+    if (ref.kind === "DraftIssue") throw new Error("Draft issues can't take comments. Convert it to an issue first.");
+    if (!ref.contentId) throw new Error("This card can't take comments");
+    if (!body) throw new Error("Write a comment first");
+    await graphql(account, io, COMMENT_MUTATION, { id: ref.contentId, body });
   },
 
   // Sets the item's Status option (#15). Writing needs the "project" scope.

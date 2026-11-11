@@ -7,6 +7,8 @@
 //     boards(account, io)  -> BoardRef[]            // what it can show, for discovery: { title, url, ref, teamDefault? }
 //     board(account, ref, io) -> Board
 //     ticket(account, ref, io) -> Ticket            // "ticket"
+//     update(account, ref, { title }, io)           // "update": edits a Ticket field (#16)
+//     comment(account, ref, text, io)              // "update": posts a markdown comment
 //     move(account, ref, target, ticket, io)        // "move": target from moveTarget(), ticket the TicketSummary
 //     review(account, pr, io) -> { branch, target, description, criteria: [{ id, title, text }] } // "review"
 //     imageName(account, url) -> string | null      // "images": a safe file name, null if not its image

@@ -253,7 +253,7 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "images", "move", "pullRequests", "review", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "move", "update", "pullRequests", "review", "repos", "statuses", "signInState"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -283,6 +283,23 @@ export const azure = {
     // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
     const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
     if (r.code !== 0) throw new Error(firstLine(r) || `az answered ${r.code}`);
+  },
+
+  async update(account, ref, fields, io) {
+    const id = Number(ref.id), title = String(fields.title ?? "").trim();
+    if (!Number.isInteger(id) || id <= 0) throw new Error("This card has no work item to change");
+    if (!title) throw new Error("A title can't be empty");
+    const org = orgUrl(account), tok = await token(account, io);
+    await patchItem(org, tok, io, id, [{ op: "add", path: "/fields/System.Title", value: title }]);
+  },
+
+  // Posted as markdown, which Azure keeps and shows as such.
+  async comment(account, ref, text, io) {
+    const id = Number(ref.id), body = String(text ?? "").trim();
+    if (!Number.isInteger(id) || id <= 0 || typeof ref.project !== "string") throw new Error("This card has no work item to comment on");
+    if (!body) throw new Error("Write a comment first");
+    const org = orgUrl(account), tok = await token(account, io);
+    await rest(org, tok, io, `${seg(ref.project)}/_apis/wit/workItems/${id}/comments?format=markdown`, { text: body }, COMMENTS_VERSION);
   },
 
   async move(account, ref, target, ticket, io) {
