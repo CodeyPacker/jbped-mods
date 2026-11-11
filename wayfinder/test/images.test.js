@@ -44,3 +44,20 @@ test("loadImages downloads the provider's images into the folder and skips other
   assert.ok(!args.some((a) => /Bearer|accessToken/.test(a))); // az signs the request: no token in argv
   await assert.rejects(azure.downloadImage(account, "https://example.test/z.png", "/x", io));
 });
+
+test("pruneImages deletes only old image files in that folder", async () => {
+  const { mkdtempSync, writeFileSync, utimesSync, existsSync, mkdirSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const { pruneImages } = await import("../mods/wayfinder/flow.js");
+  const d = mkdtempSync(join(tmpdir(), "wf-img-"));
+  const old = Date.now() / 1000 - 40 * 86400;
+  for (const f of ["old.png", "new.png", "old.txt"]) writeFileSync(join(d, f), "x");
+  mkdirSync(join(d, "sub")); writeFileSync(join(d, "sub/old.png"), "x");
+  for (const f of ["old.png", "old.txt", "sub/old.png"]) utimesSync(join(d, f), old, old);
+  const io = { run: async (c, a) => { const p = spawnSync(c, a, { encoding: "utf8" }); return { code: p.status, stdout: p.stdout, stderr: p.stderr }; } };
+  await pruneImages(d, io, 30);
+  assert.deepEqual(["old.png", "new.png", "old.txt", "sub/old.png"].map((f) => existsSync(join(d, f))), [false, true, true, true]);
+  await pruneImages(join(d, "missing"), io, 30); // no folder yet: nothing to do
+});

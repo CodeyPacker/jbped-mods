@@ -163,3 +163,10 @@ export async function commentOnTicket(profile, boardCfg, ticket, text, io, regis
   if (!can(provider, "update")) throw new Error(`Comments on ${account.provider} aren't supported yet`);
   return provider.comment(account, ticket.ref, text, io);
 }
+
+// Deletes saved images not used for `days` (their files' time is when they were saved). Only image
+// files directly in that folder. A Windows path is converted for a WSL runner.
+export const PRUNE_SH = 'd="$1"; case "$d" in [A-Za-z]:*) d=$(wslpath -u "$d") || exit 0;; esac; [ -d "$d" ] || exit 0; find "$d" -maxdepth 1 -type f \\( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" -o -name "*.bmp" -o -name "*.part" \\) -mtime +"$2" -delete';
+export async function pruneImages(dir, io, days = 30) {
+  await io.run("sh", ["-c", PRUNE_SH, "wayfinder-prune", dir, String(days)], { timeout: 30000 });
+}

@@ -9,7 +9,7 @@ import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea } 
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
@@ -474,6 +474,8 @@ export default class Wayfinder extends View {
   // A Ticket's images, saved under Herdr's home so image() can show them. Each shows as it arrives.
   fetchImages(p, b, ticket, io, cx) {
     cx.spawn(async (cx) => {
+      // Once a session: images not saved again in 30 days go.
+      if (!this.pruned) { this.pruned = true; try { await pruneImages(`${appHome()}/${IMAGE_DIR}`, io); } catch { /* next session */ } }
       await loadImages(p, b, ticket, `${appHome()}/${IMAGE_DIR}`, io, (url, name, error) => {
         this.images[url] = name ? { status: "ok", file: `${IMAGE_DIR}/${name}` } : { status: "error", error };
         cx.notify();
