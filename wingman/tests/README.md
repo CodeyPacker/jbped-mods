@@ -9,3 +9,7 @@ Run all: `sh wingman/tests/run.sh`. Run some: `sh wingman/tests/run.sh git chang
 `main.js` imports UI modules and is not covered.
 
 To add a test: create `<name>.test.mjs`, import `../mods/wingman/<file>.js`, use `node:assert`, throw on failure, and keep temp repos in your own `mkdtemp` dirs.
+
+`herdr-shim.mjs` runs `on` (another machine) calls here and records them in `remoteCalls`. With `WINGMAN_REMOTE_HC` set to `hc`'s path, machine `WINGMAN_REMOTE_ON` (default `wsl`) is reached for real through `hc exec --on` and `hc file read --on`.
+
+`remote/wsl.test.mjs` runs Store, Changes and tree calls against a real machine, in a repo it makes under `/tmp/wingman-remote-*` there and deletes. It isn't in the default set: `sh wingman/tests/run.sh remote/wsl`. It finds `hc.exe` or `hc` on PATH (or `WINGMAN_REMOTE_HC`), and passes with a printed reason when hc or the machine is missing.

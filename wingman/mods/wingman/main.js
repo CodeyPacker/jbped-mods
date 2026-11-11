@@ -23,13 +23,14 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git } from "./git.js";
-import { READ, STATUS, MAX_FILES, parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
+import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
 import { splitLines } from "./model.js";
-import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome } from "./workspace.js";
+import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome, pathFor } from "./workspace.js";
+import { REMOTE, REVIEW_NOTE, NVIM_NOTE, EDITOR_NOTE, WORKTREE_NOTE, readOnlyNote, remotePath, rootId, idOf, mapLimit } from "./remote.js";
 import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys } from "./journal.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
@@ -59,26 +60,27 @@ function log(msg) {
   }).catch(() => {});
 }
 
-/** Folders an agent in `space` works in, as this machine's git sees them. */
+/** Folders an agent in `space` works in, as this machine's git sees them (on another machine: as it names them). */
 function agentFolders(space) {
-  return agents().filter((a) => a.space === space.id).map((a) => hostPath(panes().find((p) => p.pane === a.pane)?.cwd
+  const at = pathFor(space);
+  return agents().filter((a) => a.space === space.id).map((a) => at(panes().find((p) => p.pane === a.pane)?.cwd
     ?? terminals().find((t) => t.address === a.address)?.cwd)).filter(Boolean);
 }
 
-/** Folders of every terminal in `space`, agents' first (Q18), as this machine's git sees them. */
+/** Folders of every terminal in `space`, agents' first (Q18), as this machine's git sees them (see agentFolders). */
 function termFolders(space) {
-  const tabs = new Set(space.tabs.map((t) => t.id));
-  const all = [...agentFolders(space), ...panes().filter((p) => p.terminal && tabs.has(p.tab)).map((p) => hostPath(p.cwd))];
+  const tabs = new Set(space.tabs.map((t) => t.id)), at = pathFor(space);
+  const all = [...agentFolders(space), ...panes().filter((p) => p.terminal && tabs.has(p.tab)).map((p) => at(p.cwd))];
   return [...new Set(all.filter(Boolean))];
 }
 
 /** The space of the agent in terminal `by`, while it's still there. */
 const spaceOfAgent = (by) => (by && agents().find((a) => a.address === by)?.space) || null;
 
-/** Spaces that hold a Wingman pane. */
+/** Spaces that hold a Wingman pane. Spaces on another machine aren't captured (yet). */
 function reviewSpaces() {
   const tabs = new Set(panes().filter((p) => p.mod === "wingman").map((p) => p.tab));
-  return spaces().filter((s) => s.tabs.some((t) => tabs.has(t.id)));
+  return spaces().filter((s) => !s.machine && s.tabs.some((t) => tabs.has(t.id)));
 }
 
 /**
@@ -209,8 +211,9 @@ export default class Review extends View {
 
   // ---- which space ---------------------------------------------------------
 
-  /** Shows the active space's review, opening its repo when an agent there is in one. */
-  async follow(cx) {
+  /** Shows the active space's review, opening its repo when an agent there is in one. `force`: look
+   *  the roots up now (a space on another machine is looked up at most every 5 s). */
+  async follow(cx, force = false) {
     if (this.following || this.writing) return;
     this.following = true;
     try {
@@ -225,6 +228,14 @@ export default class Review extends View {
         cx.notify();
       }
       if (!sp) return;
+      const on = sp.machine ?? null;
+      if (on) {
+        // Review isn't available on another machine: its copy looks nothing up there.
+        if (this.view === "review") return;
+        const at = (this.rootsAt ??= new Map()).get(key) ?? 0;
+        if (!force && Date.now() - at < REMOTE.rootsMs) return;
+        this.rootsAt.set(key, Date.now());
+      }
       // The space's repos (workspace.js): where its agents started (any agent), its workspace
       // file's folders, and every repo the Claude hook saw them edit, less the ones removed by
       // hand. A repo joins the view when it appears and leaves when it's removed.
@@ -235,8 +246,8 @@ export default class Review extends View {
       const { roots, names } = await spaceRoots(sp, [...repos, ...plain]);
       const found = [];
       for (const root of roots) {
-        const st = this.stores.find((x) => x.root === root || x.asked === root) ?? (isHome(root) ? null : await this.openStore(root))
-          ?? ((await this.folderKind(root)).dir ? new PlainRoot(root) : null);
+        const st = this.stores.find((x) => x.root === root || x.asked === root) ?? (isHome(root) ? null : await this.openStore(root, on))
+          ?? ((await this.folderKind(root, on)).dir ? new PlainRoot(root, on) : null);
         if (st && !found.includes(st)) found.push(st);
       }
       found.sort((a, b) => !!a.plain - !!b.plain);
@@ -254,13 +265,13 @@ export default class Review extends View {
     } finally { this.following = false; }
   }
 
-  /** A repo's store, or null when the folder isn't (or isn't yet) a repo: retried after 30 s. */
-  async openStore(root) {
-    const miss = (this.misses ??= new Map()), at = miss.get(root);
+  /** A repo's store (on machine `on`), or null when the folder isn't (or isn't yet) a repo: retried after 30 s. */
+  async openStore(root, on = null) {
+    const id = rootId(root, on), miss = (this.misses ??= new Map()), at = miss.get(id);
     if (at && Date.now() - at < 30000) return null;
-    const st = await Store.open(root).catch(() => null);
-    if (!st) { miss.set(root, Date.now()); return null; }
-    miss.delete(root); st.asked = root;
+    const st = await Store.open(root, on).catch(() => null);
+    if (!st) { miss.set(id, Date.now()); return null; }
+    miss.delete(id); st.asked = root;
     return st;
   }
 
@@ -268,12 +279,15 @@ export default class Review extends View {
    * What a folder is, cached: { root } (the repo it's in), { dir: true } (a folder outside any repo)
    * or neither (gone). A home folder is never searched for a repo. Misses are checked again after 30 s.
    */
-  async folderKind(folder) {
-    const cache = (this.resolved ??= new Map()), c = cache.get(folder);
+  async folderKind(folder, on = null) {
+    const id = rootId(folder, on), cache = (this.resolved ??= new Map()), c = cache.get(id);
     if (c && (c.root || Date.now() - c.at < 30000)) return c;
-    const st = isHome(folder) ? null : await Store.open(folder).catch(() => null);
-    const r = { at: Date.now(), root: st?.root ?? null, dir: !st && (await pathKind(folder)) === "dir" };
-    cache.set(folder, r);
+    // On another machine git's "not a repository" answer means the folder is there (a missing
+    // folder can't be a git's working folder: the call rejects), which saves a second call.
+    let there = false;
+    const st = isHome(folder) ? null : await Store.open(folder, on).catch((e) => { there = !!on && /^not a git repository/.test(e?.message ?? ""); return null; });
+    const r = { at: Date.now(), root: st?.root ?? null, dir: !st && (there || (await pathKind(folder, { on })) === "dir") };
+    cache.set(id, r);
     return r;
   }
 
@@ -281,7 +295,7 @@ export default class Review extends View {
   async folderRoots(sp) {
     const repos = [], plain = [];
     for (const dir of termFolders(sp)) {
-      const r = await this.folderKind(dir);
+      const r = await this.folderKind(dir, sp.machine ?? null);
       if (r.root) { if (!repos.includes(r.root)) repos.push(r.root); } else if (r.dir) plain.push(dir);
     }
     return { repos, plain };
@@ -289,6 +303,12 @@ export default class Review extends View {
 
   /** The space's git repos: every root but the plain ones. */
   repos() { return this.stores.filter((st) => !st.plain); }
+
+  /** The repos Review covers: not those on another machine (no review there yet). */
+  reviewed() { return this.repos().filter((st) => !st.on); }
+
+  /** The active space's machine, null for this computer. */
+  machine() { return this.space()?.machine ?? null; }
 
   snapshotView() {
     const { stores, files, sel, current, history, indexTexts, error, status, redo, opened } = this;
@@ -394,7 +414,7 @@ export default class Review extends View {
     finally { c.busy = false; }
   }
 
-  close() { this.scroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput]) i?.release(); }
+  close() { this.scroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) i?.release(); }
 
   // ---- loading -------------------------------------------------------------
 
@@ -412,7 +432,7 @@ export default class Review extends View {
     if (this.mode === "changes") return this.loadChanges(cx);
     try {
       const files = [], texts = {};
-      for (const st of this.repos()) {
+      for (const st of this.reviewed()) {
         // Only this branch's changes, made by this space's agents (store.shows).
         const [stamp, branch] = await Promise.all([st.stamp(), st.branch()]);
         texts[st.root] = stamp;
@@ -510,10 +530,11 @@ export default class Review extends View {
       while (this.deferred.size && !this.writing) {
         const pending = this.deferred; this.deferred = new Set();
         let indexChanged = false;
-        for (const st of this.repos()) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
+        for (const st of this.reviewed()) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
         if (pending.has("*") || indexChanged) { await this.reloadAll(cx); continue; }
         for (const f of this.files) {
-          if (f.error || !pending.has(norm(f.path))) continue;
+          // A file on another machine isn't watched: it's read-only, and each read costs a remote call.
+          if (f.error || f.store?.on || !pending.has(norm(f.path))) continue;
           // Both sides: accepting only moves the baseline, so a baseline changed elsewhere
           // (another pane, capture, a reset) must be noticed even when the file itself is unchanged.
           // A plain (opened, unchanged) file has no baseline on disk: it is the file itself.
@@ -692,7 +713,7 @@ export default class Review extends View {
   async loadPlain(store, rel, cx) {
     const path = `${store.root}/${rel}`, key = `${store.root}|${rel}`, f = { rel, path, basePath: null, store, key, plain: true, created: false, by: null, as: null, hunks: [] };
     let text = null, error = null;
-    try { text = await readTextFile(path); } catch (e) { error = String(e.message ?? e); }
+    try { text = await readTextFile(path, { on: store.on ?? null }); } catch (e) { error = String(e.message ?? e); }
     if (!error && text === null) error = "file not found";
     // Binary: a NUL, or text that isn't UTF-8 (many replacement characters near the start).
     if (!error && (text.includes("\0") || (text.slice(0, 8000).match(/\uFFFD/g)?.length ?? 0) > 8)) error = "binary file";
@@ -702,10 +723,11 @@ export default class Review extends View {
   }
 
   async openFile(store, rel, cx, at = null) {
-    const key = `${store.root}|${rel}`, space = this.spaceId;
-    this.recent = [key, ...this.recent.filter((k) => k !== key)].slice(0, 30);
+    const key = `${store.root}|${rel}`, space = this.spaceId, rk = `${idOf(store)}|${rel}`;
+    this.recent = [rk, ...this.recent.filter((k) => k !== rk)].slice(0, 30);
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
     if (this.treeOnly()) {
+      if (store.on) { this.error = NVIM_NOTE; cx.notify(); return; }
       const f = this.files.find((x) => x.key === key);
       this.treeSel = key; this.revealInTree(key, cx); cx.notify();
       try { await openInNvim(space, store.root, `${store.root}/${rel}`, at?.line ?? f?.hunks[0]?.n ?? 0); }
@@ -748,10 +770,11 @@ export default class Review extends View {
     const add = (store, rel) => { const k = `${store.root}|${rel}`; if (!seen.has(k)) { seen.add(k); out.push({ key: k, store, rel }); } };
     const byKey = new Map(this.files.map((f) => [f.key, f]));
     // Plain roots (folders outside git) aren't searched.
-    for (const k of this.recent) { const f = byKey.get(k); if (f) { if (!f.store.plain) add(f.store, f.rel); } else { const st = this.repos().find((s) => k.startsWith(s.root + "|")); if (st) add(st, k.slice(st.root.length + 1)); } }
+    // Recent keys carry the root's id (rootId), so a file of the same path on another machine isn't one of them.
+    for (const k of this.recent) { const f = byKey.get(k); if (f && !f.store.on) { if (!f.store.plain) add(f.store, f.rel); } else { const st = this.repos().find((s) => k.startsWith(idOf(s) + "|")); if (st) add(st, k.slice(idOf(st).length + 1)); } }
     for (const f of this.files) if (!f.plain && !f.error && f.hunks.length) add(f.store, f.rel);
     const head = out.length;
-    for (const st of this.repos()) for (const rel of this.trees.get(st.root)?.paths ?? []) add(st, rel);
+    for (const st of this.repos()) for (const rel of this.trees.get(idOf(st))?.paths ?? []) add(st, rel);
     return { all: out, head };
   }
 
@@ -822,6 +845,7 @@ export default class Review extends View {
   toVSCode(cx) {
     const f = this.file();
     if (!f || f.Ctext === null) return;
+    if (f.store?.on) { this.error = EDITOR_NOTE; cx.notify(); return; }
     if (this.dirty(f) && !f.conflict) this.save(cx, f);
     const at = this.cur ?? { line: f.hunks[this.current]?.n ?? 0, col: 0 };
     cx.spawn(async (cx) => {
@@ -834,6 +858,7 @@ export default class Review extends View {
   /** Opens `f` at `line` in the space's Neovim (N1). */
   toNvim(f, line, cx) {
     if (!f || f.Ctext === null) return;
+    if (f.store?.on) { this.error = NVIM_NOTE; cx.notify(); return; }
     const space = this.spaceId;
     cx.spawn(async (cx) => {
       try { await openInNvim(space, f.store.root, f.path, line); }
@@ -871,9 +896,11 @@ export default class Review extends View {
     return branch && dest ? { branch, dest } : null;
   }
 
-  /** Adds a repo to this space by hand: a repo, a parent folder of repos, or a main clone as a worktree. */
+  /** Adds a repo to this space by hand: a repo, a parent folder of repos, or a main clone as a worktree.
+   *  The folder picker is this computer's: a space on another machine takes a typed path there. */
   openFolder(cx) {
     if (!this.spaceId) return;
+    if (this.machine()) { this.ws = { kind: "path" }; this.pathInput.set_value(""); this.pathInput.focus(); cx.notify(); return; }
     cx.spawn(async (cx) => {
       try {
         const dir = await pickFolder({ prompt: "Add a repo to this space" });
@@ -896,18 +923,40 @@ export default class Review extends View {
     });
   }
 
-  /** Adds repo folders to the space: to its workspace file (made when this makes two) and its repo map. */
+  /** Space on another machine: the typed path's repo, or the repos inside it to pick from (no worktrees there yet). */
+  addPath(cx) {
+    const on = this.machine(), dir = remotePath(this.pathInput.value().trim());
+    if (!on || !dir || this.wsBusy) return;
+    cx.spawn(async (cx) => {
+      try {
+        this.wsBusy = "Looking…"; cx.notify();
+        const st = await Store.open(dir, on).catch(() => null);
+        if (!st) {
+          const repos = await scanRepos(dir, on);
+          if (!repos.length) throw new Error(`${dir} on ${on} is not a git repo and holds none`);
+          this.ws = { kind: "pick", parent: dir, offer: null, asWorktrees: false, on, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) };
+          return;
+        }
+        if (this.hasRepo(st.root)) throw new Error(`${base(st.root)} is already in this space`);
+        await this.addRepos([st.root], cx);
+      } catch (e) { this.error = String(e.message ?? e); }
+      finally { this.wsBusy = null; cx.notify(); }
+    });
+  }
+
+  /** Adds repo folders to the space: to its workspace file (made when this makes two) and its repo map.
+   *  On another machine, to Wingman's own workspace file only (workspace.js). */
   async addRepos(roots, cx) {
     const sp = this.space();
     if (!sp) return;
     for (const root of roots) {
       await addFolder(sp, root, this.repos().map((st) => st.asked ?? st.root));
       // The capture leader writes the same file: retry when it wrote first.
-      for (let i = 0; ; i++) { try { await addSpaceRepos([[sp.id, root]]); break; } catch (e) { if (i >= 2) throw e; } }
-      this.misses?.delete(root);
+      if (!sp.machine) for (let i = 0; ; i++) { try { await addSpaceRepos([[sp.id, root]]); break; } catch (e) { if (i >= 2) throw e; } }
+      this.misses?.delete(rootId(root, sp.machine ?? null));
     }
     this.ws = null; this.error = null; cx.notify();
-    await this.follow(cx);
+    await this.follow(cx, true);
   }
 
   /** The pick panel's or worktree offer's confirm: makes worktrees where asked, then adds. */
@@ -919,6 +968,7 @@ export default class Review extends View {
         const roots = [];
         const items = ws.kind === "worktree" ? [{ path: ws.root }] : ws.repos.filter((r) => r.on && !r.has);
         for (const r of items) {
+          if (ws.on) { roots.push(r.path); continue; } // another machine: no worktrees there yet
           const info = await repoInfo(r.path);
           const offer = ws.kind === "worktree" ? ws : ws.asWorktrees && ws.offer && info && !info.linked ? { branch: ws.offer.branch, dest: ws.offer.dest.replace(/[^/]+$/, base(r.path)) } : null;
           if (offer) {
@@ -940,7 +990,8 @@ export default class Review extends View {
     const open = this.files.filter((f) => f.store === st).reduce((n, f) => n + (f.plain ? 0 : f.hunks.length), 0);
     this.ws = { kind: "remove", st, open, linked: null };
     cx.notify();
-    if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
+    // Deleting a worktree on another machine isn't offered yet.
+    if (!st.plain && !st.on) cx.spawn(async (cx) => { const info = await repoInfo(st.root).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
   }
 
   confirmRemove(deleteWorktree, cx) {
@@ -952,7 +1003,7 @@ export default class Review extends View {
         await removeFolder(sp, ws.st.asked ?? ws.st.root);
         if (ws.st.asked && norm(ws.st.asked) !== norm(ws.st.root)) await removeFolder(sp, ws.st.root);
         this.ws = null; this.error = null;
-        await this.follow(cx);
+        await this.follow(cx, true);
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.wsBusy = null; cx.notify(); }
     });
@@ -963,8 +1014,8 @@ export default class Review extends View {
   /** Collapses or expands a root in the tree. Kept across reloads (per pane copy); repoOpen
    *  remembers plain roots opened by hand, which otherwise start collapsed beside a repo. */
   toggleRepo(st, cx) {
-    const shut = (this.repoShut ??= new Set()), open = (this.repoOpen ??= new Set()), was = this.rootShut(st);
-    if (was) { shut.delete(st.root); open.add(st.root); } else { shut.add(st.root); open.delete(st.root); }
+    const shut = (this.repoShut ??= new Set()), open = (this.repoOpen ??= new Set()), was = this.rootShut(st), id = idOf(st);
+    if (was) { shut.delete(id); open.add(id); } else { shut.add(id); open.delete(id); }
     try { localStorage.setItem("repoShut", JSON.stringify([...shut])); localStorage.setItem("repoOpen", JSON.stringify([...open])); } catch {}
     if (was && st.plain) this.loadFolder(st, this.rootTree(st), "", cx);
     cx.notify();
@@ -978,6 +1029,12 @@ export default class Review extends View {
     const actions = (...btns) => h_flex().gap(6).flex_wrap().children(btns.filter(Boolean));
     const cancel = this.button("ws-cancel", "Cancel", t.background, (cx) => { this.ws = null; cx.notify(); });
     if (this.wsBusy) return box.child(div().text_color(t.muted).child(this.wsBusy));
+    if (ws.kind === "path") {
+      return box.child(div().text_color(t.muted).child(`A repo, or a folder of repos, on ${this.machine() ?? "the space's machine"}`))
+        .child(Input.new(this.pathInput))
+        .child(div().text_color(t.dim).child(WORKTREE_NOTE))
+        .child(actions(this.button("ws-path-add", "Add", t.accent + "55", (cx) => this.addPath(cx)), cancel));
+    }
     if (ws.kind === "pick") {
       const n = ws.repos.filter((r) => r.on && !r.has).length;
       return box.child(div().text_color(t.muted).child(`Repos in ${ws.parent}`))
@@ -1102,14 +1159,32 @@ export default class Review extends View {
     this.reviewSig = sig; setShared(REVIEW, m);
   }
 
-  /** git in a store's repo, wherever the repo lives (git.js). */
-  git(st, args, opts = {}) { return git(args, { cwd: st.root, ...opts }); }
+  /** git in a store's repo, wherever the repo lives (git.js), on its machine. */
+  git(st, args, opts = {}) { return git(args, { cwd: st.root, on: st.on ?? null, ...opts }); }
 
-  /** A repo's `git status` and HEAD, as one string that changes when either does. */
+  /** A repo's `git status`, its HEAD and its files ({ out, head, list }). On another machine one call (STATUS_V2). */
   async statusOf(st) {
+    if (st.on) {
+      const s = await this.git(st, STATUS_V2);
+      if (s.code !== 0) throw new Error(`git status in ${base(st.root)}: ${(s.stderr || s.stdout).trim()}`);
+      return { out: s.stdout, ...parseStatusV2(s.stdout) };
+    }
     const [s, head] = await Promise.all([this.git(st, STATUS), this.git(st, [...READ, "rev-parse", "-q", "--verify", "HEAD"])]);
     if (s.code !== 0) throw new Error(`git status in ${base(st.root)}: ${(s.stderr || s.stdout).trim()}`);
-    return { out: s.stdout, head: head.code === 0 ? head.stdout.trim() : null };
+    return { out: s.stdout, head: head.code === 0 ? head.stdout.trim() : null, list: parseStatus(s.stdout) };
+  }
+
+  /**
+   * What says a repo's listed files changed, beside its status: here the review index (each listed
+   * file is reread too); on another machine, where every read is a call, one `git hash-object` of
+   * the listed files on disk ("!" when that fails, e.g. a file went meanwhile: the status shows it).
+   */
+  async stampOf(st, list) {
+    if (!st.on) return st.stamp();
+    const rels = onDisk(list).slice(0, REMOTE.hashMax);
+    if (!rels.length) return "";
+    const r = await this.git(st, ["hash-object", "--no-filters", "--", ...rels]);
+    return r.code === 0 ? r.stdout : "!";
   }
 
   /** Every uncommitted file in the space's repos, as HEAD (B) against the working tree (C). */
@@ -1119,12 +1194,15 @@ export default class Review extends View {
     try {
       const files = [], committed = [], sig = [];
       for (const st of this.repos()) {
-        const { out, head } = await this.statusOf(st), stamp = await st.stamp();
-        sig.push(st.root, head, out, stamp);
-        const { ai, done } = await this.aiMarks(st), counts = await this.lineCounts(st, head);
-        for (const { rel, xy } of parseStatus(out)) {
-          const f = await this.loadChange(st, rel, xy, !!head, cx);
-          files.push({ ...f, ai: ai.has(rel), ...this.countsOf(f, counts.get(rel)) });
+        const { out, head, list } = await this.statusOf(st), stamp = await this.stampOf(st, list);
+        sig.push(idOf(st), head, out, stamp);
+        // No review on another machine, so no AI marks there.
+        const { ai, done } = st.on ? { ai: new Set(), done: new Set() } : await this.aiMarks(st), counts = await this.lineCounts(st, head);
+        // Texts are fetched a few at a time on another machine (each read is a call), one by one here.
+        const texts = await mapLimit(list, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeTexts(st, rel, xy, !!head));
+        for (const t of texts) {
+          const f = await this.tokened(t, cx);
+          files.push({ ...f, ai: ai.has(f.rel), ...this.countsOf(f, counts.get(f.rel)) });
         }
         if (head) committed.push(...(await this.loadCommitted(st, head, done, cx)));
       }
@@ -1135,16 +1213,26 @@ export default class Review extends View {
     finally { this.loadingChanges = false; }
   }
 
-  async loadChange(st, rel, xy, hasHead, cx) {
+  /** A changed file's HEAD text (B), working-tree text (C) and hunks, read where the repo lives; not yet highlighted. */
+  async changeTexts(st, rel, xy, hasHead) {
     const path = `${st.root}/${rel}`, key = `${st.root}|${rel}`;
     const f = { rel, path, basePath: null, store: st, key, xy, letter: statusLetter(xy), plain: false, created: false, by: null, as: null, hunks: [] };
     try {
       const show = hasHead ? await this.git(st, [...READ, "show", `HEAD:${rel}`]) : { code: 1, stdout: "" };
-      const inHead = show.code === 0, Btext = inHead ? show.stdout : "", Ctext = await readTextFile(path);
+      const inHead = show.code === 0, Btext = inHead ? show.stdout : "", Ctext = await readTextFile(path, { on: st.on ?? null });
       if (Btext.includes("\0") || Ctext?.includes("\0")) return { ...f, inHead, error: "binary file" };
+      // The diff runs here, on temp copies (merge.js), wherever the texts came from.
       const hunks = await diffHunks(Btext, Ctext ?? "");
-      return this.withTokens({ ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks }, cx);
+      return { ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks, toTok: true };
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
+  }
+
+  /** changeTexts' result highlighted (an error stays as it is). */
+  async tokened(t, cx) {
+    if (!t.toTok) return t;
+    const { toTok, ...f } = t;
+    try { return await this.withTokens(f, cx); }
+    catch (e) { return { rel: f.rel, path: f.path, basePath: null, store: f.store, key: f.key, xy: f.xy, letter: f.letter, plain: false, created: false, by: null, as: null, hunks: [], error: String(e.message ?? e) }; }
   }
 
   /** D3: line counts of a repo's uncommitted changes against HEAD (staged plus unstaged with no commits yet). */
@@ -1174,7 +1262,7 @@ export default class Review extends View {
 
   /** Where this branch starts: its merge base with the remote's default branch (else main or master). */
   async branchBase(st, head) {
-    const cached = (this.bases ??= new Map()).get(st.root);
+    const cached = (this.bases ??= new Map()).get(idOf(st));
     if (cached?.head === head) return cached.base;
     let base = null;
     for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
@@ -1182,7 +1270,7 @@ export default class Review extends View {
       if (r.code === 0 && r.stdout.trim() !== head) { base = r.stdout.trim(); break; }
       if (r.code === 0) break; // HEAD is that branch's tip: nothing committed on top of it
     }
-    this.bases.set(st.root, { head, base });
+    this.bases.set(idOf(st), { head, base });
     return base;
   }
 
@@ -1194,35 +1282,45 @@ export default class Review extends View {
       this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, "HEAD"])]);
     if (r.code !== 0) return [];
     const counts = parseNumstat(n.code === 0 ? n.stdout : "");
-    const parts = r.stdout.split("\0").filter(Boolean), out = [];
-    for (let i = 0; i + 1 < parts.length && out.length < MAX_FILES; i += 2) {
-      const letter = parts[i][0] === "A" ? "A" : parts[i][0] === "D" ? "D" : "M", rel = parts[i + 1];
+    const parts = r.stdout.split("\0").filter(Boolean), items = [];
+    for (let i = 0; i + 1 < parts.length && items.length < MAX_FILES; i += 2) items.push([parts[i], parts[i + 1]]);
+    // Blobs a few at a time on another machine (each is a call), one by one here; highlighting after, in order.
+    const texts = await mapLimit(items, st.on ? REMOTE.parallel : 1, async ([status, rel]) => {
+      const letter = status[0] === "A" ? "A" : status[0] === "D" ? "D" : "M";
       const f = { rel, path: `${st.root}/${rel}`, basePath: null, store: st, key: `${st.root}|${rel}#committed`, openKey: `${st.root}|${rel}`,
         committed: true, letter, ai: done.has(rel), plain: false, created: letter === "A", by: null, as: null, hunks: [] };
       try {
         const [b, c] = await Promise.all([st.blobAt(base, rel), st.blobAt("HEAD", rel)]);
-        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) { out.push({ ...f, error: "binary file" }); continue; }
+        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) return { ...f, error: "binary file" };
         const hunks = await diffHunks(b ?? "", c ?? "");
         const k = counts.get(rel);
-        out.push(await this.withTokens({ ...f, ...(k && !k.binary ? { add: k.add, del: k.del } : {}), Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx));
-      } catch (e) { out.push({ ...f, error: String(e.message ?? e) }); }
+        return { f, t: { ...f, ...(k && !k.binary ? { add: k.add, del: k.del } : {}), Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks } };
+      } catch (e) { return { ...f, error: String(e.message ?? e) }; }
+    });
+    const out = [];
+    for (const x of texts) {
+      if (!x.t) { out.push(x); continue; }
+      try { out.push(await this.withTokens(x.t, cx)); } catch (e) { out.push({ ...x.f, error: String(e.message ?? e) }); }
     }
     return out;
   }
 
-  /** Every 2 s: reloads when git status or HEAD changed, or a listed file's text did. */
+  /** Every 2 s (5 s on another machine): reloads when git status or HEAD changed, or a listed file's text did. */
   async refreshChanges(cx) {
     // One check at a time: WSL git on a Windows drive takes over a second per status.
     if (this.refreshing || this.loadingChanges || this.committing || !this.repos().length) return;
+    const remote = this.repos().some((st) => st.on);
+    if (remote && Date.now() - (this.changesAt ?? 0) < REMOTE.changesMs) return;
     this.refreshing = true;
     try {
       const sig = [];
-      for (const st of this.repos()) { const { out, head } = await this.statusOf(st); sig.push(st.root, head, out, await st.stamp()); }
+      for (const st of this.repos()) { const { out, head, list } = await this.statusOf(st); sig.push(idOf(st), head, out, await this.stampOf(st, list)); }
       let stale = sig.join("\0") !== this.changeSig;
-      for (const f of this.files) { if (stale) break; if (!f.error && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
+      // Another machine's files are covered by stampOf's hashes.
+      for (const f of this.files) { if (stale) break; if (!f.error && !f.store?.on && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
       if (stale) await this.loadChanges(cx);
     } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
-    finally { this.refreshing = false; }
+    finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); }
   }
 
   /** Puts a file back as HEAD has it (asked first by the button). Unsaved edits in Edit block it. */
@@ -1335,10 +1433,10 @@ export default class Review extends View {
   /** A root's tree state, kept per copy across spaces (as the open folders were). */
   rootTree(st) {
     const m = (this.ftrees ??= new Map());
-    let R = m.get(st.root);
+    let R = m.get(idOf(st));
     if (!R || R.plain !== !!st.plain) {
       R = { plain: !!st.plain, tree: createTree(), ver: 0, index: null, marks: null, match: null, statOut: null, listedAt: new Map(), listSig: new Map(), errors: new Map(), pending: new Set() };
-      m.set(st.root, R);
+      m.set(idOf(st), R);
     }
     return R;
   }
@@ -1366,7 +1464,7 @@ export default class Review extends View {
         while (jobs.length) {
           const { st, rel } = jobs.shift(), R = this.rootTree(st);
           let res, error = null;
-          try { res = await listDir(pjoin(st.root, rel), { limit: PER_FOLDER }); }
+          try { res = await listDir(pjoin(st.root, rel), { limit: PER_FOLDER, on: st.on ?? null }); }
           catch (e) { res = { entries: [], more: false }; error = String(e.message ?? e); }
           R.pending.delete(rel); R.listedAt.set(rel, Date.now());
           if (rel && !R.tree.open.has(rel)) continue; // closed meanwhile
@@ -1400,8 +1498,8 @@ export default class Review extends View {
 
   /** Whether a root's header is collapsed: by the user, or a plain root by default beside a repo. */
   rootShut(st) {
-    if (this.repoShut?.has(st.root)) return true;
-    return !!st.plain && !this.repoOpen?.has(st.root) && this.stores.some((x) => !x.plain);
+    if (this.repoShut?.has(idOf(st))) return true;
+    return !!st.plain && !this.repoOpen?.has(idOf(st)) && this.stores.some((x) => !x.plain);
   }
 
   /** The plain root's refresh button: lists its loaded folders again, one at a time. */
@@ -1425,6 +1523,11 @@ export default class Review extends View {
       try {
         for (const st of this.stores) {
           const R = this.rootTree(st);
+          // A root on another machine: one pass at most every 10 s (a remote call is about 200 ms).
+          if (st.on) {
+            if (Date.now() - (R.passAt ?? 0) < REMOTE.treeMs) continue;
+            R.passAt = Date.now();
+          }
           if (st.plain) {
             if (this.rootShut(st)) continue;
             if (!R.tree.entries.has("")) { this.queueList(st, "", cx); continue; }
@@ -1436,19 +1539,19 @@ export default class Review extends View {
           const [r, s] = await Promise.all([this.git(st, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]), this.git(st, STATUS_TREE)]);
           if (r.code !== 0) {
             const error = (r.stderr || r.stdout).trim();
-            if (this.trees.get(st.root)?.error !== error) { this.trees.set(st.root, { error }); changed = true; }
+            if (this.trees.get(idOf(st))?.error !== error) { this.trees.set(idOf(st), { error }); changed = true; }
             continue;
           }
-          if (this.trees.get(st.root)?.list !== r.stdout) {
+          if (this.trees.get(idOf(st))?.list !== r.stdout) {
             const paths = [...new Set(r.stdout.split("\0").filter(Boolean))];
-            this.trees.set(st.root, { list: r.stdout, paths, set: new Set(paths) });
+            this.trees.set(idOf(st), { list: r.stdout, paths, set: new Set(paths) });
           }
           const out = s.code === 0 ? s.stdout : "";
           if (R.statOut !== out) {
             const { marks, ignored } = parseTreeStatus(out);
             R.statOut = out; R.marks = marks; R.ignored = ignored; R.match = ignoredMatcher(ignored); changed = true;
           }
-          const tr = this.trees.get(st.root);
+          const tr = this.trees.get(idOf(st));
           if (R.indexFor === tr && R.indexIgnored === R.ignored) continue;
           R.indexFor = tr; R.indexIgnored = R.ignored; R.index = folderIndex(tr.paths, R.ignored); changed = true;
           for (const rel of ["", ...R.tree.open]) {
@@ -1508,7 +1611,7 @@ export default class Review extends View {
             .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { cx.stop_propagation(); this.askRemove(st, cx); }).child("×")));
         if (shut) continue;
       }
-      const tr = st.plain ? null : this.trees.get(st.root);
+      const tr = st.plain ? null : this.trees.get(idOf(st));
       if (tr?.error) { out.push(note(`tree-err-${st.root}`, tr.error, t.ansi1)); continue; }
       if (R.errors.get("")) { out.push(note(`tree-err-${st.root}`, R.errors.get(""), t.ansi1)); continue; }
       if (st.plain ? !R.tree.entries.has("") : !R.index) { out.push(note(`tree-load-${st.root}`, "Loading…")); continue; }
@@ -1691,6 +1794,8 @@ export default class Review extends View {
    */
   run(plan, cx, feedback = []) {
     if (!plan.length || this.mode === "changes") return;
+    const away = plan.find(([f]) => f.store?.on);
+    if (away) return this.remoteReadOnly(away[0], cx);
     if (plan.some(([f]) => f.conflict)) { this.error = "Pick Keep mine or Take agent's first"; cx.notify(); return; }
     // Panel split: another copy (Edit) holds unsaved edits to these files. Review acts on what's
     // on disk, so they're saved first (autosave on) or left to the user (off).
@@ -1979,6 +2084,9 @@ export default class Review extends View {
   readOnly(cx) {
     this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; cx.notify();
   }
+
+  /** A file on another machine can't be changed from here yet: typing, pasting and saving say so. */
+  remoteReadOnly(f, cx) { this.error = readOnlyNote(f.rel, f.store.on); cx.notify(); }
   cw() { return this.charW ?? 7.2; }
   hasTextSel() { return !!(this.anchor && this.cur && cmp(this.anchor, this.cur)); }
   ordered() { return cmp(this.anchor, this.cur) <= 0 ? [this.anchor, this.cur] : [this.cur, this.anchor]; }
@@ -2076,6 +2184,7 @@ export default class Review extends View {
     const f = this.file();
     if (!this.editable(f) || !this.cur) return;
     if (this.view === "review" || this.mode === "changes") return this.readOnly(cx);
+    if (f.store?.on) return this.remoteReadOnly(f, cx);
     const sel = this.hasTextSel(), a = from ?? (sel ? this.anchor : this.cur), b = to ?? this.cur;
     const lang = languageOf(f.rel);
     const { state, cursor } = edit(f, a, b, text, (ls) => highlightLines(ls, lang));
@@ -2199,6 +2308,7 @@ export default class Review extends View {
   lineOp(name, cx) {
     const f = this.file();
     if (!this.editable(f) || !this.cur) return;
+    if (f.store?.on && this.view !== "review" && this.mode !== "changes") return this.remoteReadOnly(f, cx);
     const lines = linesOf(f), anchor = this.hasTextSel() ? this.anchor : null, cur = this.cur;
     const [l1, l2] = lineSpan(anchor, cur);
     const op = {
@@ -2272,10 +2382,13 @@ export default class Review extends View {
     this.replaceInput = InputState.new({ placeholder: "Replace" });
     this.lineInput = InputState.new({ placeholder: "Line, or line:column" });
     this.quickInput = InputState.new({ placeholder: "Search files by name (add :line to go to a line, or start with : for this file)" });
+    // Add repo… for a space on another machine: a path there (the folder picker is this computer's).
+    this.pathInput = InputState.new({ placeholder: "A folder on that machine, e.g. /home/me/repo" });
+    this.pathInput.on("submit", (_e, cx) => this.addPath(cx));
     this.qo = null; this.recent = []; // Quick Open: null, or { sel, items }; recent: file keys, newest first
     this.quickInput.on("change", (_e, cx) => { this.rankQuick(); cx.notify(); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
-    for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput]) {
+    for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) {
       i.on("focus", () => { this.inBar = i; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
     }
@@ -2351,6 +2464,7 @@ export default class Review extends View {
     const f = this.file(), { ms, re } = this.matches(f);
     if (!this.editable(f) || !re || !ms.length) return;
     if (this.view === "review" || this.mode === "changes") return this.readOnly(cx);
+    if (f.store?.on) return this.remoteReadOnly(f, cx);
     const lines = linesOf(f), repl = this.replaceInput.value(), regex = this.findOpts.regex;
     const subs = ms.map((m) => replacement(body(lines[m.line]).slice(m.from, m.to), re, repl, regex));
     this.cur ??= { line: 0, col: 0 };
@@ -2412,6 +2526,7 @@ export default class Review extends View {
 
   save(cx, f = this.file()) {
     if (!f) return;
+    if (f.store?.on) return this.remoteReadOnly(f, cx);
     if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; cx.notify(); return; }
     const writes = this.saveWrites(f);
     if (!writes.length) return;
@@ -2522,6 +2637,7 @@ export default class Review extends View {
       return;
     }
     if (this.commitInput && this.inBar === this.commitInput) return; // the commit message box types its own keys
+    if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); cx.notify(); done(); } return; }
     // The find bar has the keyboard: Esc, the bar's own actions, and switching between find, replace and line.
     if (this.inBar) {
       if (k === "escape") { this.closeFind(cx); return done(); }
@@ -2874,6 +2990,7 @@ export default class Review extends View {
     const tag = (x) => x.created ? "new" : x.Ctext === null ? "deleted" : `${x.hunks.length}`;
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;
     const picked = this.files.find((x) => x.key === this.sel); // an error tab shows its error
+    const away = this.machine(), noReview = !!away && this.mode === "review"; // Review isn't available on another machine yet
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
@@ -2883,7 +3000,7 @@ export default class Review extends View {
           div().id(`mode-${m}`).h(22).px(8).flex().items_center().rounded(4).text_size(12).cursor_pointer()
             .when(this.mode === m, (e) => e.bg(t.selected)).on_click((_e, cx) => this.setMode(m, cx))
             .child(m === "review" ? "Review" : "Edit")))))
-        .child(div().text_size(11).text_color(t.muted).truncate().child(`${this.stores.map((st) => base(st.root)).join(", ")} · ${total} change${total === 1 ? "" : "s"} in ${vis.length} file${vis.length === 1 ? "" : "s"} · ${this.history.length} undoable${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
+        .child(div().text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${total} change${total === 1 ? "" : "s"} in ${vis.length} file${vis.length === 1 ? "" : "s"} · ${this.history.length} undoable${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
         .child(div().flex_1())
         .when(!!this.lastReject, (e) => e.child(this.button("reason", `Comment last rejection  ${this.kl("reason")}`, t.raised, (cx) => this.askReason(cx))))
         .when(total > 0 && this.mode === "review", (e) => e
@@ -2927,8 +3044,8 @@ export default class Review extends View {
         .child(this.button("ours", "Keep mine", t.raised, (cx) => this.resolve("ours", cx)))
         .child(this.button("theirs", f?.conflict?.theirs ? "Take agent's" : "Drop my edits", t.ansi1 + "55", (cx) => this.resolve("theirs", cx)))))
       .when(!!(this.error || this.status || !f), (e) => e.child(h_flex().px(12).py(6).gap(10).items_center().text_size(12)
-        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? this.status ?? (picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
-        .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
+        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? (noReview ? REVIEW_NOTE : null) ?? this.status ?? (picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
+        .when(!this.stores.length && !!this.spaceId && !noReview, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
         .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; cx.notify(); })
         // One character's width in the diff font, for cursor columns (the font is monospace).

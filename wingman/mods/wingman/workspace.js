@@ -9,12 +9,18 @@
 // A space's repos are that file's folders, plus the repos its agents started in or edited
 // (spaces.json, from the Claude hook), minus the ones removed by hand (hidden.json).
 // Wingman's edits change only the "folders" array, keeping every other key, comment and order.
+//
+// A space on another machine (`sp.machine`): its folder's workspace file is read there (fsx) and
+// never written. Repos added by hand go to Wingman's own file here (data/wingman/workspaces/,
+// holding the machine's paths). Paths stay the machine's (remotePath, never hostPath), and the
+// Claude hook's spaces.json isn't used for it.
 import * as fs from "fs/promises";
 import { readTextFile, writeTextFile, appHome } from "herdr";
 import { git, hostOf } from "./git.js";
-import { listDir } from "./fsx.js";
+import { listDir, readText } from "./fsx.js";
 import { hostPath } from "./capture.js";
 import { spaceRepos } from "./journal.js";
+import { remotePath } from "./remote.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 const slash = (p) => p.replace(/\\/g, "/");
@@ -143,8 +149,12 @@ export function worktreeDest(worktrees, repo) {
 
 // ---- the file on disk ----------------------------------------------------------------
 
-/** The space's folder as this machine opens it, or null (none, or the home folder). */
+/** How a path the space names (its folder, a terminal's, a workspace folder) is opened: hostPath here, as is on another machine. */
+export const pathFor = (sp) => (sp?.machine ? remotePath : hostPath);
+
+/** The space's folder as this machine (or the space's machine) opens it, or null (none, or the home folder). */
 export function spaceFolder(sp) {
+  if (sp?.machine) { const f = sp.folder ? remotePath(sp.folder) : null; return f && f !== "~" && !isHome(f) ? f : null; }
   const f = sp?.folder ? hostPath(sp.folder)?.replace(/\/+$/, "") : null;
   // The home folder is where a space with no folder of its own starts: it's no workspace's folder.
   const home = slash(appHome()).replace(/\/\.config\/herdr-app\/?$/, "");
@@ -162,18 +172,41 @@ export function isHome(p) {
 const ownFile = (spaceId) => `${dataDir()}/workspaces/${spaceId.replace(/[^\w-]/g, "_")}${EXT}`;
 
 // A listing is a PowerShell run on Windows (about 1 s), so a new workspace file is noticed within 30 s.
+// Another machine's folder is keyed by the machine too ("<machine>\0<folder>").
 const listCache = new Map(); // folder -> { at, names }
-async function namesIn(dir) {
-  const c = listCache.get(dir);
+const cacheKey = (dir, on) => (on ? `${on}\0${dir}` : dir);
+async function namesIn(dir, on = null) {
+  const k = cacheKey(dir, on), c = listCache.get(k);
   if (c && Date.now() - c.at < 30000) return c.names;
-  const names = (await listDir(dir).catch(() => ({ entries: [] }))).entries.map((e) => e.name);
-  listCache.set(dir, { at: Date.now(), names });
+  const names = (await listDir(dir, { on }).catch(() => ({ entries: [] }))).entries.map((e) => e.name);
+  listCache.set(k, { at: Date.now(), names });
   return names;
 }
 
-/** The space's workspace file: { file, dir, text } or null when it has none. */
-export async function findWorkspace(sp) {
+// Another machine's workspace file is read at most every 30 s too (a read there is about 200 ms).
+const textCache = new Map(); // "<machine>\0<file>" -> { at, text }
+async function remoteText(file, on) {
+  const k = cacheKey(file, on), c = textCache.get(k);
+  if (c && Date.now() - c.at < 30000) return c.text;
+  const text = await readText(file, { on });
+  textCache.set(k, { at: Date.now(), text });
+  return text;
+}
+
+/** A space on another machine: the workspace file in its folder there, read-only, or null. */
+async function machineWorkspace(sp) {
   const folder = spaceFolder(sp);
+  if (!folder) return null;
+  const name = pickFile(await namesIn(folder, sp.machine), folder.split("/").pop() ?? "");
+  if (!name) return null;
+  const file = `${folder}/${name}`, text = await remoteText(file, sp.machine);
+  return text != null ? { file, dir: folder, text } : null;
+}
+
+/** The space's workspace file Wingman reads and edits: { file, dir, text } or null when it has none.
+ *  For a space on another machine, Wingman's own file here (machineWorkspace is the one there). */
+export async function findWorkspace(sp) {
+  const folder = sp.machine ? null : spaceFolder(sp);
   if (folder) {
     const name = pickFile(await namesIn(folder), folder.split("/").pop() ?? "");
     if (name) { const file = `${folder}/${name}`, text = await readTextFile(file); if (text != null) return { file, dir: folder, text }; }
@@ -182,15 +215,19 @@ export async function findWorkspace(sp) {
   return text != null ? { file, dir: file.replace(/\/[^/]+$/, ""), text } : null;
 }
 
-/** The workspace file's folders, or [] (no file, or it doesn't parse). */
+/** The workspace file's folders, or [] (no file, or it doesn't parse). On another machine: the
+ *  machine's file's folders (`keep` false: removing one hides it), then Wingman's own file's. */
 export async function workspaceFolders(sp) {
-  const ws = await findWorkspace(sp);
-  if (!ws) return [];
-  try { return foldersOf(ws.text, ws.dir, (p) => hostPath(p)); } catch { return []; }
+  const read = (ws) => { try { return ws ? foldersOf(ws.text, ws.dir, (p) => pathFor(sp)(p)) : []; } catch { return []; } };
+  const own = read(await findWorkspace(sp));
+  if (!sp.machine) return own;
+  return [...read(await machineWorkspace(sp)).map((f) => ({ ...f, keep: false })), ...own];
 }
 
-/** Where a workspace Wingman makes for the space goes: its folder, unless that's inside a repo or home. */
+/** Where a workspace Wingman makes for the space goes: its folder, unless that's inside a repo or home.
+ *  Never on another machine: Wingman's own file. */
 async function newFile(sp) {
+  if (sp.machine) return ownFile(sp.id);
   const folder = spaceFolder(sp);
   if (folder && (await git(["rev-parse", "--show-toplevel"], { cwd: folder })).code !== 0) return `${folder}/${folder.split("/").pop()}${EXT}`;
   return ownFile(sp.id);
@@ -212,7 +249,8 @@ async function editFolders(sp, start, change) {
   }
   const file = await newFile(sp), dir = file.replace(/\/[^/]+$/, "");
   const next = change(start.map((p) => ({ path: relTo(dir, p) })), dir);
-  if (next.length < 2) return;
+  // On another machine the file is the only record of a repo added by hand, so one is enough.
+  if (next.length < (sp.machine ? 1 : 2)) return;
   if (file.startsWith(dataDir())) await fs.mkdir(dir, { recursive: true });
   await writeTextFile(file, withFolders(null, next), null);
   listCache.delete(dir);
@@ -222,13 +260,13 @@ async function editFolders(sp, start, change) {
 export async function addFolder(sp, root, shown) {
   await setHidden(sp.id, root, false);
   await editFolders(sp, shown.filter((p) => !same(p, root)), (list, dir) =>
-    list.some((f) => same(hostPath(joinPath(dir, f.path)), root)) ? list : [...list, { path: relTo(dir, root) }]);
+    list.some((f) => same(pathFor(sp)(joinPath(dir, f.path)), root)) ? list : [...list, { path: relTo(dir, root) }]);
 }
 
 /** Takes a repo out of the space: out of its workspace file, and hidden from what agents found. */
 export async function removeFolder(sp, root) {
   const ws = await findWorkspace(sp);
-  if (ws) await editFolders(sp, [], (list, dir) => list.filter((f) => !same(hostPath(joinPath(dir, f.path)), root)));
+  if (ws) await editFolders(sp, [], (list, dir) => list.filter((f) => !same(pathFor(sp)(joinPath(dir, f.path)), root)));
   await setHidden(sp.id, root, true);
 }
 
@@ -258,23 +296,23 @@ async function setHidden(spaceId, root, on) {
  * folders the workspace file still lists.
  */
 export async function spaceRoots(sp, start = []) {
-  const ws = await workspaceFolders(sp), found = (await spaceRepos())[sp.id] ?? [], gone = (await hidden()).map[sp.id] ?? [];
+  const ws = await workspaceFolders(sp), found = sp.machine ? [] : (await spaceRepos())[sp.id] ?? [], gone = (await hidden()).map[sp.id] ?? [];
   const out = [], names = new Map();
   const add = (p, keep = false) => { if (p && !out.some((x) => same(x, p)) && (keep || !gone.some((g) => same(g, p)))) out.push(p); };
   for (const p of start) add(p);
-  for (const f of ws) { add(f.path, true); if (f.name) names.set(slash(f.path), f.name); }
+  for (const f of ws) { add(f.path, f.keep !== false); if (f.name) names.set(slash(f.path), f.name); }
   for (const p of found) add(p);
   return { roots: out, names };
 }
 
 // ---- worktrees ----------------------------------------------------------------------
 
-/** What a repo folder is: { branch, linked (a worktree git added), common (its main clone's .git) }. */
-export async function repoInfo(root) {
-  const r = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root });
-  const d = await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { cwd: root });
+/** What a repo folder is (on machine `on`): { branch, linked (a worktree git added), common (its main clone's .git) }. */
+export async function repoInfo(root, on = null) {
+  const r = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, on });
+  const d = await git(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { cwd: root, on });
   if (r.code !== 0 || d.code !== 0) return null;
-  const [gitDir, common] = await Promise.all(d.stdout.trim().split(/\r?\n/).map((p) => hostOf(p, root)));
+  const [gitDir, common] = await Promise.all(d.stdout.trim().split(/\r?\n/).map((p) => hostOf(p, root, on)));
   return { branch: r.stdout.trim(), linked: !same(gitDir, common), common };
 }
 
@@ -304,14 +342,15 @@ export async function removeWorktree(root) {
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "git worktree remove failed");
 }
 
-/** The git repos directly inside `parent` (folders holding a .git file or folder), sorted. */
-export async function scanRepos(parent) {
-  const dir = slash(parent).replace(/\/+$/, ""), out = [];
-  const { entries } = await listDir(dir, { limit: 5000 }).catch(() => ({ entries: [] }));
+/** The git repos directly inside `parent` (folders holding a .git file or folder), sorted. `on`: on that machine. */
+export async function scanRepos(parent, on = null) {
+  const dir = on ? remotePath(parent) : slash(parent).replace(/\/+$/, ""), out = [];
+  const { entries } = await listDir(dir, { limit: 5000, on }).catch(() => ({ entries: [] }));
   for (const name of entries.filter((e) => e.dir).map((e) => e.name).sort((a, b) => a.localeCompare(b))) {
     if (name.startsWith(".")) continue;
     const p = `${dir}/${name}`;
-    if ((await readTextFile(`${p}/.git`)) != null || (await readTextFile(`${p}/.git/HEAD`)) != null) out.push(p);
+    const read = (f) => (on ? readText(f, { on }) : readTextFile(f));
+    if ((await read(`${p}/.git`)) != null || (await read(`${p}/.git/HEAD`)) != null) out.push(p);
   }
   return out;
 }

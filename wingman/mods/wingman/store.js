@@ -4,6 +4,7 @@
 import { exec, readTextFile, writeTextFile } from "herdr";
 import { git, hostOf, toWsl } from "./git.js";
 import { splitLines, parseHunks, wholeHunk } from "./model.js";
+import { readOnlyNote } from "./remote.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 export const norm = (p) => { const s = p.replace(/\\/g, "/").replace(/^\/\/\?\//, ""); return isWindows(s) ? s.toLowerCase() : s; };
@@ -65,17 +66,24 @@ export function parkStale(index, rel, branch) {
 }
 
 export class Store {
-  static async open(root) {
+  /** The repo holding folder `root`, on machine `on` (null: this computer). Every git and file call
+   *  of the store runs there. A store on another machine is read-only (no review writes yet). */
+  static async open(root, on = null) {
     // Any folder inside the repo works: the store opens at the top level, where git's paths start.
-    const r = await git(["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd: root });
+    const r = await git(["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd: root, on });
     if (r.code !== 0) throw new Error(`not a git repository: ${root}`);
     const [top, gitDir] = r.stdout.trim().split(/\r?\n/);
-    return new Store(await hostOf(top, root), await hostOf(gitDir, root));
+    return new Store(await hostOf(top, root, on), await hostOf(gitDir, root, on), on);
   }
 
-  constructor(root, gitDir) {
-    this.root = root; this.gitDir = gitDir; this.dir = `${gitDir}/wingman`;
+  constructor(root, gitDir, on = null) {
+    this.root = root; this.gitDir = gitDir; this.dir = `${gitDir}/wingman`; this.on = on;
   }
+
+  /** git in the repo, where it lives. */
+  git(args, opts = {}) { return git(args, { cwd: this.root, on: this.on, ...opts }); }
+
+  read(path) { return readTextFile(path, { on: this.on }); }
 
   /**
    * What a batch of watched paths means: "all" (the index changed or the batch
@@ -93,23 +101,23 @@ export class Store {
   }
 
   /** The repo's branch now, read from its HEAD file (no git run). */
-  async branch() { return branchOf(await readTextFile(`${this.gitDir}/HEAD`)); }
+  async branch() { return branchOf(await this.read(`${this.gitDir}/HEAD`)); }
 
   /** HEAD's commit, or null in a repo with no commits. */
   async head() {
-    const r = await git(["rev-parse", "-q", "--verify", "HEAD"], { cwd: this.root });
+    const r = await this.git(["rev-parse", "-q", "--verify", "HEAD"]);
     return r.code === 0 ? r.stdout.trim() : null;
   }
 
   /** What a pane compares to notice review changes: the index and the branch. */
   async stamp() {
-    const [i, h] = await Promise.all([readTextFile(`${this.dir}/index.json`), readTextFile(`${this.gitDir}/HEAD`)]);
+    const [i, h] = await Promise.all([this.read(`${this.dir}/index.json`), this.read(`${this.gitDir}/HEAD`)]);
     return `${i}\0${h}`;
   }
 
   /** A file's text in a commit, or null when the commit doesn't have it. */
   async blobAt(commit, rel) {
-    const r = await git(["cat-file", "blob", `${commit}:${rel}`], { cwd: this.root });
+    const r = await this.git(["cat-file", "blob", `${commit}:${rel}`]);
     return r.code === 0 ? r.stdout : null;
   }
 
@@ -119,10 +127,10 @@ export class Store {
    * from the baseline).
    */
   async committed(rel, e, head) {
-    const [c, h] = await Promise.all([readTextFile(`${this.root}/${rel}`), this.blobAt(head, rel)]);
+    const [c, h] = await Promise.all([this.read(`${this.root}/${rel}`), this.blobAt(head, rel)]);
     if (lf(c) !== lf(h)) return false;
     if (e.head) return e.head !== head && lf(await this.blobAt(e.head, rel)) !== lf(h);
-    const b = await readTextFile(`${this.dir}/baselines/${e.baseline}`);
+    const b = await this.read(`${this.dir}/baselines/${e.baseline}`);
     return lf(e.created ? null : b ?? "") !== lf(h);
   }
 
@@ -160,21 +168,21 @@ export class Store {
   }
 
   async index() {
-    const text = await readTextFile(`${this.dir}/index.json`);
+    const text = await this.read(`${this.dir}/index.json`);
     return text ? JSON.parse(text).files ?? {} : {};
   }
 
   /** Loads one file: baseline B, current C (null if deleted), and its hunks. */
   async load(rel, entry) {
     const basePath = `${this.dir}/baselines/${entry.baseline}`, path = `${this.root}/${rel}`;
-    const [b, c] = await Promise.all([readTextFile(basePath), readTextFile(path)]);
+    const [b, c] = await Promise.all([this.read(basePath), this.read(path)]);
     const Btext = b ?? "", B = splitLines(Btext), C = splitLines(c ?? "");
     let hunks;
     if (!B.length || !C.length) hunks = wholeHunk(B, C);
     else if (Btext === c) hunks = [];
     else {
-      const d = await git(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U0",
-        "--diff-algorithm=minimal", "--", basePath, path], { cwd: this.root });
+      const d = await this.git(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U0",
+        "--diff-algorithm=minimal", "--", basePath, path]);
       if (d.code > 1) throw new Error(d.stderr.trim());
       hunks = parseHunks(d.stdout);
     }
@@ -194,6 +202,7 @@ export class Store {
 
   /** Applies one model write ({ target, before, after }) to disk; returns it with its path. */
   async apply(f, w) {
+    if (this.on) throw new Error(readOnlyNote(f.rel, this.on));
     const path = w.target === "baseline" ? f.basePath : f.path;
     await swap(path, w.before, w.after);
     return { path, before: w.before, after: w.after };
@@ -201,6 +210,7 @@ export class Store {
 
   /** Reverts writes made by `apply`, newest first. */
   async undo(writes) {
+    if (this.on) throw new Error(`${this.root} is on ${this.on}: read-only for now`);
     for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before);
   }
 }
@@ -211,10 +221,12 @@ export class Store {
  * capture, git status or Changes). `plain` tells it apart from a Store.
  */
 export class PlainRoot {
-  constructor(root) { this.root = root; this.asked = root; this.plain = true; this.label = null; }
+  /** `on`: the machine the folder is on (null: this computer); there it is read-only for now. */
+  constructor(root, on = null) { this.root = root; this.asked = root; this.plain = true; this.label = null; this.on = on; }
 
   /** Saves a file's text (compare-and-swap, like Store.apply). There is no baseline to write. */
   async apply(f, w) {
+    if (this.on) throw new Error(readOnlyNote(f.rel, this.on));
     if (w.target !== "current") throw new Error(`${f.rel} has no review baseline outside a git repo`);
     await swap(f.path, w.before, w.after);
     return { path: f.path, before: w.before, after: w.after };

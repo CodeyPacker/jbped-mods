@@ -11,6 +11,35 @@ export function parseStatus(out) {
   return out.split("\0").filter((e) => e.length > 3).slice(0, MAX_FILES).map((e) => ({ xy: e.slice(0, 2), rel: e.slice(3) }));
 }
 
+/**
+ * Another machine's status, one call: porcelain v2 with --branch also names HEAD (# branch.oid),
+ * which locally is a second call. Same files and letters as STATUS.
+ */
+export const STATUS_V2 = [...READ, "status", "--porcelain=v2", "-z", "--branch", "--no-renames", "--untracked-files=all"];
+
+/** STATUS_V2's output as { head (null before the first commit), list: [{ rel, xy }] }, xy as v1 writes it. */
+export function parseStatusV2(out) {
+  const f = out.split("\0"), list = [];
+  let head = null;
+  for (let i = 0; i < f.length; i++) {
+    const e = f[i];
+    if (e.startsWith("# branch.oid ")) { const v = e.slice(13).trim(); head = /^[0-9a-f]+$/.test(v) ? v : null; continue; }
+    // Fields before the path: "1 XY sub mH mI mW hH hI", "2 ... Xscore" (its old path is the next entry), "u ... h1 h2 h3".
+    const skip = { "1": 8, "2": 9, u: 10 }[e[0]];
+    if (e[0] === "?" && e[1] === " ") list.push({ xy: "??", rel: e.slice(2) });
+    else if (skip && e[1] === " ") {
+      let at = 0;
+      for (let k = 0; k < skip && at >= 0; k++) { at = e.indexOf(" ", at); if (at >= 0) at++; }
+      if (at > 0) list.push({ xy: e.slice(2, 4).replace(/\./g, " "), rel: e.slice(at) });
+      if (e[0] === "2") i++;
+    }
+  }
+  return { head, list: list.slice(0, MAX_FILES) };
+}
+
+/** The listed files that are on disk (any deletion in the status leaves a file out), for `git hash-object`. */
+export const onDisk = (list) => list.filter((x) => !x.xy.includes("D")).map((x) => x.rel);
+
 /** One letter for a status: A added or untracked, D deleted, ! merge conflict, M otherwise. */
 export function statusLetter(xy) {
   if (xy === "??" || xy.includes("A")) return "A";

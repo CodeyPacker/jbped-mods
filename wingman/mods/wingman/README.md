@@ -48,6 +48,21 @@ Linux and macOS use the machine's own `git`. On Windows, Wingman decides for eac
 
 WSL git on a Windows drive is slow (about 1.5 s per `git status` on a large repo), so Wingman's polls never overlap. Keeping WSL repos in WSL's own files avoids that.
 
+### Other machines
+
+A space on another machine (Herdr's `machine`, reached over ssh) works in the Edit and Changes tabs, with every git and file call running on that machine:
+
+- **Edit**: the tree of the space's repos and plain folders (from its terminals' folders, as that machine names them), with git status letters and dimmed ignored files. Files open **read-only**: typing, paste, line operations and saving do nothing and the status line says so. Neovim and the external editor don't open them.
+- **Changes**: the uncommitted list with letters and line counts, each file's diff, "Committed on this branch", **Commit** and **Discard file**. The diffs are computed here from texts read there.
+- **Quick Open** over its repos' files.
+- **Workspaces**: a `*.code-workspace` in the space's folder there is read, never written. Repos you add by hand (**+ Add repo…** takes a path on that machine) go to `data/wingman/workspaces/<space>.code-workspace` here, holding that machine's paths. Removing one listed in the machine's file hides it. Worktrees can't be made or deleted there yet.
+
+Not yet: Review (it says so), capture, the Claude hook's edits, and saving edits there.
+
+Each call there takes about 200 ms, so an idle space is polled less often than a local one: its folders every 5 s (its workspace file at most every 30 s), Changes every 5 s (one `git status` and one `git hash-object` per repo), and the tree every 10 s (two git calls per repo). Files open in Edit aren't reread while open: close and reopen one to see a newer version.
+
+The machine needs `git`, and `sh` for listing folders (a Windows machine without `sh` uses PowerShell). Only a Linux machine (WSL through Herdr) has been tried.
+
 ## Install
 
 Copy this folder to `~/.config/herdr-app/mods/wingman/`, then run the installer once.

@@ -1,4 +1,4 @@
-import { parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, parseNumstat, countLines } from "../mods/wingman/changes.js";
+import { parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, parseNumstat, countLines, STATUS, STATUS_V2, parseStatusV2, onDisk } from "../mods/wingman/changes.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,4 +41,27 @@ writeFileSync(r + "/f.txt", "1\n2\n3\n"); rg("add", "."); rg("commit", "-qm", "i
 writeFileSync(r + "/f.txt", "1\nX\n3\n4\n");
 assert.deepEqual(parseNumstat(rg(...NUMSTAT)).get("f.txt"), { add: 2, del: 1, binary: false });
 rmSync(r, { recursive: true, force: true });
+
+// Porcelain v2 (another machine's one-call status): HEAD and the same files and letters as v1.
+assert.deepEqual(parseStatusV2("# branch.oid (initial)\0# branch.head main\0? new file.txt\0"), { head: null, list: [{ xy: "??", rel: "new file.txt" }] });
+assert.deepEqual(parseStatusV2("# branch.oid abc123\0" + "1 .M N... 100644 100644 100644 aa bb a b.js\0" + "2 R. N... 100644 100644 100644 aa bb R100 to.js\0from.js\0" + "u UU N... 100644 100644 100644 100644 aa bb cc c.js\0! ignored\0").list,
+  [{ xy: " M", rel: "a b.js" }, { xy: "R ", rel: "to.js" }, { xy: "UU", rel: "c.js" }]);
+assert.deepEqual(onDisk([{ xy: " M", rel: "a" }, { xy: " D", rel: "b" }, { xy: "D ", rel: "c" }, { xy: "??", rel: "d" }, { xy: "AD", rel: "e" }]), ["a", "d"]);
+{
+  const v = mkdtempSync(tmpdir() + "/wm-v2-"), vg = (...a) => execFileSync("git", a, { cwd: v, encoding: "utf8" });
+  vg("init", "-q"); vg("config", "user.email", "t@t"); vg("config", "user.name", "t");
+  assert.equal(parseStatusV2(vg(...STATUS_V2)).head, null);
+  for (const n of ["keep.txt", "mod.txt", "gone.txt", "staged gone.txt", "both.txt"]) writeFileSync(`${v}/${n}`, "1\n");
+  vg("add", "."); vg("commit", "-qm", "c1");
+  writeFileSync(`${v}/mod.txt`, "2\n"); rmSync(`${v}/gone.txt`); vg("rm", "-q", "staged gone.txt");
+  writeFileSync(`${v}/both.txt`, "2\n"); vg("add", "both.txt"); writeFileSync(`${v}/both.txt`, "3\n");
+  writeFileSync(`${v}/new one.txt`, "x\n"); writeFileSync(`${v}/added.txt`, "x\n"); vg("add", "added.txt");
+  const v2 = parseStatusV2(vg(...STATUS_V2)), sorted = (l) => [...l].sort((a, b) => a.rel.localeCompare(b.rel));
+  assert.equal(v2.head, vg("rev-parse", "HEAD").trim());
+  assert.deepEqual(sorted(v2.list), sorted(parseStatus(vg(...STATUS))));
+  assert.equal(v2.list.length, 6);
+  // The files on disk hash fine (what another machine's refresh compares).
+  vg("hash-object", "--no-filters", "--", ...onDisk(v2.list));
+  rmSync(v, { recursive: true, force: true });
+}
 console.log("changes tests pass");
