@@ -14,8 +14,8 @@ import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt 
 import { Store, PlainRoot, norm, shows } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
-import { Capture, hostPath } from "./capture.js";
-import { capturePlan, applyPlan, capturePass } from "./captureplan.js";
+import { Capture, hostPath, tailText } from "./capture.js";
+import { capturePlan, applyPlan, tryPass, captureErrors, captureNotices, ERRORS_RENEW } from "./captureplan.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
@@ -142,6 +142,10 @@ const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's
 // The Explorer's file operations: TREE_MENU names the copy whose tree the right-click menu is for
 // (every shown copy gets the menu's command); FILEOP tells the other copies what was renamed or deleted.
 const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
+// The capture leader's failing repos, { by: leader copy, at, repos: captureErrors }, for every copy's
+// one-line notice (captureNotices). Written when it changes, renewed every ERRORS_RENEW ms while a repo
+// fails; a new leader overwrites it, and a value past ERRORS_STALE (a leader that's gone) isn't shown.
+const CAPTURE_ERRORS = "wingman.captureErrors";
 
 /** Whether the layout has a Wingman panel copy for `view`. */
 function hasView(view) {
@@ -175,7 +179,8 @@ export default class Review extends View {
   //   shows the active space's review, and keeps each space's state for when it returns.
   // - Capture: one copy holds a lease (.leader.json) and captures for every reviewed space
   //   (reviewSpaces), so the work never runs twice. A repo has one capture record, shared by
-  //   every space that includes it (captureplan.js).
+  //   every space that includes it (captureplan.js). A failing repo is retried on its own slower
+  //   schedule and shown to every copy as a one-line notice (CAPTURE_ERRORS), never as this.error.
   init(_props, cx) {
     // Opened as a popup (reason or follow-up prompt): a small form, none of the pane's work.
     if (props()?.form) return this.initForm(cx);
@@ -237,7 +242,8 @@ export default class Review extends View {
     });
     if (this.view === "changes") this.initChanges(cx);
     cx.timer.every(500, (cx) => this.lead(cx));
-    cx.timer.every(1000, () => this.isLeader && this.lease()); // renewed while a long capture pass runs too
+    // Renewed while a long capture pass runs too; so are the failing repos shared with the other copies.
+    cx.timer.every(1000, () => { if (this.isLeader) { this.lease(); this.publishCaptureErrors(); } });
     cx.timer.every(3000, (cx) => this.collectAll(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
@@ -432,22 +438,38 @@ export default class Review extends View {
   async lease() {
     if (this.leasing) return this.isLeader;
     this.leasing = true;
-    try { this.isLeader = await this.leader(); }
-    catch (e) { this.isLeader = false; log(`lease error ${e.message ?? e}`); }
+    try { this.isLeader = await this.leader(); this.logStep("lease", null); }
+    catch (e) { this.isLeader = false; this.logStep("lease", e); }
     finally { this.leasing = false; }
     return this.isLeader;
   }
 
-  /** Every 500 ms: agent status is cheap, and a snapshot must land before the first edit. */
+  /**
+   * A capture step's error that isn't a repo's (lease, hook events, outbox, a space's lookup): logged
+   * when it starts or changes and once when it clears (`e` null), never shown as the panel's error.
+   */
+  logStep(key, e) {
+    const m = (this.stepErrors ??= new Map()), msg = e == null ? null : tailText(e.message ?? e) || "error";
+    if (msg === (m.get(key) ?? null)) return;
+    if (msg) { m.set(key, msg); log(`${key} error ${msg}`); } else { m.delete(key); log(`${key} ok again`); }
+  }
+
+  /**
+   * Every 500 ms: agent status is cheap, and a snapshot must land before the first edit. Each step
+   * and each space's lookup is caught on its own: one failing never stops the rest of the pass.
+   */
   async lead(cx) {
     if (this.leading) return;
     this.leading = true;
     try {
       if (!(await this.lease())) return;
       this.journal ??= new Journal(log);
-      await this.journal.drain();
-      await drainOutbox((t) => agents().some((a) => a.address === t && ACTIVE.has(a.status)),
-        (t, text) => hc(["send", t, text]), log);
+      try { await this.journal.drain(); this.logStep("hook events", null); } catch (e) { this.logStep("hook events", e); }
+      try {
+        await drainOutbox((t) => agents().some((a) => a.address === t && ACTIVE.has(a.status)),
+          (t, text) => hc(["send", t, text]), log);
+        this.logStep("outbox", null);
+      } catch (e) { this.logStep("outbox", e); }
       const reviewed = reviewSpaces(), groups = (this.groups ??= new Map());
       for (const id of [...groups.keys()]) if (!reviewed.some((sp) => sp.id === id)) groups.delete(id);
       for (const sp of reviewed) {
@@ -464,7 +486,7 @@ export default class Review extends View {
         if (sp.machine && !active && !g.active && !sp.active) continue;
         // Any space: with no agent at all, nothing is looked up or opened unless it is shown.
         if (!active && !g.active && !sp.active && !agents().some((a) => a.space === sp.id)) continue;
-        if (!g.at || (active === g.active && Date.now() - g.at > 5000)) {
+        if (!g.at || (active === g.active && Date.now() - g.at > 5000)) try {
           g.at = Date.now();
           const on = sp.machine ?? null, { repos } = await this.folderRoots(sp);
           const { roots } = await spaceRoots(sp, repos);
@@ -486,7 +508,8 @@ export default class Review extends View {
           }
           g.keys = keys;
           if (!keys.length && !this.noRepo?.has(sp.id)) { (this.noRepo ??= new Set()).add(sp.id); log(`${sp.name}: no repo in ${JSON.stringify(agentFolders(sp))}`); }
-        }
+          this.logStep(`${sp.name}: repo lookup`, null);
+        } catch (e) { this.logStep(`${sp.name}: repo lookup`, e); } // its repos stay as last looked up; tried again in 5 s
         if (active !== g.active) {
           g.active = active;
           log(`${sp.name}: agent ${active ? "working" : "stopped"} (${g.keys.map((k) => this.captures.get(k)?.capture.store.root).filter(Boolean).join(", ")})`);
@@ -506,7 +529,7 @@ export default class Review extends View {
       }
       // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
       if (started.length) await Promise.all(started.map((c) => this.collect(c, cx, true)));
-    } catch (e) { this.error = `capture: ${e.message ?? e}`; log(`lead error ${e.message ?? e}`); cx.notify(); }
+    } catch (e) { this.logStep("lead", e); }
     finally { this.leading = false; }
   }
 
@@ -588,13 +611,26 @@ export default class Review extends View {
     finally { j.busy = false; }
   }
 
-  /** One capture pass for a repo's record (captureplan.capturePass), one at a time per record. */
+  /**
+   * One capture pass for a repo's record, one at a time per record. A failing repo keeps its error on
+   * the record and is retried on its own slower schedule (captureplan.tryPass); the other copies see
+   * it through publishCaptureErrors.
+   */
   async collect(c, cx, starting = false) {
     if (c.busy) return;
     c.busy = true;
-    try { await capturePass(c, starting, log); }
-    catch (e) { this.error = `capture: ${e.message ?? e}`; log(`error ${e.message ?? e}`); cx.notify(); }
+    try { await tryPass(c, starting, log); }
     finally { c.busy = false; }
+  }
+
+  /** The leader's failing repos for every copy (CAPTURE_ERRORS): written when they change, renewed while any. */
+  publishCaptureErrors() {
+    const repos = captureErrors(this.captures), sig = JSON.stringify(repos), now = Date.now(), cur = shared(CAPTURE_ERRORS);
+    const mine = cur?.by === this.id;
+    if (mine && sig === this.errorsSig && (sig === "{}" || now - (cur.at ?? 0) < ERRORS_RENEW)) return;
+    if (!cur && sig === "{}") return; // nothing shared and nothing failing
+    this.errorsSig = sig;
+    setShared(CAPTURE_ERRORS, { by: this.id, at: now, repos });
   }
 
   close() {
@@ -4408,6 +4444,10 @@ export default class Review extends View {
           .child(this.button("reject-all", "Reject all files", t.ansi1 + "55", (cx) => this.everything("reject", cx)))
           .child(this.button("accept-all", "Accept all files", t.ansi2 + "55", (cx) => this.everything("accept", cx))))
         .child(this.button("settings", "⚙ Settings", t.raised, () => this.openSettings()).flex_none()))
+      // A failing repo's capture (the leader's, shared): a warning row each, the rest of the view works.
+      .children(captureNotices(shared(CAPTURE_ERRORS), this.spaceId, this.stores.map(idOf), Date.now()).map((n, i) =>
+        h_flex().id(`capture-err-${i}`).flex_none().px(12).py(4).items_center().bg(t.ansi3 + "22").border_b(1).border_color(t.border).text_size(12)
+          .child(div().flex_1().min_w(0).truncate().child(n.text))))
       .child(h_flex().flex_1().min_h(0)
       .when(this.treeOnly(), (e) => e.child(this.renderLeft(t, true)))
       .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))

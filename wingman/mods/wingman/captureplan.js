@@ -1,5 +1,7 @@
 // Capture's decisions, one record per repo (store identity: machine + root), shared by every
-// reviewed space that includes the repo. Pure: no Herdr imports; capturePass takes the Capture.
+// reviewed space that includes the repo. No Herdr calls: capturePass takes the Capture, and the
+// only import is capture.js's tailText, which caps error texts.
+import { tailText } from "./capture.js";
 
 /**
  * Each repo's capture state from the spaces that include it and the agents' statuses.
@@ -67,4 +69,68 @@ export async function capturePass(c, starting = false, log = () => {}) {
     c.last = now;
     if (!c.active) { await c.capture.setState({ tree: null }); c.after = false; }
   }
+}
+
+// ---- failing repos ------------------------------------------------------------------------------
+// A record whose pass throws gets `fail` ({ message, since, at, count }): retried on a slower
+// schedule (retryMs) so a broken repo doesn't cost a snapshot every 3 s, and reported once when it
+// starts failing and once when it recovers. Other records' passes never wait for it.
+
+export const RETRY_MIN = 3000, RETRY_MAX = 60000;
+
+/** How long after its `count`th failure in a row a repo is tried again: 3 s, doubling, at most 60 s. */
+export const retryMs = (count) => Math.min(RETRY_MAX, RETRY_MIN * 2 ** Math.max(0, count - 1));
+
+/** Whether a record with failure state `fail` (`at`: when the last failed pass started) is due a
+ *  pass at `now`, less a second so a timer tick that comes a little early isn't missed. A turn start
+ *  (`starting`) always is: a missed snapshot loses the turn's baseline. */
+export const passDue = (fail, now, starting = false) => !fail || starting || now - fail.at >= retryMs(fail.count) - 1000;
+
+/**
+ * capturePass for record `c`, isolated: an error is kept on `c.fail` (message capped by tailText)
+ * rather than thrown, and cleared by the next pass that succeeds. A failing record not yet due
+ * (passDue) is skipped. `clock()` gives the time. Returns "skipped", "failed" or "ok".
+ */
+export async function tryPass(c, starting = false, log = () => {}, clock = Date.now) {
+  if (!passDue(c.fail, clock(), starting)) return "skipped";
+  const root = c.capture.store?.root ?? "repo", start = clock();
+  try { await capturePass(c, starting, log); }
+  catch (e) {
+    const message = tailText(e?.message ?? e) || "unknown error";
+    if (!c.fail) { c.fail = { message, since: start, at: start, count: 1 }; log(`${root}: capture failing: ${message}`); }
+    else c.fail = { ...c.fail, message, at: start, count: c.fail.count + 1 };
+    return "failed";
+  }
+  if (c.fail) { log(`${root}: capture recovered after ${c.fail.count} failed pass${c.fail.count === 1 ? "" : "es"}`); c.fail = null; }
+  return "ok";
+}
+
+/** The failing records of `records` (Map key -> record), as the leader shares them: key -> { root, on, spaces, message, since, count }. */
+export function captureErrors(records) {
+  const out = {};
+  for (const [k, c] of records) if (c.fail) {
+    const st = c.capture.store ?? {};
+    out[k] = { root: st.root ?? null, on: st.on ?? null, spaces: [...(c.spaces ?? [])], message: c.fail.message, since: c.fail.since, count: c.fail.count };
+  }
+  return out;
+}
+
+/** Shared capture errors older than this are from a leader that's gone (the leader renews them every ERRORS_RENEW ms). */
+export const ERRORS_STALE = 45000, ERRORS_RENEW = 15000;
+
+/**
+ * The one-line notices a panel copy shows for the space it shows (`space`, its repos' keys `keys`):
+ * one per failing repo the space includes, from the leader's shared value ({ by, at, repos }).
+ * Nothing when the value is older than ERRORS_STALE.
+ */
+export function captureNotices(shared, space, keys, now) {
+  if (!shared?.repos || !(now - (shared.at ?? 0) <= ERRORS_STALE)) return [];
+  const out = [];
+  for (const [k, e] of Object.entries(shared.repos)) {
+    if (!(e.spaces ?? []).includes(space) && !keys.includes(k)) continue;
+    const name = String(e.root ?? k).replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+    const last = String(e.message ?? "").split(/\r?\n/).filter((l) => l.trim()).pop() ?? "";
+    out.push({ key: k, text: `${name}${e.on ? ` on ${e.on}` : ""}: capture failing${last ? ` \u2014 ${last}` : ""} (retrying)` });
+  }
+  return out;
 }
