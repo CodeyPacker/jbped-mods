@@ -1,7 +1,7 @@
 // The single Wayfinder flow (ADR 0001): picks the Provider for an Account and calls the contract.
 // It never branches on which Provider it's talking to.
 import { PROVIDERS } from "./providers/index.js";
-import { can, keepsRepo } from "./providers/contract.js";
+import { can, keepsRepo, moveTarget } from "./providers/contract.js";
 import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, parseScript } from "./launch.js";
 
 export function accountFor(profile, boardCfg) {
@@ -142,4 +142,11 @@ export async function loadReviewInfo(profile, accountId, pr, io, registry = PROV
   const provider = providerFor(account, registry);
   if (!can(provider, "review")) throw new Error(`Reviews on ${account.provider} aren't supported yet`);
   return provider.review(account, pr, io);
+}
+
+// Moves a Ticket to a Column on its Board (#15). columnId: a Column of the Board as shown.
+export async function moveTicket(profile, boardCfg, data, ticket, columnId, io, registry = PROVIDERS) {
+  const { account, provider } = resolve(profile, boardCfg, registry);
+  if (!can(provider, "move")) throw new Error(`Moving cards on ${account.provider} isn't supported yet`);
+  return provider.move(account, ticket.ref, moveTarget(data, boardCfg, columnId), ticket, io);
 }

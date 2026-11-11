@@ -81,6 +81,31 @@ async function rest(org, tok, io, path, body, version = API_VERSION) {
   return data;
 }
 
+// A JSON Patch to a work item (#15, #16). Azure answers with the item, or an error message.
+async function patchItem(org, tok, io, id, ops) {
+  const res = await io.fetch(`${org}/_apis/wit/workitems/${id}?api-version=${API_VERSION}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${tok}`, Accept: "application/json", "Content-Type": "application/json-patch+json" },
+    body: JSON.stringify(ops),
+  });
+  const text = await res.text();
+  if (res.status === 401 || res.status === 203) throw new Error(`Azure DevOps refused the login (${res.status}). Run: ${loginCommand(io.profile)}`);
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* not JSON */ }
+  if (!res.ok) throw new Error(data?.message ?? `Azure DevOps answered ${res.status}`);
+  return data;
+}
+
+// The patch for a Move. A Provider Column sets the state its type maps to, plus the board's own Column
+// field (R7: that field is undocumented, so the state comes with it). A Tracked Status sets the state.
+export function moveOps(ref, target, type) {
+  const state = target.column?.states?.[type] ?? target.status;
+  if (!state) throw new Error(`The Column "${target.column?.name}" has no state for a ${type || "work item"}`);
+  const ops = [{ op: "add", path: "/fields/System.State", value: state }];
+  if (target.column && !target.status && ref.columnField) ops.push({ op: "add", path: `/fields/${ref.columnField}`, value: target.column.name });
+  return ops;
+}
+
 // WIQL string literal.
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const ref = (name) => {
@@ -100,7 +125,7 @@ export function boardWiql({ types, teamField, areas, doneStates, orderField }) {
 
 // The board's Columns in order, the types they show, and the states of the last (done) Column.
 export function boardShape(board) {
-  const columns = board.columns.map((c) => ({ id: c.name, name: c.name }));
+  const columns = board.columns.map((c) => ({ id: c.name, name: c.name, states: c.stateMappings ?? {} }));
   const types = [...new Set(board.columns.flatMap((c) => Object.keys(c.stateMappings ?? {})))];
   const doneStates = [...new Set(board.columns.filter((c) => c.columnType === "outgoing").flatMap((c) => Object.values(c.stateMappings ?? {})))];
   return { columns, types, doneStates, columnField: board.fields?.columnField?.referenceName ?? null };
@@ -228,7 +253,7 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "images", "pullRequests", "review", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "move", "pullRequests", "review", "repos", "statuses", "signInState"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -258,6 +283,13 @@ export const azure = {
     // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
     const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
     if (r.code !== 0) throw new Error(firstLine(r) || `az answered ${r.code}`);
+  },
+
+  async move(account, ref, target, ticket, io) {
+    const id = Number(ref.id);
+    if (!Number.isInteger(id) || id <= 0) throw new Error("This card has no work item to move");
+    const org = orgUrl(account), tok = await token(account, io);
+    await patchItem(org, tok, io, id, moveOps(ref, target, ticket.type));
   },
 
   // A Review's data (D16): the branches, the description, and the acceptance criteria of every linked

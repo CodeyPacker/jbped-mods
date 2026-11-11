@@ -43,8 +43,9 @@ test("config: an Azure Board needs project and team", () => {
 });
 
 test("the board's shape: Columns in order, the types it shows, the done states", () => {
+  // Each Column keeps its state per type: a Move sets that state (#15).
   assert.deepEqual(boardShape(BOARD), {
-    columns: [{ id: "New", name: "New" }, { id: "Doing", name: "Doing" }, { id: "Review", name: "Review" }, { id: "Closed", name: "Closed" }],
+    columns: BOARD.columns.map((c) => ({ id: c.name, name: c.name, states: c.stateMappings })),
     types: ["User Story", "Bug"], doneStates: ["Closed"], columnField: COLUMN_FIELD,
   });
 });

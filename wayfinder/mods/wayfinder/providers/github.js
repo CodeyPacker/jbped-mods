@@ -19,7 +19,7 @@ const ITEM_FIELDS = `
   }`;
 
 const PROJECT = `
-  title url
+  id title url
   field(name: $status) { ... on ProjectV2SingleSelectField { id name options { id name } } }
   items(first: ${PAGE}, after: $after) { pageInfo { hasNextPage endCursor } nodes { ${ITEM_FIELDS} } }`;
 
@@ -195,6 +195,10 @@ export function mapPrs(nodes) {
 // Repos the login can reach (own, collaborator, org member), for following (PR filter).
 // A Review's data (D16): the branches, the description, and the issues it closes as criteria. GitHub
 // issues have no acceptance criteria field, so each issue's body stands in.
+export const MOVE_MUTATION = `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: { projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option } }) { projectV2Item { id } }
+}`;
+
 export const REVIEW_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequest { headRefName baseRefName body isCrossRepository
     closingIssuesReferences(first: 20) { nodes { number title body } } } }
@@ -247,7 +251,7 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "pullRequests", "review", "repos", "signInState"],
+  capabilities: ["boards", "board", "ticket", "move", "pullRequests", "review", "repos", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -279,7 +283,7 @@ export const github = {
     }
     if (!project.field) throw new Error(`Project "${project.title}" has no single-select field named "${vars.status}"`);
     const tickets = mapItems(nodes);
-    for (const t of tickets) Object.assign(t.ref, { statusField: vars.status, priorityField: vars.priority });
+    for (const t of tickets) Object.assign(t.ref, { statusField: vars.status, priorityField: vars.priority, projectId: project.id, fieldId: project.field.id });
     return { title: project.title, url: project.url, me, columns: mapColumns(project.field, tickets), tickets };
   },
 
@@ -293,6 +297,19 @@ export const github = {
       after = r.pageInfo.endCursor;
     }
     return [...new Set(out)].sort(byName);
+  },
+
+  // Sets the item's Status option (#15). Writing needs the "project" scope.
+  async move(account, ref, target, _ticket, io) {
+    const option = target.column?.id;
+    if (!option || option === NO_COLUMN) throw new Error(`"${target.status ?? target.column?.name}" isn't an option of this project's Status field`);
+    if (!ref.projectId || !ref.fieldId || !ref.itemId) throw new Error("Refresh the Board, then move the card again");
+    try {
+      await graphql(account, io, MOVE_MUTATION, { project: ref.projectId, item: ref.itemId, field: ref.fieldId, option });
+    } catch (e) {
+      if (/scope|permission|not accessible|INSUFFICIENT/i.test(String(e.message))) throw new Error(`gh needs the project scope to move cards. Run: gh auth refresh -h github.com -s project`);
+      throw e;
+    }
   },
 
   async review(account, pr, io) {

@@ -9,11 +9,11 @@ import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
 import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, byRepo, initials, trackColumns, can, repoFilter } from "./providers/contract.js";
+import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -272,12 +272,18 @@ export default class Wayfinder extends View {
 
   // Arrow keys move between cards and Columns (#20). Enter opens the card, and while the detail panel
   // is open it follows the cursor. True when the key was used.
-  boardKey(key, cx) {
+  boardKey(key, cx, shift = false) {
     const b = this.board, data = b && this.boards[b.id]?.data;
     if (this.view !== "board" || !data) return false;
     const cols = this.columnsOf(b, data);
     if (!cols.length) return false;
     let c = this.cursor?.board === b.id ? { ...this.cursor } : null;
+    // Shift with left or right moves the card under the cursor one Column over (#15).
+    if (c && shift && (key === "left" || key === "right")) {
+      const tk = cols[c.col]?.tickets[c.row], to = cols[c.col + (key === "left" ? -1 : 1)];
+      if (tk && to && this.canMove(b)) { this.moveCard(b, tk, to.column.id, cx); this.cursor = { board: b.id, col: c.col + (key === "left" ? -1 : 1), row: 0 }; }
+      return true;
+    }
     if (!c) {
       if (!["left", "right", "up", "down", "enter"].includes(key)) return false;
       const first = Math.max(0, cols.findIndex((x) => x.tickets.length));
@@ -914,6 +920,54 @@ export default class Wayfinder extends View {
       .when(Boolean(panel), (el) => el.child(panel));
   }
 
+  canMove(b) {
+    const a = this.profile.accounts.find((x) => x.id === b.account);
+    return Boolean(a) && can(providerFor(a), "move");
+  }
+
+  // Moves a card (#15): shown in its new Column at once, then the Board reloads. A failure puts it back.
+  moveCard(b, summary, columnId, cx) {
+    const entry = this.boards[b.id], data = entry?.data;
+    if (!data || this.moving?.status === "busy") return;
+    let target;
+    try { target = moveTarget(data, b, columnId); } catch (e) { this.moving = { key: summary.key, status: "error", error: String(e.message ?? e) }; return; }
+    const before = data.tickets.find((x) => x.key === summary.key);
+    if (!before) return;
+    const after = { ...before, columnId: target.column?.id ?? before.columnId, status: target.status ?? target.column?.states?.[before.type] ?? before.status };
+    entry.data = { ...data, tickets: data.tickets.map((x) => (x.key === summary.key ? after : x)) };
+    if (this.selected?.summary.key === summary.key) this.selected = { ...this.selected, summary: { ...this.selected.summary, ...after } };
+    this.moving = { key: summary.key, status: "busy" };
+    const io = this.io(), p = this.profile;
+    cx.spawn(async (cx) => {
+      try {
+        await moveTicket(p, b, data, before, columnId, io);
+        this.moving = null;
+        delete this.tickets[summary.key]; // its Column changed: the detail reloads
+        if (this.selected?.summary.key === summary.key) this.fetchTicket(cx);
+      } catch (e) {
+        const cur = this.boards[b.id];
+        if (cur?.data) cur.data = { ...cur.data, tickets: cur.data.tickets.map((x) => (x.key === summary.key ? before : x)) };
+        this.moving = { key: summary.key, status: "error", error: `Couldn't move it: ${e.message ?? e}` };
+      }
+      if (this.profile?.name === p.name) this.fetchBoard(b, cx);
+      cx.notify();
+    });
+  }
+
+  moveRow(t, b, sum) {
+    const data = this.boards[b.id]?.data;
+    if (!data || !this.canMove(b)) return null;
+    const cols = this.columnsOf(b, data).map((x) => x.column);
+    const cur = this.columnsOf(b, data).find((x) => x.tickets.some((tk) => tk.key === sum.key))?.column.id;
+    const m = this.moving?.key === sum.key ? this.moving : null;
+    return v_flex().gap(6)
+      .child(h_flex().gap(6).flex_wrap().items_center()
+        .child(div().w(84).flex_none().text_size(12).text_color(t.dim).child("Move to"))
+        .children(cols.map((c) => button(`wf-move-${c.id}`, c.name, t, (cx) => { if (c.id !== cur) this.moveCard(b, sum, c.id, cx); cx.notify(); }, { on: c.id === cur }))))
+      .when(m?.status === "busy", (el) => el.child(div().text_size(12).text_color(t.dim).child("Moving…")))
+      .when(m?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(m.error)));
+  }
+
   // Launch (#13, D5, D18). The repos offered are the Board's, else the Profile's.
   launchRepos() {
     const p = this.profile, b = p.boards.find((x) => x.id === this.selected?.boardId);
@@ -1079,6 +1133,9 @@ export default class Wayfinder extends View {
       .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
       .when(!tk && entry.status === "loading", (el) => el.child(skeletonTicket(t)));
     if (tk && this.launch?.key === k) body.child(this.launchCard(t, tk));
+    const mb = this.profile.boards.find((x) => x.id === this.selected.boardId);
+    const mr = mb && this.moveRow(t, mb, sum);
+    if (mr) body.child(mr);
     if (tk) {
       body
         .child(v_flex().gap(6)
@@ -1181,7 +1238,7 @@ export default class Wayfinder extends View {
           if (this.selected) this.closeTicket(); else this.setFullscreen(false);
           cx.notify(); return;
         }
-        if (this.boardKey(e.key, cx)) { cx.stop_propagation(); cx.notify(); }
+        if (this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
       })
       .child(this.header(t))
       .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));

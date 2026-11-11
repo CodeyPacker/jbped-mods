@@ -7,6 +7,7 @@
 //     boards(account, io)  -> BoardRef[]            // what it can show, for discovery: { title, url, ref, teamDefault? }
 //     board(account, ref, io) -> Board
 //     ticket(account, ref, io) -> Ticket            // "ticket"
+//     move(account, ref, target, ticket, io)        // "move": target from moveTarget(), ticket the TicketSummary
 //     review(account, pr, io) -> { branch, target, description, criteria: [{ id, title, text }] } // "review"
 //     imageName(account, url) -> string | null      // "images": a safe file name, null if not its image
 //     downloadImage(account, url, path, io)         // "images": saves it to path, keeps a file already there
@@ -108,6 +109,21 @@ export function byRepo(prs) {
 
 // The Board with one Column per Tracked Status (D21), in the given order. States match without regard
 // to case. Tickets in other states drop out, so two states sharing one web-board column split in two.
+// Where a Move (#15) goes, from a Column id on the Board as shown: { status, column }. A Tracked
+// Statuses Column ("status:<name>") gives the state name, and the Provider's Column of that name when
+// there is one. A Provider Column gives itself (with its state mappings, if the Provider has them).
+export function moveTarget(data, boardCfg, columnId) {
+  const id = String(columnId);
+  if (id.startsWith("status:")) {
+    const status = (boardCfg.trackedStatuses ?? []).find((s) => `status:${s.toLowerCase()}` === id);
+    if (!status) throw new Error("That Column isn't on this Board");
+    return { status, column: data.columns.find((c) => c.name.toLowerCase() === status.toLowerCase()) ?? null };
+  }
+  const column = data.columns.find((c) => c.id === id);
+  if (!column) throw new Error("That Column isn't on this Board");
+  return { status: null, column };
+}
+
 export function trackColumns(board, statuses) {
   const columns = [], seen = new Set();
   for (const s of statuses ?? []) {
