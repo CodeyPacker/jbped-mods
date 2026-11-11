@@ -20,16 +20,29 @@ $code = 1
 try {
   Remove-Item -Force -LiteralPath $tmp, "$tmp.lock" -ErrorAction SilentlyContinue
   # Copy-Item keeps the index's last-write time (the racy-index rule, see snapshot.sh).
-  if (Test-Path -LiteralPath $real) { Copy-Item -Force -LiteralPath $real -Destination $tmp }
+  # A copy racing a commit or add running in the repo can fail (git replaces its index): a few tries, then fail.
+  if (Test-Path -LiteralPath $real) {
+    for ($i = 1; ; $i++) {
+      try { Copy-Item -Force -LiteralPath $real -Destination $tmp -ErrorAction Stop; break }
+      catch { if ($i -ge 5) { throw }; Start-Sleep -Milliseconds 50 }
+    }
+  }
   $env:GIT_INDEX_FILE = $tmp
   Set-Location -LiteralPath $WorkTree
   # git's stderr (a CRLF warning, say) must not fail the run: when the caller redirects stderr, Windows
   # PowerShell turns each line into an error record that "Stop" would make fatal. The exit code decides.
   $ErrorActionPreference = "Continue"
   # core.safecrlf=false only silences the line-ending warning, it does not change what is hashed.
-  git --no-optional-locks -c core.safecrlf=false add -A
+  # No hook or fsmonitor may run for a snapshot. --ignore-errors: a file git can't read (locked, a filter that
+  # fails) is left out, or keeps its indexed content, instead of losing the snapshot: git then exits 1 after
+  # indexing everything else, which is fine. Any other code (128: a corrupt index) is a real failure.
+  # A filter marked required (git-lfs, say) that can't run is fatal for the whole tree: drop the flag for this run.
+  $extra = @(git config --name-only --get-regexp '^filter\..*\.required$' 2>$null | ForEach-Object { "-c"; "$_=false" })
+  $nohooks = Join-Path $store "nohooks"
+  git --no-optional-locks -c core.safecrlf=false -c core.fsmonitor=false -c "core.hooksPath=$nohooks" @extra add -A --ignore-errors
   $code = $LASTEXITCODE
-  if ($code -eq 0) { git write-tree; $code = $LASTEXITCODE }
+  if ($code -eq 1) { $code = 0 }
+  if ($code -eq 0) { git -c core.fsmonitor=false -c "core.hooksPath=$nohooks" @extra write-tree; $code = $LASTEXITCODE }
 } finally {
   Remove-Item -Force -LiteralPath $tmp, "$tmp.lock" -ErrorAction SilentlyContinue
 }
