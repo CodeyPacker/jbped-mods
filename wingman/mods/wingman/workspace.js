@@ -10,14 +10,15 @@
 // (spaces.json, from the Claude hook), minus the ones removed by hand (hidden.json).
 // Wingman's edits change only the "folders" array, keeping every other key, comment and order.
 //
-// A space on another machine (`sp.machine`): its folder's workspace file is read there (fsx) and
-// never written. Repos added by hand go to Wingman's own file here (data/wingman/workspaces/,
-// holding the machine's paths). Paths stay the machine's (remotePath, never hostPath), and the
+// A space on another machine (`sp.machine`): its folder's workspace file is read and edited there
+// (fsx, compare-and-swap), and made there when adding makes two repos, like here. Otherwise repos
+// added by hand go to Wingman's own file here (data/wingman/workspaces/, holding the machine's
+// paths), which is also read. Paths stay the machine's (remotePath, never hostPath), and the
 // Claude hook's spaces.json isn't used for it.
 import * as fs from "fs/promises";
 import { readTextFile, writeTextFile, appHome } from "herdr";
 import { git, hostOf } from "./git.js";
-import { listDir, readText } from "./fsx.js";
+import { listDir, readText, writeText } from "./fsx.js";
 import { hostPath } from "./capture.js";
 import { spaceRepos } from "./journal.js";
 import { remotePath } from "./remote.js";
@@ -193,14 +194,18 @@ async function remoteText(file, on) {
   return text;
 }
 
-/** A space on another machine: the workspace file in its folder there, read-only, or null. */
-async function machineWorkspace(sp) {
+/** A space on another machine: the workspace file in its folder there, or null. `fresh`: read
+ *  now, not from the 30 s cache (before editing it). */
+async function machineWorkspace(sp, fresh = false) {
   const folder = spaceFolder(sp);
   if (!folder) return null;
+  if (fresh) listCache.delete(cacheKey(folder, sp.machine));
   const name = pickFile(await namesIn(folder, sp.machine), folder.split("/").pop() ?? "");
   if (!name) return null;
-  const file = `${folder}/${name}`, text = await remoteText(file, sp.machine);
-  return text != null ? { file, dir: folder, text } : null;
+  const file = `${folder}/${name}`;
+  if (fresh) textCache.delete(cacheKey(file, sp.machine));
+  const text = await remoteText(file, sp.machine);
+  return text != null ? { file, dir: folder, text, on: sp.machine } : null;
 }
 
 /** The space's workspace file Wingman reads and edits: { file, dir, text } or null when it has none.
@@ -224,49 +229,60 @@ export async function workspaceFolders(sp) {
   return [...read(await machineWorkspace(sp)).map((f) => ({ ...f, keep: false })), ...own];
 }
 
-/** Where a workspace Wingman makes for the space goes: its folder, unless that's inside a repo or home.
- *  Never on another machine: Wingman's own file. */
+/** Where a workspace Wingman makes for the space goes: its folder (on its machine), unless that's
+ *  inside a repo or home, else Wingman's own file here. `on`: the file's machine. */
 async function newFile(sp) {
-  if (sp.machine) return ownFile(sp.id);
-  const folder = spaceFolder(sp);
-  if (folder && (await git(["rev-parse", "--show-toplevel"], { cwd: folder })).code !== 0) return `${folder}/${folder.split("/").pop()}${EXT}`;
-  return ownFile(sp.id);
+  const folder = spaceFolder(sp), on = sp.machine ?? null;
+  if (folder && (await git(["rev-parse", "--show-toplevel"], { cwd: folder, on }).catch((e) => { if (!on) throw e; return { code: 0 }; })).code !== 0) return { file: `${folder}/${folder.split("/").pop()}${EXT}`, on };
+  return { file: ownFile(sp.id), on: null };
+}
+
+/** Writes a workspace file (compare-and-swap) where it is, and forgets the cached listing and text. */
+async function writeWs(file, text, before, on) {
+  if (on) await writeText(file, text, before, { on });
+  else await writeTextFile(file, text, before);
+  const dir = file.replace(/\/[^/]+$/, "");
+  listCache.delete(cacheKey(dir, on)); textCache.delete(cacheKey(file, on));
 }
 
 /**
  * Sets the workspace's folders through `change(entries, dir)` (returns the new entries). With no
  * workspace yet, makes one holding `start` first (the repos the space shows now), and only when
- * that leaves two or more repos: one repo is a plain space.
+ * that leaves two or more repos: one repo is a plain space. On another machine both files it reads
+ * change (the one there and Wingman's own), each only when its folders do.
  */
 async function editFolders(sp, start, change) {
-  const ws = await findWorkspace(sp);
-  if (ws) {
-    const data = parseJsonc(ws.text);
-    const next = change(Array.isArray(data.folders) ? data.folders.filter((f) => typeof f?.path === "string") : [], ws.dir);
-    await writeTextFile(ws.file, withFolders(ws.text, next), ws.text);
-    listCache.delete(ws.dir);
-    return;
+  const files = [...(sp.machine ? [await machineWorkspace(sp, true)] : []), await findWorkspace(sp)].filter(Boolean);
+  for (const ws of files) {
+    const data = parseJsonc(ws.text), list = Array.isArray(data.folders) ? data.folders.filter((f) => typeof f?.path === "string") : [];
+    const next = change(list, ws.dir);
+    if (files.length > 1 && JSON.stringify(next) === JSON.stringify(list)) continue;
+    await writeWs(ws.file, withFolders(ws.text, next), ws.text, ws.on ?? null);
   }
-  const file = await newFile(sp), dir = file.replace(/\/[^/]+$/, "");
+  if (files.length) return;
+  const { file, on } = await newFile(sp), dir = file.replace(/\/[^/]+$/, "");
   const next = change(start.map((p) => ({ path: relTo(dir, p) })), dir);
-  // On another machine the file is the only record of a repo added by hand, so one is enough.
-  if (next.length < (sp.machine ? 1 : 2)) return;
+  // On another machine, Wingman's own file is the only record of a repo added by hand, so one is enough there.
+  if (next.length < (sp.machine && !on ? 1 : 2)) return;
   if (file.startsWith(dataDir())) await fs.mkdir(dir, { recursive: true });
-  await writeTextFile(file, withFolders(null, next), null);
-  listCache.delete(dir);
+  await writeWs(file, withFolders(null, next), null, on);
 }
 
-/** Adds a repo to the space's workspace (making one when this makes two repos). */
+/** Adds a repo to the space's workspace (making one when this makes two repos). On another machine
+ *  with both files, it goes to the machine's file (the own file keeps what it has). */
 export async function addFolder(sp, root, shown) {
   await setHidden(sp.id, root, false);
-  await editFolders(sp, shown.filter((p) => !same(p, root)), (list, dir) =>
-    list.some((f) => same(pathFor(sp)(joinPath(dir, f.path)), root)) ? list : [...list, { path: relTo(dir, root) }]);
+  let done = false;
+  await editFolders(sp, shown.filter((p) => !same(p, root)), (list, dir) => {
+    if (done || list.some((f) => same(pathFor(sp)(joinPath(dir, f.path)), root))) { done = true; return list; }
+    done = true;
+    return [...list, { path: relTo(dir, root) }];
+  });
 }
 
-/** Takes a repo out of the space: out of its workspace file, and hidden from what agents found. */
+/** Takes a repo out of the space: out of its workspace file(s), and hidden from what agents found. */
 export async function removeFolder(sp, root) {
-  const ws = await findWorkspace(sp);
-  if (ws) await editFolders(sp, [], (list, dir) => list.filter((f) => !same(pathFor(sp)(joinPath(dir, f.path)), root)));
+  if (sp.machine || (await findWorkspace(sp))) await editFolders(sp, [], (list, dir) => list.filter((f) => !same(pathFor(sp)(joinPath(dir, f.path)), root)));
   await setHidden(sp.id, root, true);
 }
 
@@ -320,25 +336,25 @@ export async function repoInfo(root, on = null) {
  * Makes a worktree of the main clone `clone` at `dest` on `branch`: the branch when it exists,
  * else a new one from the remote's default branch (fetched first; HEAD when there's no remote).
  */
-export async function addWorktree(clone, dest, branch) {
-  const has = (await git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: clone })).code === 0;
+export async function addWorktree(clone, dest, branch, on = null) {
+  const has = (await git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], { cwd: clone, on })).code === 0;
   let args;
   if (has) args = ["worktree", "add", dest, branch];
   else {
-    await git(["fetch", "--quiet", "origin"], { cwd: clone, timeout: 30000 }).catch(() => null);
-    const def = await git(["rev-parse", "--abbrev-ref", "origin/HEAD"], { cwd: clone });
+    await git(["fetch", "--quiet", "origin"], { cwd: clone, on, timeout: 30000 }).catch(() => null);
+    const def = await git(["rev-parse", "--abbrev-ref", "origin/HEAD"], { cwd: clone, on });
     args = ["worktree", "add", "-b", branch, dest, def.code === 0 ? def.stdout.trim() : "HEAD"];
   }
-  const r = await git(args, { cwd: clone, timeout: 60000 });
+  const r = await git(args, { cwd: clone, on, timeout: 60000 });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "git worktree add failed");
 }
 
-/** Deletes a linked worktree (git refuses when it has uncommitted or untracked files). */
-export async function removeWorktree(root) {
-  const info = await repoInfo(root);
+/** Deletes a linked worktree (git refuses when it has uncommitted or untracked files). `on`: on that machine. */
+export async function removeWorktree(root, on = null) {
+  const info = await repoInfo(root, on);
   if (!info?.linked) throw new Error(`${root} is not a linked worktree`);
   const clone = info.common.replace(/\/\.git$/, "");
-  const r = await git(["worktree", "remove", root], { cwd: clone, timeout: 60000 });
+  const r = await git(["worktree", "remove", root], { cwd: clone, on, timeout: 60000 });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim() || "git worktree remove failed");
 }
 

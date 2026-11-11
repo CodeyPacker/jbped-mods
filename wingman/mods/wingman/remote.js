@@ -1,24 +1,25 @@
 // Spaces on another machine (a space's `machine`, reached over ssh through herdr-core). A root
 // (Store or PlainRoot) carries its machine as `on` (null: this computer), and every git or file
-// call for it passes that on. What works there for now: the Edit tree, opening files (read-only),
-// Changes (diffs, Commit, Discard), Quick Open and workspaces. Review, capture, the Claude hook
-// journal and saving edits don't yet. Pure: no Herdr imports.
+// call for it passes that on; writes go through fsx.writeText (a compare-and-swap script there).
+// What works there: the Edit tree, opening, editing and saving files, Review (capture by any agent,
+// Accept, Reject, undo), Changes, Quick Open, Search and Replace All, workspaces and worktrees.
+// What doesn't: the Claude hook (its edits are captured like any agent's, and notes that depend on
+// it aren't sent), Neovim and the external editor, and saving on a Windows machine. Pure: no Herdr imports.
 
-/** How often an idle remote space is polled (about 200 ms per remote call), and how many reads run at once. */
-export const REMOTE = { rootsMs: 5000, changesMs: 5000, treeMs: 10000, parallel: 6, hashMax: 200 };
+/** How often an idle remote space is polled (about 200 ms per remote call), and how many reads run at once.
+ *  watchMs: the outside-change check of Review's index and the open files; captureMs: an adopt pass
+ *  while an agent works; reconcileMs: branch parking and committed changes. */
+export const REMOTE = { rootsMs: 5000, changesMs: 5000, treeMs: 10000, watchMs: 5000, captureMs: 5000, reconcileMs: 15000, parallel: 6, hashMax: 200 };
 
-export const REVIEW_NOTE = "Review isn't available on other machines yet. Changes and the file tree are.";
 export const NVIM_NOTE = "Neovim can't open files on other machines yet";
 export const EDITOR_NOTE = "The external editor can't open files on other machines yet";
-export const WORKTREE_NOTE = "Worktrees can't be made on other machines yet.";
+/** The status line when a rejection's note to Claude can't be sent: the hook is this computer's only. */
+export const NOTES_NOTE = (on) => `Notes to Claude about rejections and edits aren't sent on ${on} (its hook isn't connected there); Comment still reaches the agent`;
+/** The status line for Comment last rejection on another machine. */
+export const REASON_NOTE = (on) => `Comments on rejections need the Claude hook, which isn't connected on ${on}: use Comment instead`;
 
 /** Whether a root (or a file's store) lives on another machine. */
 export const isRemote = (st) => !!st?.on;
-
-/** The status line for an edit, save or paste in a file on machine `on`. */
-export function readOnlyNote(rel, on) {
-  return `${String(rel).split("/").pop()} is on ${on}: files on other machines are read-only for now`;
-}
 
 /**
  * A path on another machine as Wingman keeps it: the machine's own, never drive-converted or

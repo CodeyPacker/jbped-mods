@@ -50,18 +50,21 @@ WSL git on a Windows drive is slow (about 1.5 s per `git status` on a large repo
 
 ### Other machines
 
-A space on another machine (Herdr's `machine`, reached over ssh) works in the Edit and Changes tabs, with every git and file call running on that machine:
+A space on another machine (Herdr's `machine`, reached over ssh) works in every tab, with every git and file call running on that machine:
 
-- **Edit**: the tree of the space's repos and plain folders (from its terminals' folders, as that machine names them), with git status letters and dimmed ignored files. Files open **read-only**: typing, paste, line operations and saving do nothing and the status line says so. Neovim and the external editor don't open them.
-- **Changes**: the uncommitted list with letters and line counts, each file's diff, "Committed on this branch", **Commit** and **Discard file**. The diffs are computed here from texts read there.
-- **Quick Open** over its repos' files.
-- **Workspaces**: a `*.code-workspace` in the space's folder there is read, never written. Repos you add by hand (**+ Add repo…** takes a path on that machine) go to `data/wingman/workspaces/<space>.code-workspace` here, holding that machine's paths. Removing one listed in the machine's file hides it. Worktrees can't be made or deleted there yet.
+- **Edit**: the tree of the space's repos and plain folders (from its terminals' folders, as that machine names them), with git status letters and dimmed ignored files. Files open, edit and save as they do here: typing, line operations, Find and Replace, save and autosave, the merge of an agent's write into unsaved edits, and the conflict banner.
+- **Review**: any agent's changes there are captured (a snapshot of each repo when it starts working, then new changes adopted at most every 5 s while it works and once after), with Accept, Reject and undo. The review store is `<git-dir>/wingman/` on that machine, as here. Claude's edits there are captured like any agent's.
+- **Changes**: the uncommitted list with letters, line counts and AI marks, each file's diff, "Committed on this branch", **Commit** and **Discard file**. The diffs are computed here from texts read there.
+- **Quick Open**, **Search** and **Replace All** over its repos' files.
+- **Workspaces**: a `*.code-workspace` in the space's folder there is read and edited there, and made there when adding a repo makes two (unless that folder is inside a repo or is a home folder). Otherwise repos you add by hand (**+ Add repo…** takes a path on that machine) go to `data/wingman/workspaces/<space>.code-workspace` here, holding that machine's paths. Worktrees are made and deleted there as here.
 
-Not yet: Review (it says so), capture, the Claude hook's edits, and saving edits there.
+Every save there is compare-and-swap: the content goes to a temp file beside the file (`.wingman-<id>.tmp`), the file's SHA-256 is checked against what Wingman last read, and the temp file is renamed over it, keeping its mode and following a link. A file that changed meanwhile isn't overwritten. A file that isn't plain UTF-8 text isn't saved there.
 
-Each call there takes about 200 ms, so an idle space is polled less often than a local one: its folders every 5 s (its workspace file at most every 30 s), Changes every 5 s (one `git status` and one `git hash-object` per repo), and the tree every 10 s (two git calls per repo). Files open in Edit aren't reread while open: close and reopen one to see a newer version.
+Not there: the Claude hook. Notes to Claude about rejections and your edits aren't sent there, and **Comment last rejection** says so; **Comment** still types into the agent's terminal. Neovim and the external editor don't open files there. A Windows machine (one without `sh`) can be browsed but not saved to: it says "Saving on a Windows machine isn't supported yet".
 
-The machine needs `git`, and `sh` for listing folders (a Windows machine without `sh` uses PowerShell). Only a Linux machine (WSL through Herdr) has been tried.
+Each call there takes about 150 to 200 ms, so an idle space is polled less often than a local one: its folders every 5 s (its workspace file at most every 30 s), Changes every 5 s (one `git status` and one `git hash-object` per repo), the tree every 10 s (two git calls per repo), and Review's index and the open files every 5 s (one call for all of them, which is how an outside change to an open file is noticed). Review's branch parking and committed changes are checked every 15 s, only while the space is shown or an agent there works. A save is one call up to about 27 KB, and larger files go in pieces of that size, about 0.2 s each (a 200 KB file took 1.5 s), unless the machine takes 1 MB per call, which Wingman checks once.
+
+The machine needs `git`, `sh`, and `sha256sum` (or `shasum` or `openssl`). Only a Linux machine (WSL through Herdr) has been tried.
 
 ## Install
 
@@ -191,7 +194,7 @@ Comment, Accept and Reject act on the lines a text selection covers. Clicking th
 - ▸ beside the box shows **Replace**, **files to include** and **files to exclude**: globs separated by commas, such as `src/**, *.ts`. A glob without a `/` matches at any depth, and a folder matches everything in it.
 - Regular expressions are the subset that git and JavaScript read alike: classes, groups, alternation, quantifiers, anchors, `\b`, `\d \w \s` and their capitals. Lookarounds, lazy quantifiers, backreferences in the query and searches across lines are refused with a message.
 - Results are grouped by file (with the repo first when the space has several), at most 2,000. Click a file to fold it. Click a match, or Down from the box, then Up/Down and Enter, to open the file at that match with it selected. Left and Right fold and unfold. While the results have the keyboard, typing doesn't reach the editor: Enter, Esc or a click in the editor gives it back.
-- With text in **Replace**, each match shows its replacement (`$1`, `$&` and the like insert groups in regex mode) and **Replace All** appears. It asks first ("Replace 12 occurrences in 4 files?"), then rewrites only the lines the results list, from each file as it is on disk then. A file under review is changed the way a saved edit of yours is: on unchanged lines the review baseline takes the same edit, inside the agent's added lines the change stays pending, and the agent gets the edit note. Each write is compare-and-swap: a file changed since it was read is skipped and named. Files with unsaved edits in any Wingman tab block it until they're saved or discarded. Files on other machines are left out, since saving there isn't built yet. Afterwards open files reload and the search runs again. Replace All is not undoable from Wingman.
+- With text in **Replace**, each match shows its replacement (`$1`, `$&` and the like insert groups in regex mode) and **Replace All** appears. It asks first ("Replace 12 occurrences in 4 files?"), then rewrites only the lines the results list, from each file as it is on disk then. A file under review is changed the way a saved edit of yours is: on unchanged lines the review baseline takes the same edit, inside the agent's added lines the change stays pending, and the agent gets the edit note. Each write is compare-and-swap: a file changed since it was read is skipped and named. Files with unsaved edits in any Wingman tab block it until they're saved or discarded. Afterwards open files reload and the search runs again. Replace All is not undoable from Wingman.
 - Each space keeps its own query, options, results and which mode the left column shows.
 
 ## Neovim as the editor

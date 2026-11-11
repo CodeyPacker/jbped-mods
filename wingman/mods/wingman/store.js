@@ -1,39 +1,21 @@
-// Review store on disk: <git-dir>/wingman/{index.json, baselines/*}.
-// Every write is compare-and-swap (writeTextFile's `expected`), so a file that
+// Review store on disk: <git-dir>/wingman/{index.json, baselines/*}, on the machine the repo is on.
+// Every write is compare-and-swap (fsx.writeText's `expected`), so a file that
 // changed since it was read is never overwritten; the action fails instead.
-import { exec, readTextFile, writeTextFile } from "herdr";
-import { git, hostOf, toWsl } from "./git.js";
+import { readTextFile } from "herdr";
+import { git, hostOf } from "./git.js";
 import { splitLines, parseHunks, wholeHunk } from "./model.js";
-import { readOnlyNote } from "./remote.js";
+import { writeText, removeFile, makeDir } from "./fsx.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 export const norm = (p) => { const s = p.replace(/\\/g, "/").replace(/^\/\/\?\//, ""); return isWindows(s) ? s.toLowerCase() : s; };
 
-const inWslFiles = (p) => /^\/\/(?:wsl\.localhost|wsl\$)\//i.test(p);
+/** Creates a folder and its parents, on machine `on` (null: this computer). */
+export const ensureDir = (path, on = null) => makeDir(path, { on });
 
-async function remove(path) {
-  const r = inWslFiles(path) ? await exec("wsl.exe", ["-e", "rm", "-f", "--", toWsl(path)])
-    : isWindows(path)
-    ? await exec("cmd", ["/c", "del", "/f", "/q", path.replace(/\//g, "\\")])
-    : await exec("rm", ["-f", "--", path]);
-  if (r.code !== 0) throw new Error(`delete ${path}: ${(r.stderr || r.stdout).trim()}`);
-}
-
-/** Creates a folder and its parents. Mods may only write under ~/.config/herdr-app through
- *  fs/promises, so folders inside a repo are made by the OS's own mkdir. */
-export async function ensureDir(path) {
-  const win = isWindows(path);
-  const r = inWslFiles(path) ? await exec("wsl.exe", ["-e", "mkdir", "-p", "--", toWsl(path)]) : win ? await exec("cmd", ["/c", "mkdir", path.replace(/\//g, "\\")]) : await exec("mkdir", ["-p", "--", path]);
-  // cmd's mkdir creates parents but fails when the folder exists, which is fine here.
-  if (r.code !== 0 && !(win && /already exists/i.test(r.stderr + r.stdout))) throw new Error(`mkdir ${path}: ${(r.stderr || r.stdout).trim()}`);
-}
-
-/** Writes `after` over a file whose content must still be `before` (null = absent). */
-export async function swap(path, before, after) {
-  const now = await readTextFile(path);
-  if (now !== before) throw new Error(`${path} changed since it was read; reload and try again`);
-  if (after === null) await remove(path);
-  else await writeTextFile(path, after, before);
+/** Writes `after` (null: deletes) over a file whose content must still be `before` (null = absent), on machine `on`. */
+export async function swap(path, before, after, on = null) {
+  if (after === null) await removeFile(path, before, { on });
+  else await writeText(path, after, before, { on });
   return { path, before, after };
 }
 
@@ -67,7 +49,7 @@ export function parkStale(index, rel, branch) {
 
 export class Store {
   /** The repo holding folder `root`, on machine `on` (null: this computer). Every git and file call
-   *  of the store runs there. A store on another machine is read-only (no review writes yet). */
+   *  of the store runs there, its review store's writes included. */
   static async open(root, on = null) {
     // Any folder inside the repo works: the store opens at the top level, where git's paths start.
     const r = await git(["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd: root, on });
@@ -142,7 +124,7 @@ export class Store {
    * when someone else wrote the index first, the next pass tries again.
    */
   async reconcile(spaceOf = () => null) {
-    const path = `${this.dir}/index.json`, before = await readTextFile(path);
+    const path = `${this.dir}/index.json`, before = await this.read(path);
     if (!before) return;
     const index = JSON.parse(before), branch = await this.branch(), head = await this.head();
     index.files ??= {};
@@ -163,7 +145,7 @@ export class Store {
         delete index.files[rel]; changed = true;
       }
     }
-    if (changed) await writeTextFile(path, JSON.stringify(index, null, 2) + "\n", before);
+    if (changed) await writeText(path, JSON.stringify(index, null, 2) + "\n", before, { on: this.on });
     this.checkedHead = head;
   }
 
@@ -202,16 +184,14 @@ export class Store {
 
   /** Applies one model write ({ target, before, after }) to disk; returns it with its path. */
   async apply(f, w) {
-    if (this.on) throw new Error(readOnlyNote(f.rel, this.on));
     const path = w.target === "baseline" ? f.basePath : f.path;
-    await swap(path, w.before, w.after);
+    await swap(path, w.before, w.after, this.on);
     return { path, before: w.before, after: w.after };
   }
 
   /** Reverts writes made by `apply`, newest first. */
   async undo(writes) {
-    if (this.on) throw new Error(`${this.root} is on ${this.on}: read-only for now`);
-    for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before);
+    for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before, this.on);
   }
 }
 
@@ -221,18 +201,17 @@ export class Store {
  * capture, git status or Changes). `plain` tells it apart from a Store.
  */
 export class PlainRoot {
-  /** `on`: the machine the folder is on (null: this computer); there it is read-only for now. */
+  /** `on`: the machine the folder is on (null: this computer). */
   constructor(root, on = null) { this.root = root; this.asked = root; this.plain = true; this.label = null; this.on = on; }
 
   /** Saves a file's text (compare-and-swap, like Store.apply). There is no baseline to write. */
   async apply(f, w) {
-    if (this.on) throw new Error(readOnlyNote(f.rel, this.on));
     if (w.target !== "current") throw new Error(`${f.rel} has no review baseline outside a git repo`);
-    await swap(f.path, w.before, w.after);
+    await swap(f.path, w.before, w.after, this.on);
     return { path: f.path, before: w.before, after: w.after };
   }
 
   async undo(writes) {
-    for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before);
+    for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before, this.on);
   }
 }

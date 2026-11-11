@@ -1,9 +1,13 @@
 // Generic capture, for any agent: while an agent in the space is working, files that
 // differ from the working-tree snapshot taken when it started become reviewable, with
-// their snapshot content as the baseline. Uses only git and Herdr's file APIs.
-import { exec, readTextFile, writeTextFile, appHome } from "herdr";
-import { git, inRepo, ownerOf, knownDistro } from "./git.js";
+// their snapshot content as the baseline. Uses only git and Herdr's file APIs. A store on
+// another machine (`store.on`) is captured there: git runs there and the review store's
+// files are written there (fsx.writeText).
+import { exec, readTextFile, appHome } from "herdr";
+import { inRepo, ownerOf, knownDistro } from "./git.js";
 import { parkStale } from "./store.js";
+import { writeText } from "./fsx.js";
+import { mapLimit, REMOTE } from "./remote.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 
@@ -24,14 +28,24 @@ export function hostPath(cwd) {
   return p.startsWith("/") && distro ? `//wsl.localhost/${distro}${p}` : p;
 }
 
+/** A temp file of fsx.writeText's (`.wingman-<token>.tmp`): never reviewed, even if a snapshot catches one. */
+export const isWriteTemp = (rel) => /(^|\/)\.wingman-[0-9a-z]+\.tmp$/.test(rel);
+
+let snapshotText = null; // snapshot.sh, read once, for machines that don't have it
+
 export class Capture {
   constructor(store) { this.store = store; }
 
   /** Tree id of the working tree right now (index copy + add -A + write-tree). */
   async snapshot() {
-    const { gitDir, root } = this.store, dir = `${appHome()}/mods/wingman`;
-    // WSL's repos snapshot with WSL's git (the same script as Linux); Windows git uses PowerShell.
-    const r = (await ownerOf(root)) === "wsl" ? await inRepo("sh", [`${dir}/snapshot.sh`, gitDir, root], { cwd: root })
+    const { gitDir, root, on } = this.store, dir = `${appHome()}/mods/wingman`;
+    let r;
+    if (on) {
+      // Another machine doesn't have the script: its text goes as sh's script, the folders as its arguments.
+      snapshotText ??= (await readTextFile(`${dir}/snapshot.sh`))?.replace(/\r\n/g, "\n") ?? null;
+      if (!snapshotText) throw new Error("snapshot.sh is missing from the mod folder");
+      r = await exec("sh", ["-c", snapshotText, "snapshot.sh", gitDir, root], { cwd: root, on, timeout: 120000 });
+    } else r = (await ownerOf(root)) === "wsl" ? await inRepo("sh", [`${dir}/snapshot.sh`, gitDir, root], { cwd: root })
       : isWindows(root)
       ? await exec("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", `${dir}/snapshot.ps1`, gitDir, root])
       : await exec("sh", [`${dir}/snapshot.sh`, gitDir, root]);
@@ -43,22 +57,27 @@ export class Capture {
   /** Paths that differ between two trees, with git's status letter (A, M, D, T). */
   async changed(from, to) {
     if (from === to) return [];
-    const r = await git(["diff-tree", "-r", "--no-renames", "--name-status", "-z", from, to], { cwd: this.store.root });
+    const r = await this.store.git(["diff-tree", "-r", "--no-renames", "--name-status", "-z", from, to]);
     if (r.code !== 0) throw new Error(r.stderr.trim());
     const parts = r.stdout.split("\0").filter(Boolean), out = [];
     for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i][0], path: parts[i + 1] });
     return out;
   }
 
-  /** Saved capture state: the snapshot tree of the current working period, if any. */
+  /** Saved capture state: the snapshot tree of the current working period, if any. On another
+   *  machine the file's text is kept after the first read (only the capture leader writes it). */
   async state() {
-    const t = await readTextFile(`${this.store.dir}/capture.json`);
+    const t = this.store.on && this.text !== undefined ? this.text : await this.store.read(`${this.store.dir}/capture.json`);
+    if (this.store.on) this.text = t;
     return t ? JSON.parse(t) : { tree: null };
   }
 
   async setState(next) {
-    const path = `${this.store.dir}/capture.json`;
-    await writeTextFile(path, JSON.stringify(next, null, 2) + "\n", await readTextFile(path));
+    const path = `${this.store.dir}/capture.json`, text = JSON.stringify(next, null, 2) + "\n";
+    const before = this.store.on && this.text !== undefined ? this.text : await this.store.read(path);
+    // A kept text that's stale (another leader wrote meanwhile) fails the swap: read again next time.
+    try { await writeText(path, text, before, { on: this.store.on }); } catch (e) { this.text = undefined; throw e; }
+    if (this.store.on) this.text = text;
   }
 
   /**
@@ -70,35 +89,43 @@ export class Capture {
   async adopt(base, now, by = null, space = null) {
     const changes = await this.changed(base, now);
     if (!changes.length) return 0;
-    const indexPath = `${this.store.dir}/index.json`, before = await readTextFile(indexPath);
+    const indexPath = `${this.store.dir}/index.json`, before = await this.store.read(indexPath);
     const index = before ? JSON.parse(before) : { version: 1, files: {} };
     const branch = await this.store.branch(), head = await this.store.head();
-    let added = 0, parked = false;
-    for (const { status, path } of changes) {
-      if (parkStale(index, path, branch)) parked = true;
-      if (index.files[path]) continue;
+    let parked = false;
+    const todo = [];
+    for (const c of changes) {
+      if (isWriteTemp(c.path)) continue;
+      if (parkStale(index, c.path, branch)) parked = true;
+      if (!index.files[c.path]) todo.push(c);
+    }
+    // Each file's blobs, read and baseline write: one after another here, a few at a time on
+    // another machine (each is a call there). The index is written once, after.
+    const stamp = Date.now().toString(36);
+    const entries = await mapLimit(todo, this.store.on ? REMOTE.parallel : 1, async ({ status, path }, i) => {
       const created = status === "A";
       // Binary files (a NUL byte, as git decides) aren't reviewed, before or after the change.
-      const blob = (tree) => git(["cat-file", "blob", `${tree}:${path}`], { cwd: this.store.root });
+      const blob = (tree) => this.store.git(["cat-file", "blob", `${tree}:${path}`]);
       const after = status === "D" ? null : await blob(now);
-      if (after && (after.code !== 0 || after.stdout.includes("\0"))) continue;
+      if (after && (after.code !== 0 || after.stdout.includes("\0"))) return null;
       let text = "";
       if (!created) {
         const r = await blob(base);
-        if (r.code !== 0 || r.stdout.includes("\0")) continue; // unreadable or binary: not reviewed
+        if (r.code !== 0 || r.stdout.includes("\0")) return null; // unreadable or binary: not reviewed
         text = r.stdout;
         // With autocrlf the stored blob is LF even when the file on disk was CRLF. Git's own
         // checkout filters guess from config, not from the disk, so instead match the line
         // endings the file has now: an agent rarely changes a file's line-ending style.
-        const current = await readTextFile(`${this.store.root}/${path}`);
+        const current = await this.store.read(`${this.store.root}/${path}`);
         if (current?.includes("\r\n") && !text.includes("\r")) text = text.replace(/\n/g, "\r\n");
       }
-      const name = `b${Date.now().toString(36)}-${added}.txt`;
-      await writeTextFile(`${this.store.dir}/baselines/${name}`, text, null);
-      index.files[path] = { baseline: name, created, ...(by ? { by } : {}), branch, head, ...(space ? { space } : {}) };
-      added++;
-    }
-    if (added || parked) await writeTextFile(indexPath, JSON.stringify(index, null, 2) + "\n", before);
+      const name = `b${stamp}-${i}.txt`;
+      await writeText(`${this.store.dir}/baselines/${name}`, text, null, { on: this.store.on });
+      return [path, { baseline: name, created, ...(by ? { by } : {}), branch, head, ...(space ? { space } : {}) }];
+    });
+    let added = 0;
+    for (const e of entries) if (e) { index.files[e[0]] = e[1]; added++; }
+    if (added || parked) await writeText(indexPath, JSON.stringify(index, null, 2) + "\n", before, { on: this.store.on });
     return added;
   }
 }

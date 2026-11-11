@@ -17,7 +17,8 @@ import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, vi
 import { Capture, hostPath } from "./capture.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER } from "./filetree.js";
-import { listDir, pathKind, join as pjoin } from "./fsx.js";
+import { listDir, pathKind, join as pjoin, fingerprints } from "./fsx.js";
+import { sha256Hex } from "./sha256.js";
 import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
@@ -30,7 +31,7 @@ import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKe
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
 import { splitLines } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome, pathFor } from "./workspace.js";
-import { REMOTE, REVIEW_NOTE, NVIM_NOTE, EDITOR_NOTE, WORKTREE_NOTE, readOnlyNote, remotePath, rootId, idOf, mapLimit } from "./remote.js";
+import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, rootId, idOf, mapLimit } from "./remote.js";
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
@@ -87,10 +88,10 @@ function termFolders(space) {
 /** The space of the agent in terminal `by`, while it's still there. */
 const spaceOfAgent = (by) => (by && agents().find((a) => a.address === by)?.space) || null;
 
-/** Spaces that hold a Wingman pane. Spaces on another machine aren't captured (yet). */
+/** Spaces that hold a Wingman pane, on this computer or another machine. */
 function reviewSpaces() {
   const tabs = new Set(panes().filter((p) => p.mod === "wingman").map((p) => p.tab));
-  return spaces().filter((s) => !s.machine && s.tabs.some((t) => tabs.has(t.id)));
+  return spaces().filter((s) => s.tabs.some((t) => tabs.has(t.id)));
 }
 
 /**
@@ -242,8 +243,6 @@ export default class Review extends View {
       if (!sp) return;
       const on = sp.machine ?? null;
       if (on) {
-        // Review isn't available on another machine: its copy looks nothing up there.
-        if (this.view === "review") return;
         const at = (this.rootsAt ??= new Map()).get(key) ?? 0;
         if (!force && Date.now() - at < REMOTE.rootsMs) return;
         this.rootsAt.set(key, Date.now());
@@ -317,8 +316,8 @@ export default class Review extends View {
   /** The space's git repos: every root but the plain ones. */
   repos() { return this.stores.filter((st) => !st.plain); }
 
-  /** The repos Review covers: not those on another machine (no review there yet). */
-  reviewed() { return this.repos().filter((st) => !st.on); }
+  /** The repos Review covers: every repo, on this computer or the space's machine. */
+  reviewed() { return this.repos(); }
 
   /** The active space's machine, null for this computer. */
   machine() { return this.space()?.machine ?? null; }
@@ -356,6 +355,9 @@ export default class Review extends View {
         const g = (this.groups ??= new Map()).get(sp.id) ?? { active: false, by: null, at: 0, caps: [] };
         this.groups.set(sp.id, g);
         const working = agents().filter((a) => a.space === sp.id && ACTIVE.has(a.status)), active = working.length > 0;
+        // Another machine: nothing is looked up there for a space that isn't shown and has no agent
+        // working (every call there costs about 200 ms). Captures already made finish their last pass.
+        if (sp.machine && !active && !g.active && !sp.active) continue;
         if (!g.at || (active === g.active && Date.now() - g.at > 5000)) {
           g.at = Date.now();
           const { repos } = await this.folderRoots(sp);
@@ -364,10 +366,11 @@ export default class Review extends View {
           for (const root of roots) {
             let c = this.captures.get(`${sp.id}|${root}`);
             if (!c) {
-              const store = await this.openStore(root);
+              const store = await this.openStore(root, sp.machine ?? null);
               if (!store) continue;
-              log(`${sp.name}: capturing ${store.root}`);
-              c = { capture: new Capture(store), space: sp.id, active: g.active, busy: false, by: g.by };
+              log(`${sp.name}: capturing ${store.root}${store.on ? ` on ${store.on}` : ""}`);
+              // after: a capture on another machine checks its saved state once (a pass may be left over).
+              c = { capture: new Capture(store), space: sp.id, active: g.active, busy: false, by: g.by, after: !!store.on };
               this.captures.set(`${sp.id}|${root}`, c);
             }
             caps.push(c);
@@ -383,7 +386,7 @@ export default class Review extends View {
         for (const c of g.caps) c.by = g.by;
         if (active !== g.active) {
           g.active = active; log(`${sp.name}: agent ${active ? "working" : "stopped"} (${g.caps.map((c) => c.capture.store.root).join(", ")})`);
-          for (const c of g.caps) c.active = active;
+          for (const c of g.caps) { c.active = active; if (!active) c.after = true; }
           // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
           if (active) await Promise.all(g.caps.map((c) => this.collect(c, cx, true)));
           cx.notify();
@@ -395,13 +398,21 @@ export default class Review extends View {
 
   async collectAll(cx) {
     if (!this.isLeader) return;
-    await Promise.all([...this.captures.values()].map((c) => this.collect(c, cx)));
-    // Each repo's index once: branch parking and committed changes (store.reconcile).
+    const now = Date.now();
+    // On another machine: a pass only while an agent works and once after, at most every REMOTE.captureMs.
+    const due = (c) => !c.capture.store.on || ((c.active || c.after) && now - (c.at ?? 0) >= REMOTE.captureMs);
+    await Promise.all([...this.captures.values()].filter(due).map((c) => { c.at = now; return this.collect(c, cx); }));
+    // Each repo's index once: branch parking and committed changes (store.reconcile). On another
+    // machine every REMOTE.reconcileMs, and only for a space that's shown or has an agent working.
     const seen = new Set();
     for (const c of this.captures.values()) {
-      const st = c.capture.store;
-      if (seen.has(st.root)) continue;
-      seen.add(st.root);
+      const st = c.capture.store, id = idOf(st);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      if (st.on) {
+        if (!(c.active || spaces().find((s) => s.id === c.space)?.active) || now - (st.reconciledAt ?? 0) < REMOTE.reconcileMs) continue;
+        st.reconciledAt = now;
+      }
       await st.reconcile(spaceOfAgent).catch((e) => log(`reconcile ${st.root}: ${e.message ?? e}`));
     }
   }
@@ -414,14 +425,21 @@ export default class Review extends View {
   async collect(c, cx, starting = false) {
     if (c.busy) return;
     c.busy = true;
+    // On another machine a pass whose snapshot is the last one's adopts nothing new: skipped (c.last).
+    const remote = !!c.capture.store.on;
     try {
       const st = await c.capture.state();
       if (!st.tree) {
-        if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now() }); log(`snapshot ${tree}`); }
+        if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now() }); c.last = tree; log(`snapshot ${tree}`); }
+        else c.after = false;
       } else if (!starting) {
-        const added = await c.capture.adopt(st.tree, await c.capture.snapshot(), c.by, c.space);
-        if (added) log(`adopted ${added} files`);
-        if (!c.active) await c.capture.setState({ tree: null });
+        const now = await c.capture.snapshot();
+        if (!(remote && now === c.last)) {
+          const added = await c.capture.adopt(st.tree, now, c.by, c.space);
+          if (added) log(`adopted ${added} files${remote ? ` on ${c.capture.store.on}` : ""}`);
+        }
+        c.last = now;
+        if (!c.active) { await c.capture.setState({ tree: null }); c.after = false; }
       }
     } catch (e) { this.error = `capture: ${e.message ?? e}`; log(`error ${e.message ?? e}`); cx.notify(); }
     finally { c.busy = false; }
@@ -449,6 +467,7 @@ export default class Review extends View {
         // Only this branch's changes, made by this space's agents (store.shows).
         const [stamp, branch] = await Promise.all([st.stamp(), st.branch()]);
         texts[st.root] = stamp;
+        if (st.on) await this.markRemote(st, stamp);
         for (const f of await st.files((e) => shows(e, branch, this.spaceId, spaceOfAgent))) files.push(await this.withTokens(f, cx));
       }
       const kept = [];
@@ -543,15 +562,19 @@ export default class Review extends View {
       while (this.deferred.size && !this.writing) {
         const pending = this.deferred; this.deferred = new Set();
         let indexChanged = false;
-        for (const st of this.reviewed()) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
+        for (const st of this.reviewed()) if (!st.on && (await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
+        // Another machine isn't watched: one hash call per machine, at most every REMOTE.watchMs.
+        const away = await this.remoteChanged();
+        if (away.stores.size) indexChanged = true;
         if (pending.has("*") || indexChanged) { await this.reloadAll(cx); continue; }
         for (const f of this.files) {
-          // A file on another machine isn't watched: it's read-only, and each read costs a remote call.
-          if (f.error || f.store?.on || !pending.has(norm(f.path))) continue;
+          if (f.error || !(f.store?.on ? away.files.has(f.key) : pending.has(norm(f.path)))) continue;
           // Both sides: accepting only moves the baseline, so a baseline changed elsewhere
           // (another pane, capture, a reset) must be noticed even when the file itself is unchanged.
           // A plain (opened, unchanged) file has no baseline on disk: it is the file itself.
-          const [c, b0] = await Promise.all([readTextFile(f.path), f.plain ? null : readTextFile(f.basePath)]), b = f.plain ? c : b0;
+          const on = f.store?.on ?? null;
+          const [c, b0] = await Promise.all([readTextFile(f.path, { on }), f.plain ? null : readTextFile(f.basePath, { on })]), b = f.plain ? c : b0;
+          if (on && c === f.diskC && (b ?? "") === f.diskB) this.sameAsRead(f);
           if ((c === f.diskC && (b ?? "") === f.diskB) || this.sameConflict(f, c, b ?? "")) continue;
           if (!this.dirty(f)) { await this.reloadOne(f, cx); continue; }
           const next = await this.mergeInto(f, { ...f, Ctext: c, Btext: b ?? "" }, cx);
@@ -561,6 +584,65 @@ export default class Review extends View {
         }
       }
     } finally { this.draining = false; }
+  }
+
+  // ---- another machine: noticing outside changes without watching -------------------
+
+  /** Records what Review last read of a store on another machine (its index and HEAD), as hashes. */
+  async markRemote(st, stamp) {
+    const [i, h] = stamp.split("\0");
+    (this.remoteMarks ??= new Map()).set(idOf(st), { [`${st.dir}/index.json`]: i === "null" ? null : await sha256Hex(i), [`${st.gitDir}/HEAD`]: h === "null" ? null : await sha256Hex(h) });
+  }
+
+  /** A text's SHA-256, cached for the few texts asked about again and again. */
+  async hashText(text) {
+    if (text == null) return null;
+    const cache = (this.hashes ??= new Map());
+    if (cache.has(text)) return cache.get(text);
+    const h = await sha256Hex(text);
+    cache.set(text, h);
+    if (cache.size > 64) cache.delete(cache.keys().next().value);
+    return h;
+  }
+
+  /** A remote file reread as memory has it, though its hash differs (a BOM, bytes that aren't
+   *  UTF-8): its last hashes count as unchanged from now on. */
+  sameAsRead(f) {
+    const p = this.lastPrints?.get(f.store.on) ?? {};
+    (this.okPrints ??= new Map()).set(f.key, [p[f.path], f.plain ? undefined : p[f.basePath]]);
+  }
+
+  /**
+   * Another machine's changes, without watching: for each machine of the shown repos, at most every
+   * REMOTE.watchMs, one call hashes each store's index and HEAD and each open file (and its
+   * baseline). Returns the stores whose index or HEAD isn't what Review last read, and the keys of
+   * files whose text isn't what memory holds as on disk.
+   */
+  async remoteChanged() {
+    const out = { stores: new Set(), files: new Set() }, now = Date.now(), at = (this.printsAt ??= new Map());
+    const ons = new Set(this.reviewed().filter((st) => st.on).map((st) => st.on));
+    for (const f of this.files) if (f.store?.on && !f.error) ons.add(f.store.on);
+    for (const on of ons) {
+      if (now - (at.get(on) ?? 0) < REMOTE.watchMs) continue;
+      at.set(on, now);
+      const stores = this.reviewed().filter((st) => st.on === on && this.remoteMarks?.has(idOf(st)));
+      const files = this.files.filter((f) => f.store?.on === on && !f.error && f.Ctext !== undefined);
+      const paths = [...stores.flatMap((st) => [`${st.dir}/index.json`, `${st.gitDir}/HEAD`]), ...files.flatMap((f) => (f.plain ? [f.path] : [f.path, f.basePath]))];
+      if (!paths.length) continue;
+      const p = await fingerprints([...new Set(paths)], { on });
+      (this.lastPrints ??= new Map()).set(on, p);
+      for (const st of stores) {
+        const m = this.remoteMarks.get(idOf(st));
+        if (Object.entries(m).some(([k, h]) => k in p && p[k] !== h)) out.stores.add(st);
+      }
+      for (const f of files) {
+        const ok = this.okPrints?.get(f.key);
+        if (ok && ok[0] === p[f.path] && (f.plain || ok[1] === p[f.basePath])) continue;
+        const differs = async (path, text) => path in p && p[path] !== (await this.hashText(text));
+        if ((await differs(f.path, f.diskC ?? null)) || (!f.plain && (await differs(f.basePath, f.diskB ?? "")))) out.files.add(f.key);
+      }
+    }
+    return out;
   }
 
   // Highlighting cached by content, so a reload re-tokenizes only text that changed.
@@ -903,7 +985,7 @@ export default class Review extends View {
 
   /** The workspace's worktrees' shared branch and the folder beside them for `repo`, or null. */
   async worktreeOffer(repo) {
-    const infos = await Promise.all(this.repos().map(async (st) => ({ st, info: await repoInfo(st.root).catch(() => null) })));
+    const infos = await Promise.all(this.repos().map(async (st) => ({ st, info: await repoInfo(st.root, st.on ?? null).catch(() => null) })));
     const linked = infos.filter((x) => x.info?.linked);
     const branch = sharedBranch(linked.map((x) => x.info.branch)), dest = worktreeDest(linked.map((x) => x.st.root), repo);
     return branch && dest ? { branch, dest } : null;
@@ -936,7 +1018,8 @@ export default class Review extends View {
     });
   }
 
-  /** Space on another machine: the typed path's repo, or the repos inside it to pick from (no worktrees there yet). */
+  /** Space on another machine: the typed path's repo, or the repos inside it to pick from; a main
+   *  clone is offered as a worktree beside the space's others, as here. */
   addPath(cx) {
     const on = this.machine(), dir = remotePath(this.pathInput.value().trim());
     if (!on || !dir || this.wsBusy) return;
@@ -947,10 +1030,13 @@ export default class Review extends View {
         if (!st) {
           const repos = await scanRepos(dir, on);
           if (!repos.length) throw new Error(`${dir} on ${on} is not a git repo and holds none`);
-          this.ws = { kind: "pick", parent: dir, offer: null, asWorktrees: false, on, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) };
+          const offer = await this.worktreeOffer("x");
+          this.ws = { kind: "pick", parent: dir, offer, asWorktrees: !!offer, on, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) };
           return;
         }
         if (this.hasRepo(st.root)) throw new Error(`${base(st.root)} is already in this space`);
+        const info = await repoInfo(st.root, on), offer = info && !info.linked ? await this.worktreeOffer(base(st.root)) : null;
+        if (offer) { this.ws = { kind: "worktree", root: st.root, on, ...offer }; return; }
         await this.addRepos([st.root], cx);
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.wsBusy = null; cx.notify(); }
@@ -980,13 +1066,13 @@ export default class Review extends View {
       try {
         const roots = [];
         const items = ws.kind === "worktree" ? [{ path: ws.root }] : ws.repos.filter((r) => r.on && !r.has);
+        const on = this.machine();
         for (const r of items) {
-          if (ws.on) { roots.push(r.path); continue; } // another machine: no worktrees there yet
-          const info = await repoInfo(r.path);
+          const info = await repoInfo(r.path, on);
           const offer = ws.kind === "worktree" ? ws : ws.asWorktrees && ws.offer && info && !info.linked ? { branch: ws.offer.branch, dest: ws.offer.dest.replace(/[^/]+$/, base(r.path)) } : null;
           if (offer) {
             this.wsBusy = `Making a worktree for ${base(r.path)} on ${offer.branch}…`; cx.notify();
-            await addWorktree(r.path, offer.dest, offer.branch);
+            await addWorktree(r.path, offer.dest, offer.branch, on);
             roots.push(offer.dest);
           } else roots.push(r.path);
         }
@@ -1003,8 +1089,7 @@ export default class Review extends View {
     const open = this.files.filter((f) => f.store === st).reduce((n, f) => n + (f.plain ? 0 : f.hunks.length), 0);
     this.ws = { kind: "remove", st, open, linked: null };
     cx.notify();
-    // Deleting a worktree on another machine isn't offered yet.
-    if (!st.plain && !st.on) cx.spawn(async (cx) => { const info = await repoInfo(st.root).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
+    if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root, st.on ?? null).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
   }
 
   confirmRemove(deleteWorktree, cx) {
@@ -1012,7 +1097,7 @@ export default class Review extends View {
     if (ws?.kind !== "remove" || !sp || this.wsBusy) return;
     cx.spawn(async (cx) => {
       try {
-        if (deleteWorktree) { this.wsBusy = `Deleting the worktree ${ws.st.root}…`; cx.notify(); await removeWorktree(ws.st.root); }
+        if (deleteWorktree) { this.wsBusy = `Deleting the worktree ${ws.st.root}…`; cx.notify(); await removeWorktree(ws.st.root, ws.st.on ?? null); }
         await removeFolder(sp, ws.st.asked ?? ws.st.root);
         if (ws.st.asked && norm(ws.st.asked) !== norm(ws.st.root)) await removeFolder(sp, ws.st.root);
         this.ws = null; this.error = null;
@@ -1045,7 +1130,6 @@ export default class Review extends View {
     if (ws.kind === "path") {
       return box.child(div().text_color(t.muted).child(`A repo, or a folder of repos, on ${this.machine() ?? "the space's machine"}`))
         .child(Input.new(this.pathInput))
-        .child(div().text_color(t.dim).child(WORKTREE_NOTE))
         .child(actions(this.button("ws-path-add", "Add", t.accent + "55", (cx) => this.addPath(cx)), cancel));
     }
     if (ws.kind === "pick") {
@@ -1210,8 +1294,7 @@ export default class Review extends View {
       for (const st of this.repos()) {
         const { out, head, list } = await this.statusOf(st), stamp = await this.stampOf(st, list);
         sig.push(idOf(st), head, out, stamp);
-        // No review on another machine, so no AI marks there.
-        const { ai, done } = st.on ? { ai: new Set(), done: new Set() } : await this.aiMarks(st), counts = await this.lineCounts(st, head);
+        const { ai, done } = await this.aiMarks(st), counts = await this.lineCounts(st, head);
         // Texts are fetched a few at a time on another machine (each read is a call), one by one here.
         const texts = await mapLimit(list, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeTexts(st, rel, xy, !!head));
         for (const t of texts) {
@@ -1265,7 +1348,7 @@ export default class Review extends View {
 
   /** Which files an agent of this space changed on this branch: `ai` (still in review), `done` (committed). */
   async aiMarks(st) {
-    const [text, branch] = await Promise.all([readTextFile(`${st.dir}/index.json`), st.branch()]);
+    const [text, branch] = await Promise.all([st.read(`${st.dir}/index.json`), st.branch()]);
     let index = {};
     try { index = text ? JSON.parse(text) : {}; } catch {}
     const mine = (e) => shows(e, branch, this.spaceId, spaceOfAgent), ai = new Set(), done = new Set();
@@ -1808,8 +1891,6 @@ export default class Review extends View {
    */
   run(plan, cx, feedback = []) {
     if (!plan.length || this.mode === "changes") return;
-    const away = plan.find(([f]) => f.store?.on);
-    if (away) return this.remoteReadOnly(away[0], cx);
     if (plan.some(([f]) => f.conflict)) { this.error = "Pick Keep mine or Take agent's first"; cx.notify(); return; }
     // Panel split: another copy (Edit) holds unsaved edits to these files. Review acts on what's
     // on disk, so they're saved first (autosave on) or left to the user (off).
@@ -1901,6 +1982,8 @@ export default class Review extends View {
    */
   rejected(f, what) {
     if (!f.by || !this.settings.autoNote) return [];
+    // These notes reach Claude through its hook, which reads this computer's files only.
+    if (f.store?.on) { this.status = NOTES_NOTE(f.store.on); return []; }
     return [{ terminal: f.by, text: `Code review: the user rejected ${what} in ${f.as ?? agentPath(f.path, f.by)}. The original lines are back on disk.` }];
   }
 
@@ -1919,6 +2002,7 @@ export default class Review extends View {
   askReason(cx) {
     const r = this.lastReject;
     if (!r) { this.error = "Nothing rejected yet to comment on"; cx.notify(); return; }
+    if (r.remote) { this.status = REASON_NOTE(r.remote); cx.notify(); return; }
     this.openForm({ form: "reason", terminal: r.terminal, file: r.file, where: r.where, quote: r.quote });
   }
 
@@ -2070,6 +2154,8 @@ export default class Review extends View {
 
   /** Remembers the rejection a reason (ctrl-r) would explain. */
   noteReject(f, where, rows) {
+    // A comment on a rejection goes through the Claude hook, which is this computer's only.
+    if (f.store?.on) { this.lastReject = { remote: f.store.on }; return; }
     const terminal = this.target(f);
     this.lastReject = terminal ? { terminal, file: f.as ?? agentPath(f.path, terminal), where, quote: this.quoteRows(f, rows).quote } : null;
   }
@@ -2099,8 +2185,6 @@ export default class Review extends View {
     this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; cx.notify();
   }
 
-  /** A file on another machine can't be changed from here yet: typing, pasting and saving say so. */
-  remoteReadOnly(f, cx) { this.error = readOnlyNote(f.rel, f.store.on); cx.notify(); }
   cw() { return this.charW ?? 7.2; }
   hasTextSel() { return !!(this.anchor && this.cur && cmp(this.anchor, this.cur)); }
   ordered() { return cmp(this.anchor, this.cur) <= 0 ? [this.anchor, this.cur] : [this.cur, this.anchor]; }
@@ -2198,7 +2282,6 @@ export default class Review extends View {
     const f = this.file();
     if (!this.editable(f) || !this.cur) return;
     if (this.view === "review" || this.mode === "changes") return this.readOnly(cx);
-    if (f.store?.on) return this.remoteReadOnly(f, cx);
     const sel = this.hasTextSel(), a = from ?? (sel ? this.anchor : this.cur), b = to ?? this.cur;
     const lang = languageOf(f.rel);
     const { state, cursor } = edit(f, a, b, text, (ls) => highlightLines(ls, lang));
@@ -2322,7 +2405,6 @@ export default class Review extends View {
   lineOp(name, cx) {
     const f = this.file();
     if (!this.editable(f) || !this.cur) return;
-    if (f.store?.on && this.view !== "review" && this.mode !== "changes") return this.remoteReadOnly(f, cx);
     const lines = linesOf(f), anchor = this.hasTextSel() ? this.anchor : null, cur = this.cur;
     const [l1, l2] = lineSpan(anchor, cur);
     const op = {
@@ -2479,7 +2561,6 @@ export default class Review extends View {
     const f = this.file(), { ms, re } = this.matches(f);
     if (!this.editable(f) || !re || !ms.length) return;
     if (this.view === "review" || this.mode === "changes") return this.readOnly(cx);
-    if (f.store?.on) return this.remoteReadOnly(f, cx);
     const lines = linesOf(f), repl = this.replaceInput.value(), regex = this.findOpts.regex;
     const subs = ms.map((m) => replacement(body(lines[m.line]).slice(m.from, m.to), re, repl, regex));
     this.cur ??= { line: 0, col: 0 };
@@ -2741,10 +2822,9 @@ export default class Review extends View {
     return true;
   }
 
-  /** The files Replace All can write: not those on another machine (saving there isn't built yet). */
+  /** The files Replace All can write: every result's file, on this computer or the space's machine. */
   replaceTargets() {
-    const all = this.search.results?.files ?? [], files = all.filter((f) => !f.st.on);
-    return { files, remote: all.length - files.length };
+    return { files: this.search.results?.files ?? [] };
   }
 
   /** Replace All, first step: the confirm line. */
@@ -2756,7 +2836,7 @@ export default class Review extends View {
 
   /** A file outside the review as Replace All reads it: its own baseline, like loadPlain. */
   async plainFile(st, rel) {
-    const path = `${st.root}/${rel}`, text = await readTextFile(path);
+    const path = `${st.root}/${rel}`, text = await readTextFile(path, { on: st.on ?? null });
     if (typeof text !== "string") return null;
     const C = splitLines(text);
     return { rel, path, basePath: null, store: st, key: `${st.root}|${rel}`, plain: true, created: false, by: null, as: null, Btext: text, Ctext: text, B: C, C, hunks: [] };
@@ -2773,7 +2853,7 @@ export default class Review extends View {
     const s = this.search, r = s.results, rep = s.replace;
     s.confirm = false;
     if (!r || s.running || s.busy) return;
-    const { files, remote } = this.replaceTargets();
+    const { files } = this.replaceTargets();
     if (!files.length) return;
     const keys = files.map((f) => f.key);
     const held = [...new Set([...this.files.filter((f) => keys.includes(f.key) && this.dirty(f)).map((f) => f.key), ...this.heldElsewhere(keys)])];
@@ -2815,7 +2895,6 @@ export default class Review extends View {
       s.busy = false;
       const parts = [`Replaced ${many(out.n, "occurrence")} in ${many(out.files, "file")}`];
       if (out.skipped.length) parts.push(`skipped ${out.skipped.join(", ")}`);
-      if (remote) parts.push(`${many(remote, "file")} on another machine left out`);
       s.note = { text: parts.join("; "), error: out.skipped.length > 0 };
       if (this.search === s) this.runSearch(cx); else cx.notify();
     });
@@ -2931,7 +3010,6 @@ export default class Review extends View {
 
   save(cx, f = this.file()) {
     if (!f) return;
-    if (f.store?.on) return this.remoteReadOnly(f, cx);
     if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; cx.notify(); return; }
     const writes = this.saveWrites(f);
     if (!writes.length) return;
@@ -2953,6 +3031,7 @@ export default class Review extends View {
   /** Q45: a passive note to the agent that changed a file, naming the lines a save changed. */
   editNote(f, w) {
     if (!f.by || !this.settings.editNote || w.target !== "current" || w.before === null || w.after === null) return null;
+    if (f.store?.on) return null; // delivered by the Claude hook, this computer's only
     const r = changedRanges(w.before, w.after);
     if (!r.length) return null;
     const at = r.slice(0, 6).map((h) => (!h.nc ? `lines removed at ${h.n + 1}` : h.nc === 1 ? `line ${h.n + 1}` : `lines ${h.n + 1}-${h.n + h.nc}`));
@@ -3402,7 +3481,7 @@ export default class Review extends View {
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;
     this.bm = f ? this.bracketPair(f) : null; // D2: read by row()
     const picked = this.files.find((x) => x.key === this.sel); // an error tab shows its error
-    const away = this.machine(), noReview = !!away && this.mode === "review"; // Review isn't available on another machine yet
+    const away = this.machine();
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
@@ -3414,7 +3493,7 @@ export default class Review extends View {
             .child(m === "review" ? "Review" : "Edit")))))
         .child(div().text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${total} change${total === 1 ? "" : "s"} in ${vis.length} file${vis.length === 1 ? "" : "s"} · ${this.history.length} undoable${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
         .child(div().flex_1())
-        .when(!!this.lastReject, (e) => e.child(this.button("reason", `Comment last rejection  ${this.kl("reason")}`, t.raised, (cx) => this.askReason(cx))))
+        .when(!!this.lastReject && !this.lastReject.remote, (e) => e.child(this.button("reason", `Comment last rejection  ${this.kl("reason")}`, t.raised, (cx) => this.askReason(cx))))
         .when(total > 0 && this.mode === "review", (e) => e
           .child(this.button("reject-all", "Reject all files", t.ansi1 + "55", (cx) => this.everything("reject", cx)))
           .child(this.button("accept-all", "Accept all files", t.ansi2 + "55", (cx) => this.everything("accept", cx))))
@@ -3456,8 +3535,8 @@ export default class Review extends View {
         .child(this.button("ours", "Keep mine", t.raised, (cx) => this.resolve("ours", cx)))
         .child(this.button("theirs", f?.conflict?.theirs ? "Take agent's" : "Drop my edits", t.ansi1 + "55", (cx) => this.resolve("theirs", cx)))))
       .when(!!(this.error || this.status || !f), (e) => e.child(h_flex().px(12).py(6).gap(10).items_center().text_size(12)
-        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? (noReview ? REVIEW_NOTE : null) ?? this.status ?? (picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
-        .when(!this.stores.length && !!this.spaceId && !noReview, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
+        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? this.status ?? (picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
+        .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
         .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; cx.notify(); })
         // One character's width in the diff font, for cursor columns (the font is monospace).

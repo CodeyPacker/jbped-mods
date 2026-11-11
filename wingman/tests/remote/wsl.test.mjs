@@ -26,7 +26,10 @@ const { exec, readTextFile, remoteCalls } = await import("herdr");
 const { Store } = await import("../../mods/wingman/store.js");
 const { STATUS_V2, parseStatusV2, onDisk, NUMSTAT, parseNumstat, discardCommands, commitCommands, READ, statusLetter } = await import("../../mods/wingman/changes.js");
 const { STATUS_TREE, parseStatus: parseTree } = await import("../../mods/wingman/filetree.js");
-const { listDir, pathKind } = await import("../../mods/wingman/fsx.js");
+const { listDir, pathKind, writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, STALE } = await import("../../mods/wingman/fsx.js");
+const { Capture } = await import("../../mods/wingman/capture.js");
+const { acceptAt, rejectAt, rejectAll } = await import("../../mods/wingman/model.js");
+const { createHash } = await import("node:crypto");
 const { diffHunks } = await import("../../mods/wingman/merge.js");
 const { git } = await import("../../mods/wingman/git.js");
 
@@ -104,8 +107,92 @@ try {
   assert.deepEqual(now, []);
   assert.equal(await readTextFile(`${root}/keep.txt`, { on }), "keep\n");
   assert.equal(await readTextFile(`${root}/new file.txt`, { on }), null);
-  // Writes refuse on another machine.
-  await assert.rejects(st.apply({ rel: "keep.txt", path: `${root}/keep.txt` }, { target: "current", before: "keep\n", after: "x" }), /read-only/);
+  assert.ok(remoteCalls.every((c) => c.on === on));
+
+  // ---- D1: writes there (fsx.writeText through hc exec: the Windows command line route) ----------
+  const sha = (s) => createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
+  const remoteSha = async (p) => (await sh('sha256sum < "$1"', p)).split(" ")[0];
+  const temps = async () => (await sh('find "$1" -name ".wingman-*"', root)).trim();
+  const w = `${root}/w`;
+  await timed("makeDir", () => makeDir(`${w}/sub/deep`, { on }));
+  assert.equal(await pathKind(`${w}/sub/deep`, { on }), "dir");
+  const nasty = "a\r\nb\tc \"q\" 'q' `b` \\n \\\\ \\0 \\x41 $HOME ${x} $(id) $$ !! %s %d %% %n é 中文 😀 \u00a0 \u2028 mid\ufeffbom -n -e --help * ? [a] ; | & > <";
+  const cases = { nasty, crlf: "one\r\ntwo\r\n", nofinal: "no final newline", final: "x\n", empty: "", lone: "\n", dash: "-n", quotes: '"\\'.repeat(6000) };
+  for (const [name, text] of Object.entries(cases)) {
+    const p = `${w}/${name}.txt`;
+    await timed(`write ${name} (${Buffer.byteLength(text)} B)`, () => writeText(p, text, null, { on }));
+    assert.equal(await remoteSha(p), sha(text), name);
+    await writeText(p, text + "+", text, { on });
+    assert.equal(await remoteSha(p), sha(text + "+"), `${name} overwrite`);
+  }
+  // Stale refused, create only if absent, removal.
+  const cas = `${w}/nasty.txt`;
+  await assert.rejects(writeText(cas, "x", "not it", { on }), (e) => e.message.includes(STALE));
+  await assert.rejects(writeText(cas, "x", null, { on }), (e) => e.message.includes(STALE));
+  assert.equal(await remoteSha(cas), sha(nasty + "+"));
+  await assert.rejects(removeFile(cas, "not it", { on }), (e) => e.message.includes(STALE));
+  await timed("removeFile", () => removeFile(cas, nasty + "+", { on }));
+  assert.equal(await pathKind(cas, { on }), null);
+  // Mode and links.
+  await sh('printf "#!/bin/sh\\n" > "$1/run.sh" && chmod 750 "$1/run.sh" && printf t1 > "$1/sub/target" && ln -s sub/target "$1/link"', w);
+  await writeText(`${w}/run.sh`, "#!/bin/sh\necho hi\n", "#!/bin/sh\n", { on });
+  assert.equal((await sh('stat -c %a "$1"', `${w}/run.sh`)).trim(), "750");
+  await writeText(`${w}/link`, "t2", "t1", { on });
+  assert.equal((await sh('[ -L "$1/link" ] && cat "$1/sub/target"', w)), "t2");
+  // Big files: chunked on the safe route (hc exec can't take 1 MB in one call), probed once.
+  const k200 = (nasty + "\n").repeat(Math.ceil(200000 / Buffer.byteLength(nasty + "\n")));
+  let n0 = remoteCalls.length;
+  await timed(`write 200 KB (${Buffer.byteLength(k200)} B)`, () => writeText(`${w}/k200.txt`, k200, null, { on }));
+  console.log(`  call size ${callBytes(on)}, ${remoteCalls.length - n0} calls`);
+  assert.equal(await remoteSha(`${w}/k200.txt`), sha(k200));
+  const mb = "0123456789abcdef é\n".repeat(Math.ceil(1500000 / 20));
+  n0 = remoteCalls.length;
+  await timed(`write 1.5 MB (${Buffer.byteLength(mb)} B)`, () => writeText(`${w}/mb.txt`, mb, null, { on }));
+  console.log(`  ${remoteCalls.length - n0} calls`);
+  assert.equal(await remoteSha(`${w}/mb.txt`), sha(mb));
+  assert.equal(await temps(), "");
+  // A forced failure: stale at the last piece leaves the file and no temp file.
+  await assert.rejects(writeText(`${w}/k200.txt`, k200 + "x", "not it", { on }), (e) => e.message.includes(STALE));
+  assert.equal(await remoteSha(`${w}/k200.txt`), sha(k200));
+  // A folder that can't be written (the first step fails).
+  await sh('mkdir "$1/ro" && printf keep > "$1/ro/f" && chmod 555 "$1/ro"', w);
+  await assert.rejects(writeText(`${w}/ro/f`, k200, "keep", { on }), /cannot write beside/);
+  await assert.rejects(writeText(`${w}/ro/f`, "small", "keep", { on }), /cannot write beside/);
+  await sh('chmod 755 "$1/ro"', w);
+  assert.equal(await temps(), "");
+  // Fingerprints: one call for several files.
+  const fp = await timed("fingerprints (3 paths)", () => fingerprints([`${w}/crlf.txt`, `${w}/gone`, `${w}/sub`], { on }));
+  assert.deepEqual(fp, { [`${w}/crlf.txt`]: sha("one\r\ntwo\r\n+"), [`${w}/gone`]: null, [`${w}/sub`]: null });
+  await sh('rm -rf "$1"', w);
+
+  // ---- D2/D3: a review round trip there ------------------------------------------------------------
+  await sh(`cd "$1" && printf 'a1\\na2\\na3\\na4\\na5\\na6\\n' > rev.txt && git add rev.txt && git commit -qm rev`, root);
+  const st2 = await Store.open(root, on), cap = new Capture(st2);
+  const t0 = await timed("snapshot", () => cap.snapshot());
+  await timed("setState", () => cap.setState({ tree: t0, since: Date.now() }));
+  await sh(`cd "$1" && printf 'a1\\nA2\\na3\\na4\\na5\\nA6\\n' > rev.txt && printf 'made\\n' > made.txt`, root);
+  const t1 = await timed("snapshot (after edits)", () => cap.snapshot());
+  assert.equal(await timed("adopt (2 files)", () => cap.adopt(t0, t1, null, "spA")), 2);
+  const ix = await st2.index();
+  let rf = await timed("load", () => st2.load("rev.txt", ix["rev.txt"]));
+  assert.equal(rf.hunks.length, 2);
+  const act = async (f, action) => { const { write } = action(f); return st2.apply(f, write); };
+  await timed("accept", () => act(rf, (s) => acceptAt(s, 0)));
+  rf = await st2.load("rev.txt", ix["rev.txt"]);
+  assert.equal(rf.hunks.length, 1);
+  const rej = await timed("reject", () => act(rf, (s) => rejectAt(s, 0)));
+  assert.equal(await readTextFile(`${root}/rev.txt`, { on }), "a1\nA2\na3\na4\na5\na6\n");
+  await timed("undo", () => st2.undo([rej]));
+  assert.equal(await readTextFile(`${root}/rev.txt`, { on }), "a1\nA2\na3\na4\na5\nA6\n");
+  const mf = await st2.load("made.txt", ix["made.txt"]);
+  await act(mf, rejectAll);
+  assert.equal(await readTextFile(`${root}/made.txt`, { on }), null);
+  await sh(`cd "$1" && git add rev.txt && git commit -qm agent`, root);
+  await timed("reconcile", () => st2.reconcile(() => "spA"));
+  const done = JSON.parse(await readTextFile(`${st2.dir}/index.json`, { on }));
+  assert.ok(!done.files["rev.txt"] && Object.keys(done.done).some((k) => k.endsWith("|rev.txt")));
+  await cap.setState({ tree: null });
+  assert.equal(await temps(), "");
   assert.ok(remoteCalls.every((c) => c.on === on));
 } finally {
   await exec("rm", ["-rf", "--", root], { on });

@@ -1,8 +1,8 @@
 // Spaces on another machine: the pure helpers (remote.js), stores that carry their machine, and
 // workspaces read there but kept here. The shim runs machine "vps" locally and records each call.
-import { remotePath, rootId, idOf, isRemote, readOnlyNote, mapLimit, REMOTE } from "../mods/wingman/remote.js";
+import { remotePath, rootId, idOf, isRemote, mapLimit, REMOTE } from "../mods/wingman/remote.js";
 import { Store, PlainRoot } from "../mods/wingman/store.js";
-import { spaceRoots, addFolder, removeFolder, findWorkspace, spaceFolder, pathFor, parseJsonc } from "../mods/wingman/workspace.js";
+import { spaceRoots, addFolder, removeFolder, findWorkspace, spaceFolder, pathFor, parseJsonc, withFolders } from "../mods/wingman/workspace.js";
 import { remoteCalls } from "herdr";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -27,8 +27,8 @@ assert.notEqual(rootId("/r", "vps"), rootId("/r", "box"));
 assert.equal(idOf({ root: "/r", on: "vps" }), rootId("/r", "vps"));
 assert.equal(idOf({ root: "/r" }), "/r");
 assert.equal(isRemote({ on: "vps" }), true); assert.equal(isRemote({ on: null }), false); assert.equal(isRemote(null), false);
-assert.match(readOnlyNote("src/a.js", "vps"), /^a\.js is on vps: .*read-only/);
 assert.ok(REMOTE.rootsMs >= 5000 && REMOTE.changesMs >= 5000 && REMOTE.treeMs >= 10000);
+assert.ok(REMOTE.watchMs >= 5000 && REMOTE.captureMs >= 5000 && REMOTE.reconcileMs >= 15000);
 
 { // mapLimit: order kept, never more than `limit` at once, limit 1 strictly one after another
   let running = 0, most = 0;
@@ -68,19 +68,27 @@ try {
   const local = await Store.open(repo);
   assert.equal(local.on, null); assert.equal(local.root, st.root);
   assert.notEqual(idOf(local), idOf(st));
-  // Read-only there: writes refuse before touching anything.
+  // Writes run there, compare-and-swap: a save, a stale save refused, undo.
   const f = { rel: "a.txt", path: `${repo}/a.txt`, basePath: null };
-  await assert.rejects(st.apply(f, { target: "current", before: "one\n", after: "two\n" }), /a\.txt is on vps: .*read-only/);
-  await assert.rejects(st.undo([{ path: `${repo}/a.txt`, before: "one\n", after: "two\n" }]), /read-only/);
+  remoteCalls.length = 0;
+  const w = await st.apply(f, { target: "current", before: "one\n", after: "two\n" });
+  assert.equal(readFileSync(`${repo}/a.txt`, "utf8"), "two\n");
+  assert.ok(remoteCalls.length === 1 && remoteCalls[0].on === "vps" && remoteCalls[0].cmd === "sh"); // one call, no read first
+  await assert.rejects(st.apply(f, { target: "current", before: "one\n", after: "three\n" }), /changed since it was read/);
+  assert.equal(readFileSync(`${repo}/a.txt`, "utf8"), "two\n");
+  await st.undo([w]);
+  assert.equal(readFileSync(`${repo}/a.txt`, "utf8"), "one\n");
   const plain = new PlainRoot(`${dir}/plain`, "vps");
   assert.equal(plain.on, "vps"); assert.equal(new PlainRoot(`${dir}/plain`).on, null);
-  await assert.rejects(plain.apply({ rel: "n.txt", path: `${dir}/plain/n.txt` }, { target: "current", before: null, after: "x" }), /read-only/);
-  assert.equal(readFileSync(`${repo}/a.txt`, "utf8"), "one\n");
+  mkdirSync(`${dir}/plain`);
+  const pw = await plain.apply({ rel: "n.txt", path: `${dir}/plain/n.txt` }, { target: "current", before: null, after: "x" });
+  assert.equal(readFileSync(`${dir}/plain/n.txt`, "utf8"), "x");
+  await plain.undo([pw]);
   assert.ok(!existsSync(`${dir}/plain/n.txt`));
 
   // ---- workspaces of a space on another machine ------------------------------------------
-  // Its folder holds a workspace file there (read through the machine, never written); repos added
-  // by hand go to Wingman's own file here. spaces.json (the Claude hook's) doesn't apply.
+  // Its folder holds a workspace file there, read and edited through the machine. spaces.json (the
+  // Claude hook's) doesn't apply.
   const t1 = `${dir}/t1`;
   mkdirSync(`${t1}/api`, { recursive: true }); mkdirSync(`${t1}/web`);
   const wsText = '{ "folders": [ { "path": "api" }, { "path": "web", "name": "Web" } ] }\n';
@@ -101,24 +109,38 @@ try {
   remoteCalls.length = 0;
   await spaceRoots(sp, [`${t1}/api`]);
   assert.equal(remoteCalls.length, 0);
-  // Wingman reads and edits its own file for the space, not the machine's.
+  // Wingman edits the machine's file there (compare-and-swap), every other byte kept; no own file here.
   assert.equal(await findWorkspace(sp), null);
-  // Adding a repo by hand: Wingman's own file, holding the machine's paths as they are; one repo is enough.
+  const own = `${data}/workspaces/vps_s1.code-workspace`, there = `${t1}/t1.code-workspace`;
+  remoteCalls.length = 0;
   await addFolder(sp, `${dir}/lib`, []);
-  const own = `${data}/workspaces/vps_s1.code-workspace`;
-  assert.deepEqual(parseJsonc(readFileSync(own, "utf8")).folders.map((f) => f.path), [`${dir}/lib`]);
-  assert.equal(readFileSync(`${t1}/t1.code-workspace`, "utf8"), wsText); // never written there
+  assert.ok(remoteCalls.every((c) => c.on === "vps"));
+  assert.deepEqual(parseJsonc(readFileSync(there, "utf8")).folders.map((f) => f.path), ["api", "web", `${dir}/lib`]);
+  assert.ok(readFileSync(there, "utf8").startsWith('{ "folders": [')); // the text around "folders" is kept
+  assert.ok(!existsSync(own));
   r = await spaceRoots(sp, [`${t1}/api`]);
   assert.deepEqual(r.roots, [`${t1}/api`, `${t1}/web`, `${dir}/lib`]);
-  // Removing a folder the machine's file lists hides it (that file isn't edited); removing an own one edits Wingman's file.
   await removeFolder(sp, `${t1}/web`); await removeFolder(sp, `${dir}/lib`);
-  assert.equal(readFileSync(`${t1}/t1.code-workspace`, "utf8"), wsText);
-  assert.deepEqual(parseJsonc(readFileSync(own, "utf8")).folders, []);
+  assert.deepEqual(parseJsonc(readFileSync(there, "utf8")).folders.map((f) => f.path), ["api"]);
   r = await spaceRoots(sp, [`${t1}/api`]);
   assert.deepEqual(r.roots, [`${t1}/api`]);
   // Adding back un-hides.
   await addFolder(sp, `${t1}/web`, r.roots);
   assert.ok((await spaceRoots(sp)).roots.includes(`${t1}/web`));
+  // An own file here from before is still read, and removing a folder edits it too.
+  mkdirSync(`${data}/workspaces`, { recursive: true });
+  writeFileSync(own, withFolders(null, [{ path: `${dir}/old` }]));
+  assert.ok((await spaceRoots(sp)).roots.includes(`${dir}/old`));
+  await removeFolder(sp, `${dir}/old`);
+  assert.deepEqual(parseJsonc(readFileSync(own, "utf8")).folders, []);
+  assert.ok(!(await spaceRoots(sp)).roots.includes(`${dir}/old`));
+  // No file there yet: adding a second repo makes one in the space's folder there, as here.
+  const t2 = `${dir}/t2`;
+  mkdirSync(t2);
+  const sp2 = { id: "vps/s2", machine: "vps", folder: t2 };
+  await addFolder(sp2, `${t2}/b`, [`${t2}/a`]);
+  assert.deepEqual(parseJsonc(readFileSync(`${t2}/t2.code-workspace`, "utf8")).folders.map((f) => f.path), ["a", "b"]);
+  assert.ok(!existsSync(`${data}/workspaces/vps_s2.code-workspace`));
   rmSync(`${data}/workspaces`, { recursive: true, force: true });
 } finally {
   rmSync(dir, { recursive: true, force: true });
