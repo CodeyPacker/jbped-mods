@@ -5,6 +5,8 @@
 // - a repo on a Windows drive that WSL git made: its `.git` file points to a /mnt path (a
 //   worktree WSL added), or its config has core.filemode true (Windows git never sets it).
 // Windows git can't open the first two and misreads file modes in the third.
+// Another machine (`on`, a space's machine) runs its own git there through herdr-core: no WSL
+// routing, and no core.filemode override (git there set it for its own file system).
 import { exec, readTextFile, appHome } from "herdr";
 
 export const onWindows = () => /^[A-Za-z]:/.test(appHome());
@@ -68,9 +70,9 @@ export const knownDistro = () => defaultDistro;
 /** The default WSL distro's name (Windows with WSL), else null. */
 export async function wslDistro() { if (onWindows()) await probe(); return defaultDistro; }
 
-/** "wsl" or "native": where git runs for a repo folder (or for no repo, `cwd` null). */
-export async function ownerOf(cwd) {
-  if (!onWindows()) return "native";
+/** "wsl" or "native": where git runs for a repo folder (or for no repo, `cwd` null). Another machine's is "native". */
+export async function ownerOf(cwd, on = null) {
+  if (on || !onWindows()) return "native";
   await probe();
   if (!hasWsl) return "native";
   if (!cwd) return hasNative ? "native" : "wsl";
@@ -93,11 +95,13 @@ export async function ownerOf(cwd) {
 }
 
 /**
- * Runs `cmd args` where the repo at `cwd` lives. For WSL, Windows paths in the arguments become
- * /mnt paths. Windows git ignores file modes (it can't see execute bits).
+ * Runs `cmd args` where the repo at `cwd` lives (on machine `on`, if set). For WSL, Windows paths
+ * in the arguments become /mnt paths. Windows git here ignores file modes (it can't see execute bits).
  */
-export async function inRepo(cmd, args, { cwd = null, timeout } = {}) {
-  const owner = await ownerOf(cwd), opts = timeout ? { timeout } : {};
+export async function inRepo(cmd, args, { cwd = null, timeout, on = null } = {}) {
+  const opts = timeout ? { timeout } : {};
+  if (on) return exec(cmd, args, { ...(cwd ? { cwd } : {}), on, ...opts });
+  const owner = await ownerOf(cwd);
   if (owner === "wsl") {
     const at = cwd ? ["--cd", toWsl(cwd)] : [];
     return exec("wsl.exe", [...at, "-e", cmd, ...args.map(wslArg)], opts);
@@ -106,11 +110,12 @@ export async function inRepo(cmd, args, { cwd = null, timeout } = {}) {
   return exec(cmd, [...fm, ...args], { ...(cwd ? { cwd } : {}), ...opts });
 }
 
-/** git in the repo at `cwd` (or with no repo, for --no-index work on temp files). */
+/** git in the repo at `cwd` (or with no repo, for --no-index work on temp files), on machine `on` if set. */
 export const git = (args, opts = {}) => inRepo("git", args, opts);
 
-/** A path git printed for the repo at `cwd`, as this machine's file calls take it. */
-export async function hostOf(p, cwd) {
+/** A path git printed for the repo at `cwd`, as file calls take it (on machine `on`: as printed). */
+export async function hostOf(p, cwd, on = null) {
+  if (on) return p.trim();
   const s = p.trim().replace(/\\/g, "/");
   if ((await ownerOf(cwd)) !== "wsl") return s;
   return fromWsl(s, distroOf(cwd ?? "") ?? (await wslDistro()));
