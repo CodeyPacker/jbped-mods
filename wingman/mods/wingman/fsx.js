@@ -257,6 +257,23 @@ const callSize = new Map(); // machine -> bytes per call, once proven
 /** The cost of a piece of content on the safe route: UTF-8 bytes, plus one per " and \\. */
 const safeCost = (s) => byteLength(s) + (s.match(/["\\]/g)?.length ?? 0);
 
+/**
+ * Splits arguments (paths) into runs that each fit one call: the safe-route cost of a run's
+ * arguments, plus 3 per argument for its quotes and separator, stays within `budget`. An argument
+ * over the budget alone gets a run of its own. Order is kept; [] gives [].
+ */
+export function chunkArgs(args, budget = SAFE_CALL - 2000) {
+  const out = [];
+  let cur = [], used = 0;
+  for (const a of args) {
+    const c = safeCost(String(a)) + 3;
+    if (cur.length && used + c > budget) { out.push(cur); cur = []; used = 0; }
+    cur.push(a); used += c;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
 /** Bytes one call to `on` may carry (the probe's answer, else the safe size). For tests: `set`. */
 export function callBytes(on, set) {
   if (set !== undefined) { if (set) callSize.set(on, set); else callSize.delete(on); }
@@ -589,10 +606,27 @@ export async function deleteTree(path, root, { on = null } = {}) {
 
 // ---- revealing in the system's file manager (this computer) ---------------------------
 
+/**
+ * The Windows command that shows `path` in Explorer: selected in its folder, or for a folder,
+ * opened. Explorer reads its own command line, where a comma separates switches, so a path with a
+ * comma must reach it inside double quotes (`/select,"C:\a,b\c.txt"`). exec escapes a `"` in an
+ * argument, which Explorer doesn't undo, so that form goes through PowerShell's Start-Process, which
+ * passes its argument string as it is: the path as a single-quoted literal (quotes doubled, curly
+ * ones too) and the double quotes made there ([char]34), so the command holds no `"`.
+ */
+export function revealCommand(path, isDir = false) {
+  const win = String(path).replace(/\//g, "\\");
+  if (!win.includes(",")) return { cmd: "explorer.exe", args: isDir ? [win] : ["/select,", win] };
+  const lit = "'" + win.replace(/['‘’‚‛]/g, "$&$&") + "'";
+  return { cmd: "powershell", args: ["-NoProfile", "-NonInteractive", "-Command",
+    `$p = ${lit}; $q = [char]34; Start-Process -FilePath explorer.exe -ArgumentList (${isDir ? "" : "'/select,' + "}$q + $p + $q)`] };
+}
+
 /** Shows `path` in Explorer (selected), Finder (`open -R`), or the file manager (xdg-open of its folder). */
 export async function revealPath(path, isDir = false) {
   if (onWindows()) {
-    await exec("explorer.exe", [isDir ? path.replace(/\//g, "\\") : "/select,", ...(isDir ? [] : [path.replace(/\//g, "\\")])]); // explorer answers 1 even when it worked
+    const { cmd, args } = revealCommand(path, isDir);
+    await exec(cmd, args); // explorer answers 1 even when it worked
     return;
   }
   const mac = (await exec("uname", ["-s"]).catch(() => ({ stdout: "" }))).stdout.trim() === "Darwin";
@@ -613,10 +647,14 @@ done`;
 export async function fingerprints(paths, { on }) {
   if (!paths.length) return {};
   if (noSh.has(on)) return {};
-  let r;
-  try { r = await execOn("sh", ["-c", PRINTS_SH, "wingman", ...paths], { on, timeout: 20000 }); }
-  catch (e) { if (/cannot start sh/i.test(String(e?.message ?? e))) noSh.add(on); return {}; }
-  const lines = r.stdout.split("\n"), out = {};
-  paths.forEach((p, i) => { const x = lines[i]?.trim(); if (x) out[p] = x === "-" ? null : x; });
+  // Many or long paths go in several calls, each within the safe size of one call.
+  const out = {};
+  for (const run of chunkArgs(paths, SAFE_CALL - safeCost(PRINTS_SH) - 200)) {
+    let r;
+    try { r = await execOn("sh", ["-c", PRINTS_SH, "wingman", ...run], { on, timeout: 20000 }); }
+    catch (e) { if (/cannot start sh/i.test(String(e?.message ?? e))) noSh.add(on); return out; }
+    const lines = r.stdout.split("\n");
+    run.forEach((p, i) => { const x = lines[i]?.trim(); if (x) out[p] = x === "-" ? null : x; });
+  }
   return out;
 }

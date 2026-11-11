@@ -142,9 +142,10 @@ export function partialAt(s, how, pick) {
 
 /**
  * Display rows for the whole file: context and added lines from C, removed
- * lines from B, and a button row ("@") after each hunk.
+ * lines from B, and a button row ("@") after each hunk. A file that exists but is empty (`live`,
+ * C has no lines) shows one empty line, where the cursor goes; a deleted file (not live) shows none.
  */
-export function rows(B, C, hunks) {
+export function rows(B, C, hunks, live = true) {
   const out = [];
   let ci = 0;
   const ctx = (to) => { for (; ci < to; ci++) out.push({ kind: " ", num: ci + 1, side: "new", line: ci }); };
@@ -156,5 +157,6 @@ export function rows(B, C, hunks) {
     ci = h.n + h.nc;
   });
   ctx(C.length);
+  if (live && !C.length) out.push({ kind: " ", num: 1, side: "new", line: 0 });
   return out;
 }

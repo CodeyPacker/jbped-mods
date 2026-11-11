@@ -29,7 +29,9 @@ A space reviews every repo in its workspace, which is made up of:
 
 A terminal's folder outside any git repo, or a workspace folder that isn't a repo, is a plain folder: the Edit tree lists it and its files open, edit and save, but nothing is reviewed or captured there, and Changes and Quick Open leave it out. Next to a repo, a plain folder starts collapsed. Its header has a ⟳ button that lists its open folders again. Its open folders are also relisted on their own, one folder at a time, at most every 30 seconds. A home folder is never searched for a repo, and is listed one level at a time like any plain folder.
 
-With more than one repo or folder, the Edit tree shows each as a top-level entry, with its name (the file's `name`, else the folder), its open change count and a × to remove it. **+ Add repo…** under the tree takes:
+Folders can nest: a terminal in a ticket folder that isn't a repo, with the space's worktrees inside it, or a worktree folder inside another repo, or terminals in a folder and in a subfolder of it. A file belongs to the innermost repo or folder of the space that holds it, a repo before a plain folder, and has one tab and one buffer however it's reached. In the outer folder's tree, an inner one shows as a link (`↗ name → root`): a click, Enter or Right goes to that root's own entry, and its files are never listed, opened, renamed or deleted through the outer folder. A file opened, created or moved into an inner root through the outer one opens as the inner root's file, and a repo's saves always go through its review. Renaming or deleting an inner root, or a folder holding one, from the outer tree is refused. Changes and Quick Open list a nested repo's files under that repo only.
+
+With more than one repo or folder, the Edit tree shows each as a top-level entry, with its name (the file's `name`, else the folder), its open change count and a × to remove it. **+ Add repo…** under the tree (with Search in the left column, it switches to Explorer, where its panel shows) takes:
 - a repo,
 - a folder of repos, listing the repos inside it to tick,
 - a main clone while the space's worktrees share a branch. Wingman offers to make a worktree for it beside them, on that branch (fetching first, then branching from the remote's default branch when the branch is new).
@@ -129,7 +131,8 @@ Every uncommitted change in the space's repos, against `HEAD`: your edits, other
 - **Commit**: check the files to commit (all by default), write a message (several lines are fine), then **Commit** or Ctrl+Enter. Only the checked files are committed, in one commit, however many: they're staged, new and deleted ones too, and anything else you had staged stays staged. (Their names go to git in a temp file in `<git-dir>/wingman/`, removed after; this needs git 2.26 or newer where the repo is.) With several repos in the space, pick the repo above the message box. A warning shows when checked files still have changes to review in Review; it doesn't stop the commit.
 - Files with unsaved edits in Edit can't be discarded or committed until those are saved or discarded.
 - Up to 500 files are listed; binary files are listed but not shown.
-- **Committed on this branch**, under the uncommitted files: every file changed between where the branch split from the remote's default branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`) and `HEAD`, as a read-only diff with its line counts. Files an agent of this space changed carry an **AI** mark, here and in the uncommitted list.
+- **Committed on this branch**, under the uncommitted files: every file changed between where the branch split from the remote's default branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`) and `HEAD`, as a read-only diff with its line counts. Files an agent of this space changed carry an **AI** mark, here and in the uncommitted list. The list is read again only when `HEAD` or that starting point moves (two git calls per repo), after the uncommitted files show. A file's diff is read when you first pick it ("Loading …" meanwhile); diffs read earlier are let go when they add up to about 4 million characters, or when you leave the space.
+- While the Changes tab isn't the panel's shown tab, it does nothing; it looks again as soon as it's shown. Each space keeps its own lists, checked files, picked repo and commit message.
 
 
 - Review is read-only. Accept and Reject still write to disk. `ctrl-shift-r`, a double-click on a line, and Quick Open of an unchanged file all switch to the Edit tab at that file and line. In the side panel, `ctrl-shift-r` cycles Review → Edit → Changes → Review, handing over the current file each time.
@@ -166,14 +169,27 @@ The header switches between two views (`ctrl-shift-r`):
 
 Right-click a file, a folder or a root's header (with one root and no header, the tree's empty space) for VS Code's Explorer menu. It works in repos and plain folders, on this computer and on another machine. Entries that don't apply are left out.
 
-- **New File…** and **New Folder…**: a name box opens in the tree, inside the folder (or the root) you clicked, or beside the file. Enter creates, Esc cancels. A name with `/` makes the folders on the way (`a/b/c.ts`). A new file opens in the editor. A new empty folder in a repo shows in the tree though git doesn't list it.
+- **New File…** and **New Folder…**: a name box opens in the tree, inside the folder (or the root) you clicked, or beside the file. Enter creates, Esc cancels. A name with `/` makes the folders on the way (`a/b/c.ts`). A new file opens in the editor, with the cursor on its one empty line. A new empty folder in a repo shows in the tree though git doesn't list it.
 - **Rename…** (`f2`): the name box holds the name, with the part before the extension selected. A name with `/` moves the item, relative to its folder. Changing only letter case (`readme.md` to `README.md`) works on Windows and macOS too.
 - **Delete** (`delete`): a confirm under the row names the item, and a repo folder's file count when the repo's file list knows it ("Delete folder src/old and its 12 files?", else "and everything in it?"). Enter or **Delete** deletes, Esc or **Cancel** doesn't. Deleting is permanent, here as on another machine: nothing goes to the trash or Recycle Bin.
 - **Copy Path** and **Copy Relative Path**: as the machine names it, with backslashes for a Windows drive.
 - **Reveal in File Explorer** (Windows), or **Reveal in file manager** (Finder on macOS, the folder through `xdg-open` on Linux), and **Open in** the external editor: this computer's files only.
 - **Refresh** (root header): reads the root's file list and folders again now.
 
-A click on a row selects it and gives the tree the keyboard: `f2` and `delete` act on that row then, and only then. A click in the editor, a tab or any box gives the keyboard back, so `delete` in a file still deletes text. Both keys can be changed in Settings → Keyboard shortcuts.
+A click on a row (or a root's header) selects it and gives the tree the keyboard, as in VS Code's Explorer:
+
+| Key | While the tree has the keyboard |
+|---|---|
+| `up` / `down` | the row above or below, across roots (headers included), scrolled into view |
+| `right` | opens a closed folder or root, else moves to its first entry |
+| `left` | closes an open folder or root, else moves to the folder (or root) above |
+| `home` / `end` | the first or last row |
+| `enter` | opens a file with the cursor in it (the editor takes the keyboard), or opens or closes a folder |
+| `space` | opens a file, keeping the keyboard in the tree |
+| `f2` / `delete` | rename / delete the selected row |
+| `escape` | closes the delete confirm, else gives the keyboard back to the editor |
+
+Pane shortcuts that don't change the file keep working there (`ctrl-p`, `ctrl-f`, `ctrl-shift-f`, `ctrl-s`, `ctrl-b`, next and previous file or change). Typing, editing keys, undo, accept and reject do nothing: nothing reaches the file while the tree has the keyboard. A click in the editor, a tab or any box gives the keyboard back, so `delete` in a file still deletes text. `f2` and `delete` can be changed in Settings → Keyboard shortcuts.
 
 Names that are refused, with the reason shown under the box (the box stays open): empty, `.` or `..`, `.git`, a backslash, a NUL, a leading `/`, a file name ending in `/`, anything already there. Folders on a Windows drive also refuse `< > : " | ? *`, a name ending in a dot or a space, and names Windows reserves (`CON`, `NUL`, `COM1`…). Every operation stays inside its root: never the root itself, never `.git` or anything in it, never a path with `..`. A root that is no project, only where a terminal happens to be (`/`, a drive or share root, `/mnt/c`, `/home`, `C:\Users`, a system folder such as `/usr` or `C:\Windows`), gets no file operations at all: "File operations aren't available in /: open a project folder".
 
@@ -217,7 +233,7 @@ Line operations act on the cursor's line or every line a text selection covers, 
 }
 ```
 
-Every line operation is also a command for other keys: `wingman.moveLineUp`, `wingman.moveLineDown`, `wingman.copyLineUp`, `wingman.copyLineDown`, `wingman.deleteLine`, `wingman.joinLines` and `wingman.toggleComment`.
+A key sent this way acts only where the same key pressed in Wingman would: never on the file while a box has the keyboard (find, Quick Open, Search, the commit message, a tree name box) or while the tree has it. Every line operation is also a command for other keys: `wingman.moveLineUp`, `wingman.moveLineDown`, `wingman.copyLineUp`, `wingman.copyLineDown`, `wingman.deleteLine`, `wingman.joinLines` and `wingman.toggleComment`.
 
 Comment, Accept and Reject act on the lines a text selection covers. Clicking the line numbers still selects whole lines. Not supported: input methods that compose characters (Chinese, Japanese, Korean), and wide characters or emoji, which put the cursor in the wrong column.
 

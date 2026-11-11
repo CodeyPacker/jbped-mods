@@ -16,8 +16,10 @@ import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { Capture, hostPath } from "./capture.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
-import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER } from "./filetree.js";
-import { listDir, pathKind, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath } from "./fsx.js";
+import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
+import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
+import { viewShown } from "./panelview.js";
+import { listDir, pathKind, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs } from "./fsx.js";
 import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
 import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
@@ -28,7 +30,7 @@ import { git, onWindows } from "./git.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
-import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal } from "./keymap.js";
+import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal, allowedIn } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
 import { splitLines } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome, pathFor } from "./workspace.js";
@@ -47,6 +49,10 @@ const ACTIVE = new Set(["working", "blocked"]);
 const base = (p) => p.split("/").pop();
 const SROW = 22; // a Search result row's height
 const TOK_CHARS = 4e6; // the highlight cache's texts, in characters (tok)
+// Changes' "Committed on this branch": loaded texts kept in all (characters), and repos whose list is kept.
+const COMMITTED_CHARS = 4e6, COMMITTED_REPOS = 16;
+/** A committed row before its texts are read (loadCommitted): no lines, not a file to edit. */
+const LAZY = { lazy: true, Btext: "", Ctext: undefined, B: [], C: [], hunks: [], oldTok: null, newTok: null };
 
 /** A space's Search view state (the Edit tab's left column): kept per space like the rest of the view. */
 function newSearch() {
@@ -187,29 +193,23 @@ export default class Review extends View {
         const c = String(await nextCommand()).replace(/^wingman\./, "");
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
-        else await ({
-          prompt: () => this.askPrompt(this.current, cx),
-          reject: () => this.decide("reject", cx),
-          // Reject, then open the reason popup for that rejection right away.
-          rejectReason: () => this.decide("reject", cx, true),
-          accept: () => this.decide("accept", cx),
-          reason: () => this.askReason(cx),
-          clear: () => this.clearSelection(cx),
-          save: () => this.save(cx),
-          // E3 line operations, for keys.json's "mod:wingman" section (e.g. "alt-up": "wingman.moveLineUp").
-          moveLineUp: () => this.lineOp("moveUp", cx),
-          moveLineDown: () => this.lineOp("moveDown", cx),
-          copyLineUp: () => this.lineOp("copyUp", cx),
-          copyLineDown: () => this.lineOp("copyDown", cx),
-          deleteLine: () => this.lineOp("delete", cx),
-          joinLines: () => this.lineOp("join", cx),
-          toggleComment: () => this.lineOp("comment", cx),
-          openInVSCode: () => this.toVSCode(cx),
-          // The settings popup saved a change.
-          settings: async () => { this.settings = await loadSettings(); this.setKeymap(await loadKeys()); },
-          // The settings popup installed or removed the Claude hook on a machine: look again now.
-          hook: () => { forgetHook(); for (const j of this.journals?.values() ?? []) j.at = 0; },
-        })[c]?.() ?? (BY_ID.has(c) ? this.runAction(c, cx) : undefined);
+        else {
+          // The diff's right-click menu: [the action whose focus rule applies, what it does].
+          const menu = {
+            prompt: ["comment", () => this.askPrompt(this.current, cx)],
+            // Reject, then open the reason popup for that rejection right away.
+            rejectReason: ["reject", () => this.decide("reject", cx, true)],
+            clear: [null, () => this.clearSelection(cx)],
+            // The settings popup saved a change.
+            settings: [null, async () => { this.settings = await loadSettings(); this.setKeymap(await loadKeys()); }],
+            // The settings popup installed or removed the Claude hook on a machine: look again now.
+            hook: [null, () => { forgetHook(); for (const j of this.journals?.values() ?? []) j.at = 0; }],
+          }[c];
+          // Every action (a key keys.json sends as wingman.<action>, e.g. "alt-up": "wingman.moveLineUp",
+          // or the menu's reject, accept, reason) goes through the same focus rule as its key (act).
+          if (menu) { if (!menu[0] || allowedIn(menu[0], this.focusKind())) await menu[1](); }
+          else if (BY_ID.has(c)) this.act(c, cx);
+        }
         cx.notify();
       }
     });
@@ -219,7 +219,16 @@ export default class Review extends View {
     this.reset([]);
     this.queue = Promise.resolve(); this.writing = 0;
     cx.timer.every(1000, (cx) => this.follow(cx));
-    cx.timer.every(250, (cx) => { this.autosave(cx); this.publishDirty(); this.publishReview(); this.takeShared(cx); });
+    cx.timer.every(250, (cx) => {
+      this.autosave(cx); this.publishDirty(); this.publishReview(); this.takeShared(cx);
+      if (this.mode === "changes") {
+        this.loadCommitted(this.file(), cx); // selected some other way (settle, a hand-off)
+        // Shown again after being hidden (refreshChanges does nothing meanwhile): look now, not at the next poll.
+        const shown = this.changesShown();
+        if (shown && this.changesHidden) cx.spawn(async (cx) => this.refreshChanges(cx));
+        this.changesHidden = !shown;
+      }
+    });
     if (this.view === "changes") this.initChanges(cx);
     cx.timer.every(500, (cx) => this.lead(cx));
     cx.timer.every(3000, (cx) => this.collectAll(cx));
@@ -238,6 +247,9 @@ export default class Review extends View {
     this.cur = null; this.anchor = null; this.redo = []; this.hx = 0; this.opened = [];
     this.search = newSearch(); this.searchFocus = false;
     this.treeCur = this.treeEdit = this.treeDel = null; this.treeFocus = false;
+    // Changes (P5) and the workspace panel: the commit box's text is restored from commitMsg on a switch.
+    this.committed = []; this.changeSig = null; this.unchecked = new Set(); this.commitRoot = this.commitNote = this.discardKey = null; this.commitMsg = "";
+    this.ws = null;
     this.status = stores.length ? "Loading…" : "Waiting for an agent in a git repo in this space, or open a folder.";
   }
 
@@ -246,11 +258,13 @@ export default class Review extends View {
   /** Shows the active space's review, opening its repo when an agent there is in one. `force`: look
    *  the roots up now (a space on another machine is looked up at most every 5 s). */
   async follow(cx, force = false) {
-    if (this.following || this.writing) return;
+    if (this.following) return;
     this.following = true;
     try {
       const sp = spaces().find((s) => s.active);
       const key = sp?.id ?? null;
+      // A switch never waits for queued writes: each write holds its own file and store, and what it
+      // reports lands in its own space's state (stateOf).
       if (key !== this.spaceId) {
         if (this.settings.autosave) this.saveAll(cx);
         if (this.spaceId) this.views.set(this.spaceId, this.snapshotView());
@@ -260,9 +274,15 @@ export default class Review extends View {
         this.views.delete(key); // the live state is on the instance now (saved again on leaving)
         this.pruneViews();
         this.syncSearchInputs();
+        this.commitInput?.set_value(this.commitMsg ?? "");
+        // Boxes and lists of the space left behind close: Quick Open's files, the tree menu's item.
+        if (this.qo) { this.qo = null; if (this.inBar === this.quickInput) { this.inBar = null; this.handle.focus(); } }
+        if (this.inBar === this.pathInput || this.inBar === this.treeInput) { this.inBar = null; this.handle.focus(); }
+        this.menuItem = null; this.treeScrollTo = null;
         cx.notify();
       }
-      if (!sp) return;
+      // The roots are looked up once writes are done: a reload meanwhile could read a half-written file.
+      if (!sp || this.writing) return;
       const on = sp.machine ?? null;
       if (on) {
         const at = (this.rootsAt ??= new Map()).get(key) ?? 0;
@@ -287,12 +307,18 @@ export default class Review extends View {
       for (const st of found) st.label = names.get(st.asked ?? st.root) ?? names.get(st.root) ?? null;
       const same = found.length === this.stores.length && found.every((st, i) => st === this.stores[i]);
       if (!same && this.spaceId === key) {
-        const left = new Set(found), files = this.files.filter((f) => left.has(f.store));
+        const left = new Set(found), files = this.files.filter((f) => left.has(f.store)), ids = new Set(found.map(idOf));
+        const kept = (it) => (it && ids.has(it.id) ? it : null);
         const keep = { sel: files.some((f) => f.key === this.sel) ? this.sel : files[0]?.key ?? null, current: this.current,
           history: this.history.filter((h) => h.snaps ? h.snaps.every((f) => left.has(f.store)) : !h.key || files.some((f) => f.key === h.key)), opened: this.opened.filter((k) => files.some((f) => f.key === k)),
-          search: this.search, searchFocus: this.searchFocus };
+          search: this.search, searchFocus: this.searchFocus,
+          // The tree's selection, name box and confirm stay while their root does; Changes' state stays.
+          treeCur: kept(this.treeCur), treeEdit: kept(this.treeEdit), treeDel: kept(this.treeDel), treeFocus: this.treeFocus && !!kept(this.treeCur),
+          committed: (this.committed ?? []).filter((f) => left.has(f.store)), changeSig: this.changeSig, unchecked: this.unchecked,
+          commitRoot: this.commitRoot, commitNote: this.commitNote, commitMsg: this.commitMsg, discardKey: this.discardKey, ws: this.ws };
         this.reset(found);
         Object.assign(this, keep); this.files = files;
+        this.rekeyFiles(); // a root added inside another takes its files over (P1)
         await this.reloadAll(cx);
         if (this.mode === "edit") this.refreshTrees(cx);
       }
@@ -357,11 +383,27 @@ export default class Review extends View {
   /** The active space's machine, null for this computer. */
   machine() { return this.space()?.machine ?? null; }
 
+  /**
+   * A space's state, kept while another space is shown. Kept: its files, review, undo, Search, the
+   * Changes lists (committed rows without their texts, which load again when picked), the commit
+   * box's text, checked files and picked repo, and an open workspace panel (not Add repo's path box,
+   * whose text is this copy's). Dropped: the cursor, the tree's selection, name box and delete
+   * confirm, Discard's confirm, Quick Open.
+   */
   snapshotView() {
-    const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search } = this;
+    const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, changeSig, unchecked, commitRoot, commitNote } = this;
+    for (const f of this.committed ?? []) this.unloadCommitted(f);
     return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
-      treeCur: null, treeEdit: null, treeDel: null, treeFocus: false };
+      treeCur: null, treeEdit: null, treeDel: null, treeFocus: false,
+      committed: this.committed ?? [], changeSig, unchecked: unchecked ?? new Set(), commitRoot, commitNote, commitMsg: this.commitInput?.value() ?? this.commitMsg ?? "", discardKey: null,
+      ws: this.ws?.kind === "path" ? null : this.ws ?? null };
   }
+
+  /**
+   * The state of `space`: this copy's own fields while it's shown, else its kept view (null when it's
+   * gone). Work that outlives a space switch (a queued write, Replace All, a commit) reports here.
+   */
+  stateOf(space) { return space === this.spaceId ? this : this.views.get(space) ?? null; }
 
   // ---- capture (leader only) -----------------------------------------------
 
@@ -561,6 +603,8 @@ export default class Review extends View {
 
   async reloadAll(cx) {
     if (this.mode === "changes") return this.loadChanges(cx);
+    // A reload that outlives a space switch or a change of roots is dropped: its files are another state's.
+    const space = this.spaceId, stores = this.stores, stale = () => this.spaceId !== space || this.stores !== stores;
     try {
       const files = [], texts = {};
       for (const st of this.reviewed()) {
@@ -570,6 +614,7 @@ export default class Review extends View {
         if (st.on) await this.markRemote(st, stamp);
         for (const f of await st.files((e) => shows(e, branch, this.spaceId, spaceOfAgent))) files.push(await this.withTokens(f, cx));
       }
+      if (stale()) return;
       const kept = [];
       for (const nf of files) kept.push(await this.keepEdits(nf, cx));
       // Opened files without changes stay open: plain ones as they are, others reread as plain.
@@ -577,6 +622,7 @@ export default class Review extends View {
         if (kept.some((k) => k.key === old.key) || !(old.plain || this.opened.includes(old.key))) continue;
         kept.push(old.plain || this.dirty(old) ? old : await this.loadPlain(old.store, old.rel, cx));
       }
+      if (stale()) return;
       this.files = kept; this.indexTexts = texts; this.status = null;
       this.settle(); cx.notify();
       // The review changed: the tree's counts and status letters follow.
@@ -658,8 +704,9 @@ export default class Review extends View {
     if (this.mode === "changes") { this.deferred.clear(); return; }
     if (this.draining) return;
     this.draining = true;
+    const space = this.spaceId;
     try {
-      while (this.deferred.size && !this.writing) {
+      while (this.deferred.size && !this.writing && this.spaceId === space) {
         const pending = this.deferred; this.deferred = new Set();
         let indexChanged = false;
         for (const st of this.reviewed()) if (!st.on && (await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
@@ -668,6 +715,7 @@ export default class Review extends View {
         if (away.stores.size) indexChanged = true;
         if (pending.has("*") || indexChanged) { await this.reloadAll(cx); continue; }
         for (const f of this.files) {
+          if (this.spaceId !== space) break; // switched meanwhile: this state isn't shown any more
           if (f.error || !(f.store?.on ? away.files.has(f.key) : pending.has(norm(f.path)))) continue;
           // Both sides: accepting only moves the baseline, so a baseline changed elsewhere
           // (another pane, capture, a reset) must be noticed even when the file itself is unchanged.
@@ -797,9 +845,11 @@ export default class Review extends View {
 
   rowsOf(f) {
     const w = this.wrapCols();
-    if (f._rowsFor !== f.hunks || f._rowsC !== f.C || f._rowsW !== w) {
-      const rows = buildRows(f.B, f.C, f.hunks);
-      f._rows = w ? this.wrapRows(f, rows, w) : rows; f._rowsFor = f.hunks; f._rowsC = f.C; f._rowsW = w;
+    // An empty file shows one empty line (P6); a deleted one, or a committed row not loaded yet, none.
+    const live = typeof f.Ctext === "string";
+    if (f._rowsFor !== f.hunks || f._rowsC !== f.C || f._rowsW !== w || f._rowsLive !== live) {
+      const rows = buildRows(f.B, f.C, f.hunks, live);
+      f._rows = w ? this.wrapRows(f, rows, w) : rows; f._rowsFor = f.hunks; f._rowsC = f.C; f._rowsW = w; f._rowsLive = live;
       f._lineRow = [];
       f._rows.forEach((r, i) => { if (r.side === "new" && !r.cont) f._lineRow[r.line] = i; });
     }
@@ -914,6 +964,7 @@ export default class Review extends View {
 
   /** A file opened from the tree that has no changes: its own baseline, kept in memory only. */
   async loadPlain(store, rel, cx) {
+    [store, rel] = this.own(store, rel);
     const path = `${store.root}/${rel}`, key = `${store.root}|${rel}`, f = { rel, path, basePath: null, store, key, plain: true, created: false, by: null, as: null, hunks: [] };
     let text = null, error = null;
     try { text = await readTextFile(path, { on: store.on ?? null }); } catch (e) { error = String(e.message ?? e); }
@@ -926,6 +977,7 @@ export default class Review extends View {
   }
 
   async openFile(store, rel, cx, at = null) {
+    [store, rel] = this.own(store, rel); // one identity per file, however it was reached (P1)
     const key = `${store.root}|${rel}`, space = this.spaceId, rk = `${idOf(store)}|${rel}`;
     this.recent = [rk, ...this.recent.filter((k) => k !== rk)].slice(0, 30);
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
@@ -970,7 +1022,11 @@ export default class Review extends View {
   /** Every file of the space's repos, recent and changed ones first (the order an empty query shows). */
   quickItems() {
     const seen = new Set(), out = [];
-    const add = (store, rel) => { const k = `${store.root}|${rel}`; if (!seen.has(k)) { seen.add(k); out.push({ key: k, store, rel }); } };
+    const add = (store, rel) => {
+      if (rel.endsWith("/")) return; // a repo inside this one, as git lists it
+      [store, rel] = this.own(store, rel); // a file another root owns is listed as that root's (P1)
+      const k = `${store.root}|${rel}`; if (!seen.has(k)) { seen.add(k); out.push({ key: k, store, rel }); }
+    };
     const byKey = new Map(this.files.map((f) => [f.key, f]));
     // Plain roots (folders outside git) aren't searched.
     // Recent keys carry the root's id (rootId), so a file of the same path on another machine isn't one of them.
@@ -1089,6 +1145,37 @@ export default class Review extends View {
   // worktree beside them. Removing asks first, and offers to delete a worktree too.
 
   space() { return spaces().find((s) => s.id === this.spaceId) ?? null; }
+  /**
+   * P1: the root of this space that owns `rel` of root `st` (roots.ownerOf: the deepest root holding
+   * the path, a repo before a plain folder) and the path relative to it. A file opened through a
+   * plain folder that holds a repo of the space is the repo's file: one key, one tab, one buffer, and
+   * saves go through the repo's store.
+   */
+  own(st, rel) {
+    const o = rel ? ownerOf(this.stores, under(st.root, rel), st.on ?? null) : null;
+    return o && o.root !== st && o.rel ? [o.root, o.rel] : [st, rel];
+  }
+
+  /** After the roots changed: an open plain file that another root owns now moves to that root's key (own). */
+  rekeyFiles() {
+    const moved = new Map();
+    for (const f of [...this.files]) {
+      if (!f.plain) continue;
+      const [o, rel] = this.own(f.store, f.rel);
+      if (o === f.store) continue;
+      const key = `${o.root}|${rel}`, other = this.files.find((x) => x.key === key), edited = this.dirty(f) || !!f.conflict;
+      if (other && edited) continue; // both open, this one edited: left until it's saved or closed
+      if (other) this.files = this.files.filter((x) => x !== f);
+      else this.replace(f, { ...f, store: o, rel, key });
+      moved.set(f.key, key);
+    }
+    if (!moved.size) return;
+    this.opened = [...new Set(this.opened.map((k) => moved.get(k) ?? k))];
+    if (moved.has(this.sel)) this.sel = moved.get(this.sel);
+    const stale = (h) => moved.has(h.key) || h.snaps?.some((x) => moved.has(x.key));
+    this.history = this.history.filter((h) => !stale(h)); this.redo = this.redo.filter((h) => !stale(h));
+  }
+
   hasRepo(root) { return this.stores.some((st) => norm(st.root) === norm(root) || norm(st.asked ?? "") === norm(root)); }
 
   /** The workspace's worktrees' shared branch and the folder beside them for `repo`, or null. */
@@ -1103,25 +1190,27 @@ export default class Review extends View {
    *  The folder picker is this computer's: a space on another machine takes a typed path there. */
   openFolder(cx) {
     if (!this.spaceId) return;
+    this.showExplorer();
     if (this.machine()) { this.ws = { kind: "path" }; this.pathInput.set_value(""); this.pathInput.focus(); cx.notify(); return; }
+    const sp = this.space(), put = (k, v) => { const s = this.stateOf(sp?.id); if (s) s[k] = v; }; // into its own space's state
     cx.spawn(async (cx) => {
       try {
         const dir = await pickFolder({ prompt: "Add a repo to this space" });
-        if (!dir) return;
-        this.wsBusy = "Looking…"; cx.notify();
+        if (!dir || this.spaceId !== sp?.id) return; // picked after leaving the space: nothing is added
+        this.showExplorer(); this.wsBusy = "Looking…"; cx.notify();
         const st = await Store.open(dir).catch(() => null);
         if (!st) {
           const repos = await scanRepos(dir);
           if (!repos.length) throw new Error(`${dir} is not a git repo and holds none`);
           const offer = await this.worktreeOffer("x");
-          this.ws = { kind: "pick", parent: dir, offer, asWorktrees: !!offer, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) };
+          put("ws", { kind: "pick", parent: dir, offer, asWorktrees: !!offer, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) });
           return;
         }
         if (this.hasRepo(st.root)) throw new Error(`${base(st.root)} is already in this space`);
         const info = await repoInfo(st.root), offer = info && !info.linked ? await this.worktreeOffer(base(st.root)) : null;
-        if (offer) { this.ws = { kind: "worktree", root: st.root, ...offer }; return; }
-        await this.addRepos([st.root], cx);
-      } catch (e) { this.error = String(e.message ?? e); }
+        if (offer) { put("ws", { kind: "worktree", root: st.root, ...offer }); return; }
+        await this.addRepos([st.root], cx, sp);
+      } catch (e) { put("error", String(e.message ?? e)); }
       finally { this.wsBusy = null; cx.notify(); }
     });
   }
@@ -1129,8 +1218,9 @@ export default class Review extends View {
   /** Space on another machine: the typed path's repo, or the repos inside it to pick from; a main
    *  clone is offered as a worktree beside the space's others, as here. */
   addPath(cx) {
-    const on = this.machine(), dir = remotePath(this.pathInput.value().trim());
+    const on = this.machine(), dir = remotePath(this.pathInput.value().trim()), sp = this.space(), put = (k, v) => { const s = this.stateOf(sp?.id); if (s) s[k] = v; };
     if (!on || !dir || this.wsBusy) return;
+    this.showExplorer();
     cx.spawn(async (cx) => {
       try {
         this.wsBusy = "Looking…"; cx.notify();
@@ -1139,36 +1229,36 @@ export default class Review extends View {
           const repos = await scanRepos(dir, on);
           if (!repos.length) throw new Error(`${dir} on ${on} is not a git repo and holds none`);
           const offer = await this.worktreeOffer("x");
-          this.ws = { kind: "pick", parent: dir, offer, asWorktrees: !!offer, on, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) };
+          put("ws", { kind: "pick", parent: dir, offer, asWorktrees: !!offer, on, repos: repos.map((path) => ({ path, on: false, has: this.hasRepo(path) })) });
           return;
         }
         if (this.hasRepo(st.root)) throw new Error(`${base(st.root)} is already in this space`);
         const info = await repoInfo(st.root, on), offer = info && !info.linked ? await this.worktreeOffer(base(st.root)) : null;
-        if (offer) { this.ws = { kind: "worktree", root: st.root, on, ...offer }; return; }
-        await this.addRepos([st.root], cx);
-      } catch (e) { this.error = String(e.message ?? e); }
+        if (offer) { put("ws", { kind: "worktree", root: st.root, on, ...offer }); return; }
+        await this.addRepos([st.root], cx, sp);
+      } catch (e) { put("error", String(e.message ?? e)); }
       finally { this.wsBusy = null; cx.notify(); }
     });
   }
 
   /** Adds repo folders to the space: to its workspace file (made when this makes two) and its repo map.
    *  On another machine, to Wingman's own workspace file only (workspace.js). */
-  async addRepos(roots, cx) {
-    const sp = this.space();
+  async addRepos(roots, cx, sp = this.space()) {
     if (!sp) return;
     for (const root of roots) {
-      await addFolder(sp, root, this.repos().map((st) => st.asked ?? st.root));
+      await addFolder(sp, root, (this.stateOf(sp.id)?.stores ?? []).filter((st) => !st.plain).map((st) => st.asked ?? st.root));
       // The capture leader writes the same file: retry when it wrote first.
       if (!sp.machine) for (let i = 0; ; i++) { try { await addSpaceRepos([[sp.id, root]]); break; } catch (e) { if (i >= 2) throw e; } }
       this.misses?.delete(rootId(root, sp.machine ?? null));
     }
-    this.ws = null; this.error = null; cx.notify();
+    if (this.spaceId === sp.id) { this.ws = null; this.error = null; }
+    cx.notify();
     await this.follow(cx, true);
   }
 
   /** The pick panel's or worktree offer's confirm: makes worktrees where asked, then adds. */
   confirmAdd(cx) {
-    const ws = this.ws;
+    const ws = this.ws, sp = this.space();
     if (!ws || this.wsBusy) return;
     cx.spawn(async (cx) => {
       try {
@@ -1185,7 +1275,7 @@ export default class Review extends View {
           } else roots.push(r.path);
         }
         this.wsBusy = "Adding…"; cx.notify();
-        await this.addRepos(roots, cx);
+        await this.addRepos(roots, cx, sp);
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.wsBusy = null; cx.notify(); }
     });
@@ -1196,7 +1286,7 @@ export default class Review extends View {
     if (this.files.some((f) => f.store === st && this.dirty(f))) { this.error = `${this.repoName(st)} has unsaved edits: save or undo them first`; cx.notify(); return; }
     const open = this.files.filter((f) => f.store === st).reduce((n, f) => n + (f.plain ? 0 : f.hunks.length), 0);
     this.ws = { kind: "remove", st, open, linked: null };
-    cx.notify();
+    this.showExplorer(); cx.notify();
     if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root, st.on ?? null).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
   }
 
@@ -1208,14 +1298,20 @@ export default class Review extends View {
         if (deleteWorktree) { this.wsBusy = `Deleting the worktree ${ws.st.root}…`; cx.notify(); await removeWorktree(ws.st.root, ws.st.on ?? null); }
         await removeFolder(sp, ws.st.asked ?? ws.st.root);
         if (ws.st.asked && norm(ws.st.asked) !== norm(ws.st.root)) await removeFolder(sp, ws.st.root);
-        this.ws = null; this.error = null;
+        const s = this.stateOf(sp.id); // its own space's state, shown or not
+        if (s) { s.ws = null; s.error = null; }
         await this.follow(cx, true);
-      } catch (e) { this.error = String(e.message ?? e); }
+      } catch (e) { const s = this.stateOf(sp.id); if (s) s.error = String(e.message ?? e); }
       finally { this.wsBusy = null; cx.notify(); }
     });
   }
 
   repoName(st) { return st.label ?? base(st.root); }
+
+  /** P8: the workspace panel shows under the Explorer tree, so opening it with Search in the left column shows Explorer (Search is a click away). */
+  showExplorer() {
+    if (this.searchShown()) { this.search.left = "explorer"; this.searchFocus = false; if (this.searchInputs?.includes(this.inBar)) { this.inBar = null; this.handle.focus(); } }
+  }
 
   /** Collapses or expands a root in the tree. Kept across reloads (per pane copy); repoOpen
    *  remembers plain roots opened by hand, which otherwise start collapsed beside a repo. */
@@ -1256,7 +1352,7 @@ export default class Review extends View {
       return box.child(div().text_color(t.foreground).child(`${base(ws.root)} is a main clone. This space's worktrees are on ${ws.branch}.`))
         .child(div().text_color(t.muted).child(`A new worktree goes in ${ws.dest}`))
         .child(actions(this.button("ws-wt", `Add a worktree on ${ws.branch}`, t.accent + "55", (cx) => this.confirmAdd(cx)),
-          this.button("ws-clone", "Add the clone itself", t.background, (cx) => cx.spawn(async (cx) => { try { await this.addRepos([ws.root], cx); } catch (e) { this.error = String(e.message ?? e); cx.notify(); } })),
+          this.button("ws-clone", "Add the clone itself", t.background, (cx) => { const sp = this.space(); cx.spawn(async (cx) => { try { await this.addRepos([ws.root], cx, sp); } catch (e) { this.error = String(e.message ?? e); cx.notify(); } }); }),
           cancel));
     }
     if (ws.kind === "remove") {
@@ -1392,32 +1488,53 @@ export default class Review extends View {
     if (!st.on) return st.stamp();
     const rels = onDisk(list).slice(0, REMOTE.hashMax);
     if (!rels.length) return "";
-    const r = await this.git(st, ["hash-object", "--no-filters", "--", ...rels]);
-    return r.code === 0 ? r.stdout : "!";
+    // Long paths go in several calls, each within the safe size of one call there (fsx.chunkArgs).
+    let out = "";
+    for (const run of chunkArgs(rels, 28000 - st.root.length * 2)) {
+      const r = await this.git(st, ["hash-object", "--no-filters", "--", ...run]);
+      if (r.code !== 0) return "!";
+      out += r.stdout;
+    }
+    return out;
   }
 
-  /** Every uncommitted file in the space's repos, as HEAD (B) against the working tree (C). */
+  /**
+   * Every uncommitted file in the space's repos, as HEAD (B) against the working tree (C), shown as
+   * soon as it's read; then "Committed on this branch" (committedRows: a list kept per repo until its
+   * base or HEAD moves, whose texts load when a file is picked). A load that outlives a space switch
+   * or a change of roots is dropped.
+   */
   async loadChanges(cx) {
     if (this.loadingChanges) return;
     this.loadingChanges = true;
+    const space = this.spaceId, stores = this.stores, stale = () => this.spaceId !== space || this.stores !== stores;
     try {
-      const files = [], committed = [], sig = [];
+      const files = [], sig = [], heads = [];
       for (const st of this.repos()) {
         const { out, head, list } = await this.statusOf(st), stamp = await this.stampOf(st, list);
         sig.push(idOf(st), head, out, stamp);
         const { ai, done } = await this.aiMarks(st), counts = await this.lineCounts(st, head);
+        // A repo inside this one (git lists it as "inner/") is its own root: its files aren't this one's (P1).
+        const mine = list.filter(({ rel }) => !rel.endsWith("/") && this.own(st, rel)[0] === st);
         // Texts are fetched a few at a time on another machine (each read is a call), one by one here.
-        const texts = await mapLimit(list, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeTexts(st, rel, xy, !!head));
+        const texts = await mapLimit(mine, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeTexts(st, rel, xy, !!head));
         for (const t of texts) {
           const f = await this.tokened(t, cx);
           files.push({ ...f, ai: ai.has(f.rel), ...this.countsOf(f, counts.get(f.rel)) });
         }
-        if (head) committed.push(...(await this.loadCommitted(st, head, done, cx)));
+        heads.push({ st, head, done });
       }
-      this.files = files; this.committed = committed; this.changeSig = sig.join("\0"); this.status = null;
+      if (stale()) return;
+      // The committed rows from the last load stay meanwhile (this space's: kept per space).
+      this.files = files; this.changeSig = sig.join("\0"); this.status = null;
       if (this.discardKey && !files.some((f) => f.key === this.discardKey)) this.discardKey = null;
       this.settle(); cx.notify();
-    } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      const committed = [];
+      for (const { st, head, done } of heads) if (head) committed.push(...(await this.committedRows(st, head, done)));
+      if (stale()) return;
+      this.committed = committed;
+      this.settle(); cx.notify();
+    } catch (e) { if (!stale()) { this.error = String(e.message ?? e); cx.notify(); } }
     finally { this.loadingChanges = false; }
   }
 
@@ -1468,55 +1585,123 @@ export default class Review extends View {
     return { ai, done };
   }
 
-  /** Where this branch starts: its merge base with the remote's default branch (else main or master). */
+  /**
+   * Where this branch starts: its merge base with the remote's default branch (else main or master).
+   * Looked up again when HEAD moves, and at most every 30 s otherwise (a fetch can move the remote's branch).
+   */
   async branchBase(st, head) {
     const cached = (this.bases ??= new Map()).get(idOf(st));
-    if (cached?.head === head) return cached.base;
+    if (cached?.head === head && Date.now() - cached.at < 30000) return cached.base;
     let base = null;
     for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
       const r = await this.git(st, [...READ, "merge-base", "HEAD", ref]);
       if (r.code === 0 && r.stdout.trim() !== head) { base = r.stdout.trim(); break; }
       if (r.code === 0) break; // HEAD is that branch's tip: nothing committed on top of it
     }
-    this.bases.set(idOf(st), { head, base });
+    this.bases.set(idOf(st), { head, base, at: Date.now() });
     return base;
   }
 
-  /** The files committed on this branch (its base against HEAD), read-only, with AI marks. */
-  async loadCommitted(st, head, done, cx) {
+  /**
+   * "Committed on this branch" for one repo (its base against HEAD), with AI marks. The list (path,
+   * letter, line counts: two git calls) is kept per repo, keyed by base and HEAD, and made again only
+   * when either moves; a file's texts and diff load when it's first picked (loadCommitted). At most
+   * COMMITTED_REPOS repos' lists are kept.
+   */
+  async committedRows(st, head, done) {
     const base = await this.branchBase(st, head);
     if (!base) return [];
-    const [r, n] = await Promise.all([this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, "HEAD"]),
-      this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, "HEAD"])]);
-    if (r.code !== 0) return [];
-    const counts = parseNumstat(n.code === 0 ? n.stdout : "");
-    const parts = r.stdout.split("\0").filter(Boolean), items = [];
-    for (let i = 0; i + 1 < parts.length && items.length < MAX_FILES; i += 2) items.push([parts[i], parts[i + 1]]);
-    // Blobs a few at a time on another machine (each is a call), one by one here; highlighting after, in order.
-    const texts = await mapLimit(items, st.on ? REMOTE.parallel : 1, async ([status, rel]) => {
-      const letter = status[0] === "A" ? "A" : status[0] === "D" ? "D" : "M";
-      const f = { rel, path: `${st.root}/${rel}`, basePath: null, store: st, key: `${st.root}|${rel}#committed`, openKey: `${st.root}|${rel}`,
-        committed: true, letter, ai: done.has(rel), plain: false, created: letter === "A", by: null, as: null, hunks: [] };
-      try {
-        const [b, c] = await Promise.all([st.blobAt(base, rel), st.blobAt("HEAD", rel)]);
-        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) return { ...f, error: "binary file" };
-        const hunks = await diffHunks(b ?? "", c ?? "");
-        const k = counts.get(rel);
-        return { f, t: { ...f, ...(k && !k.binary ? { add: k.add, del: k.del } : {}), Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks } };
-      } catch (e) { return { ...f, error: String(e.message ?? e) }; }
-    });
-    const out = [];
-    for (const x of texts) {
-      if (!x.t) { out.push(x); continue; }
-      try { out.push(await this.withTokens(x.t, cx)); } catch (e) { out.push({ ...x.f, error: String(e.message ?? e) }); }
+    const cache = (this.committedCache ??= new Map()), id = idOf(st);
+    let entry = cache.get(id);
+    if (entry?.base !== base || entry?.head !== head) {
+      for (const f of entry?.rows ?? []) this.unloadCommitted(f);
+      const [r, n] = await Promise.all([this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, head]),
+        this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, head])]);
+      if (r.code !== 0) return [];
+      const counts = parseNumstat(n.code === 0 ? n.stdout : ""), parts = r.stdout.split("\0").filter(Boolean), rows = [];
+      for (let i = 0; i + 1 < parts.length && rows.length < MAX_FILES; i += 2) {
+        const status = parts[i], rel = parts[i + 1], letter = status[0] === "A" ? "A" : status[0] === "D" ? "D" : "M", k = counts.get(rel);
+        rows.push({ rel, path: `${st.root}/${rel}`, basePath: null, store: st, key: `${st.root}|${rel}#committed`, openKey: `${st.root}|${rel}`,
+          committed: true, letter, ai: false, plain: false, created: letter === "A", by: null, as: null, base, head,
+          ...(k && !k.binary ? { add: k.add, del: k.del } : {}), ...LAZY });
+      }
+      entry = { base, head, rows };
     }
-    return out;
+    cache.delete(id); cache.set(id, entry); // newest last
+    while (cache.size > COMMITTED_REPOS) { const [k, old] = cache.entries().next().value; cache.delete(k); for (const f of old.rows) this.unloadCommitted(f); }
+    for (const f of entry.rows) f.ai = done.has(f.rel);
+    return entry.rows;
   }
 
-  /** Every 2 s (5 s on another machine): reloads when git status or HEAD changed, or a listed file's text did. */
+  /**
+   * A committed row's texts and diff, read when it's picked (P2). The row object itself is filled
+   * (the list and the per-repo cache share it). Loaded texts are capped at COMMITTED_CHARS in all: the
+   * least recently picked others go back to unloaded.
+   */
+  loadCommitted(f, cx) {
+    if (!f?.lazy || f.loading) return;
+    f.loading = true; f.usedAt = Date.now();
+    const st = f.store;
+    cx.spawn(async (cx) => {
+      let next;
+      try {
+        const [b, c] = await Promise.all([st.blobAt(f.base, f.rel), st.blobAt(f.head, f.rel)]);
+        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) next = { error: "binary file" };
+        else {
+          const hunks = await diffHunks(b ?? "", c ?? "");
+          next = await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx);
+        }
+      } catch (e) { next = { error: String(e.message ?? e) }; }
+      if (!f.lazy) { f.loading = false; return; } // unloaded meanwhile
+      Object.assign(f, next, { lazy: false, loading: false });
+      this.capCommitted(f);
+      this.settle(); cx.notify();
+    });
+  }
+
+  /** Puts a committed row back to unloaded (its texts and highlighting go; picked again, they load again). */
+  unloadCommitted(f) {
+    if (!f?.committed || f.lazy) return;
+    Object.assign(f, LAZY, { _rows: null, _rowsFor: null, _find: null, diskC: undefined, diskB: undefined, error: undefined });
+  }
+
+  /** Keeps the committed rows' loaded texts under COMMITTED_CHARS, unloading the least recently picked first (never `keep`). */
+  capCommitted(keep) {
+    const loaded = [];
+    for (const e of this.committedCache?.values() ?? []) for (const f of e.rows) if (!f.lazy && f.Ctext !== undefined) loaded.push(f);
+    let total = loaded.reduce((n, f) => n + (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0), 0);
+    for (const f of loaded.sort((a, b) => (a.usedAt ?? 0) - (b.usedAt ?? 0))) {
+      if (total <= COMMITTED_CHARS) break;
+      if (f === keep) continue;
+      total -= (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0);
+      this.unloadCommitted(f);
+    }
+  }
+
+  /**
+   * Whether this Changes copy is on screen: its block isn't hidden and is the shown child of every
+   * stack above it (panelview.viewShown over layout()). Unknown (no such block, or no layout) counts
+   * as shown, and so does a copy that has the keyboard.
+   */
+  changesShown() {
+    let shown = null;
+    try { shown = viewShown(layout(), "changes"); } catch {}
+    return shown !== false || !!this.handle?.is_focused();
+  }
+
+  /**
+   * Every 2 s (5 s on another machine): reloads when git status or HEAD changed, or a listed file's
+   * text did. Nothing at all while the Changes tab isn't shown; the first pass after it shows again
+   * catches up. A space with no repos has empty lists.
+   */
   async refreshChanges(cx) {
     // One check at a time: WSL git on a Windows drive takes over a second per status.
-    if (this.refreshing || this.loadingChanges || this.committing || !this.repos().length) return;
+    if (this.refreshing || this.loadingChanges || this.committing) return;
+    if (!this.repos().length) {
+      if (this.files.length || this.committed?.length || this.changeSig) { this.files = []; this.committed = []; this.changeSig = null; this.discardKey = null; this.settle(); cx.notify(); }
+      return;
+    }
+    if (!this.changesShown()) return;
     const remote = this.repos().some((st) => st.on);
     if (remote && Date.now() - (this.changesAt ?? 0) < REMOTE.changesMs) return;
     this.refreshing = true;
@@ -1535,14 +1720,16 @@ export default class Review extends View {
   discard(f, cx) {
     this.discardKey = null;
     if (this.heldElsewhere([f.key]).length) { this.error = `${base(f.rel)} has unsaved edits in Edit: save or discard them there first`; cx.notify(); return; }
+    const space = this.spaceId;
     cx.spawn(async (cx) => {
+      const s = () => this.stateOf(space) ?? {}; // its own space's state, shown or not
       try {
         for (const args of discardCommands(f.rel, f.inHead)) {
           const r = await this.git(f.store, args);
           if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
         }
-        this.error = null; this.commitNote = `Discarded ${f.rel}`;
-      } catch (e) { this.error = String(e.message ?? e); }
+        s().error = null; s().commitNote = `Discarded ${f.rel}`;
+      } catch (e) { s().error = String(e.message ?? e); }
       await this.loadChanges(cx);
     });
     cx.notify();
@@ -1567,6 +1754,7 @@ export default class Review extends View {
     const held = this.heldElsewhere(this.checkedIn(st).map((f) => f.key));
     if (held.length) { this.error = `Unsaved edits in Edit: ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}. Save or discard them first`; cx.notify(); return; }
     this.committing = true; this.error = null; this.commitNote = null; cx.notify();
+    const space = this.spaceId, s = () => this.stateOf(space) ?? {}; // the note lands in its own space's state
     cx.spawn(async (cx) => {
       try {
         await st.remember(rels).catch(() => {}); // what Review's files are now, so their commit is recognised
@@ -1576,9 +1764,10 @@ export default class Review extends View {
             if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
           }
         });
-        this.commitNote = `Committed ${rels.length} file${rels.length === 1 ? "" : "s"} to ${base(st.root)}`;
-        this.commitInput.set_value(""); this.unchecked.clear();
-      } catch (e) { this.error = String(e.message ?? e); }
+        s().commitNote = `Committed ${rels.length} file${rels.length === 1 ? "" : "s"} to ${base(st.root)}`;
+        if (this.spaceId === space) this.commitInput.set_value(""); else s().commitMsg = "";
+        s().unchecked?.clear();
+      } catch (e) { s().error = String(e.message ?? e); }
       finally { this.committing = false; }
       await this.loadChanges(cx); cx.notify();
     });
@@ -1701,8 +1890,9 @@ export default class Review extends View {
 
   /** Opens the folders above a file, loading those that have no listing yet. */
   revealInTree(key, cx) {
-    const i = key.indexOf("|"), root = key.slice(0, i), rel = key.slice(i + 1), st = this.stores.find((x) => x.root === root);
-    if (!st) return;
+    const i = key.indexOf("|"), root = key.slice(0, i), at = this.stores.find((x) => x.root === root);
+    if (!at) return;
+    const [st, rel] = this.own(at, key.slice(i + 1));
     const R = this.rootTree(st), was = R.tree.open.size, need = reveal(R.tree, rel);
     if (R.tree.open.size !== was) R.ver++;
     for (const d of need) this.loadFolder(st, R, d, cx);
@@ -1814,6 +2004,25 @@ export default class Review extends View {
     return rows;
   }
 
+  /**
+   * A root's rows as the tree shows them: rootRows with the space's other roots inside it as links
+   * (roots.linkRows), so a nested repo's or folder's files are reached only through its own root (P1).
+   */
+  treeRowsOf(st, R) {
+    const rows = this.rootRows(st, R), nested = nestedIn(this.stores, st), sig = nested.map((n) => `${n.rel}\0${idOf(n.root)}`).join("\n"), c = R.linkCache;
+    if (c && c.rows === rows && c.sig === sig && c.nested.every((n, i) => n.root === nested[i].root)) return c.out;
+    const out = linkRows(rows, nested, caselessRoot(st));
+    R.linkCache = { rows, sig, nested, out };
+    return out;
+  }
+
+  /** P1: a link row's click, or Enter or Right on it: its root's header, opened, selected and in view. */
+  gotoRoot(target, cx) {
+    if (this.rootShut(target)) this.toggleRepo(target, cx);
+    this.treeCur = this.treeItem(target, "", true); this.treeFocus = true; this.searchFocus = false; this.treeDel = null;
+    this.treeScrollTo = `${target.root}|`; this.handle.focus(); cx.notify();
+  }
+
   renderTree(t, full = false) {
     const multi = this.stores.length > 1, out = [], picked = full ? this.treeSel : this.sel;
     const note = (id, text, color = t.dim, depth = 0) => div().id(id).pl(10 + depth * 12).pr(10).py(4).text_size(11).text_color(color).child(text);
@@ -1836,8 +2045,11 @@ export default class Review extends View {
       // A plain root always has a header, for its refresh button.
       if (multi || st.plain) {
         const n = st.plain ? 0 : this.files.filter((f) => f.store === st && !f.plain).reduce((k, f) => k + f.hunks.length, 0);
+        const here = this.treeFocus && this.treeCur?.id === id && this.treeCur.rel === "";
+        if (this.treeScrollTo === `${st.root}|`) scrollAt = out.length;
         out.push(h_flex().id(`tree-repo-${st.root}`).pl(8).pr(6).pt(8).pb(2).gap(4).items_center().text_size(11).cursor_pointer()
-          .on_click((_e, cx) => this.toggleRepo(st, cx))
+          .when(here, (e) => e.bg(t.selected).rounded(3).border_1().border_color(t.accent + "aa"))
+          .on_click((_e, cx) => { this.selectTreeRow(st, { rel: "", dir: true }, cx); this.toggleRepo(st, cx); })
           .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openTreeMenu(st, "", true, cx); })
           .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(shut ? "▸" : "▾"))
           .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.muted).child(this.repoName(st)))
@@ -1853,12 +2065,24 @@ export default class Review extends View {
       if (R.errors.get("")) { out.push(note(`tree-err-${st.root}`, R.errors.get(""), t.ansi1)); continue; }
       if (st.plain ? !R.tree.entries.has("") : !R.index) { out.push(note(`tree-load-${st.root}`, "Loading…")); continue; }
       if (ed && ed.kind !== "rename" && ed.dir === "") editRows(0);
-      for (const row of this.rootRows(st, R)) {
+      for (const row of this.treeRowsOf(st, R)) {
         const k = `${st.root}|${row.rel}`;
         if (row.more) { out.push(note(`tree-more-${k}`, "… more files not shown", t.dim, row.depth)); continue; }
         if (ed?.kind === "rename" && row.rel === ed.rel) { editRows(row.depth); continue; }
         const gone = !row.dir && (row.deleted || row.mark === "D"), cur = this.treeFocus && this.treeCur?.id === id && this.treeCur.rel === row.rel;
         if (this.treeScrollTo === k) scrollAt = out.length;
+        if (row.link) {
+          // Another root of the space inside this one (P1): a link to its own header, never opened here.
+          const to = row.link;
+          out.push(h_flex().id(`tree-${k}`).h(22).flex_none().pl(8 + row.depth * 12).pr(8).gap(4).items_center().cursor_pointer().hover((s) => s.bg(t.hover))
+            .when(cur, (e) => e.bg(t.selected).rounded(3).border_1().border_color(t.accent + "aa"))
+            .on_click((_e, cx) => this.gotoRoot(to, cx))
+            .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openTreeMenu(to, "", true, cx); })
+            .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child("↗"))
+            .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(row.name))
+            .child(div().flex_none().text_size(10).text_color(t.dim).child(`→ ${this.repoName(to)}`)));
+          continue;
+        }
         out.push(h_flex().id(`tree-${k}`).h(22).flex_none().pl(8 + row.depth * 12).pr(8).gap(4).items_center().cursor_pointer()
           .when(!row.dir && k === picked, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
           .when(cur, (e) => e.bg(t.selected).rounded(3).border_1().border_color(t.accent + "aa"))
@@ -1962,14 +2186,21 @@ export default class Review extends View {
 
   /** Files at `rel` or under it with unsaved edits, in this copy or another: why it can't be renamed or deleted, or null. */
   unsavedUnder(st, rel) {
-    const top = `${st.root}|${rel}`, hit = (k) => k === top || k.startsWith(`${top}/`), keys = new Set();
-    for (const f of this.files) if (f.store === st && hit(f.key) && (this.dirty(f) || f.conflict)) keys.add(f.key);
+    // By path, not key: a file of another root inside this one (P1) counts too.
+    const top = under(st.root, rel), abs = (k) => { const i = k.indexOf("|"); return under(k.slice(0, i), k.slice(i + 1)); };
+    const hit = (k) => relUnder(abs(k), top) != null, keys = new Set();
+    for (const f of this.files) if (f.store && (f.store.on ?? null) === (st.on ?? null) && hit(f.key) && (this.dirty(f) || f.conflict)) keys.add(f.key);
     const now = Date.now();
     for (const [id, v] of Object.entries(shared(DIRTY) ?? {}))
       if (id !== this.id && now - (v?.at ?? 0) <= DIRTY_FRESH) for (const k of v.keys ?? []) if (hit(k)) keys.add(k);
     if (!keys.size) return null;
-    const names = [...keys].map((k) => k.slice(k.indexOf("|") + 1));
+    const names = [...keys].map((k) => relUnder(abs(k), st.root) ?? k.slice(k.indexOf("|") + 1));
     return `Unsaved edits in ${names.slice(0, 5).join(", ")}${names.length > 5 ? ` and ${names.length - 5} more` : ""}: save or discard them first`;
+  }
+
+  /** Why `rel` of `st` can't be renamed or deleted from this tree: it is another root of the space, or holds one (P1). */
+  holdsRootNote(st, rel) {
+    return holdsRoot(this.stores, st, rel) ? `${nameOf(rel)} is a root of this space, or holds one: rename or delete it outside Wingman, or remove that root from the space first (× on its header)` : null;
   }
 
   /** Opens a root and a folder in it (and the folders above), so a name box inside it shows. */
@@ -1987,7 +2218,7 @@ export default class Review extends View {
     if (!st || this.treeEdit?.busy || this.mode !== "edit") return;
     this.treeDel = null;
     if (kind === "rename") {
-      const why = checkRel(it.rel) ?? this.unsavedUnder(st, it.rel);
+      const why = checkRel(it.rel) ?? this.holdsRootNote(st, it.rel) ?? this.unsavedUnder(st, it.rel);
       if (why) return this.treeNote(why, cx);
     } else this.openTreeFolder(st, it.dir ? it.rel : parentOf(it.rel), cx);
     const name = kind === "rename" ? nameOf(it.rel) : "", isDir = kind === "newFolder" || (kind === "rename" && it.dir);
@@ -2048,7 +2279,11 @@ export default class Review extends View {
         this.afterFileOp(st, { from: e.rel, to: t.rel, isDir: e.isDir, made: e.isDir ? [...made, t.rel] : made }, cx);
       } else this.afterFileOp(st, { added: t.rel, isDir: e.kind === "newFolder", made: t.made }, cx);
       // A new file opens with the cursor in it, as VS Code does: the editor has the keyboard.
-      if (e.kind === "newFile") { await this.openFile(st, t.rel, cx, { line: 0, col: 0 }); if (this.sel === `${st.root}|${t.rel}`) this.treeFocus = false; }
+      if (e.kind === "newFile") {
+        await this.openFile(st, t.rel, cx, { line: 0, col: 0 });
+        const [o, rel] = this.own(st, t.rel);
+        if (this.sel === `${o.root}|${rel}`) this.treeFocus = false;
+      }
       cx.notify();
     });
   }
@@ -2057,7 +2292,7 @@ export default class Review extends View {
   askTreeDelete(it, cx) {
     const st = this.itemStore(it);
     if (!st || this.treeEdit?.busy || this.mode !== "edit") return;
-    const why = checkRel(it.rel) ?? this.unsavedUnder(st, it.rel);
+    const why = checkRel(it.rel) ?? this.holdsRootNote(st, it.rel) ?? this.unsavedUnder(st, it.rel);
     if (why) return this.treeNote(why, cx);
     let count = null;
     if (it.dir && !st.plain) {
@@ -2101,17 +2336,70 @@ export default class Review extends View {
     });
   }
 
-  /** Keys while the tree has the keyboard. True: handled. A key that isn't the tree's or a pane action gives the keyboard back. */
+  /**
+   * P9: keys while the tree has the keyboard, as in VS Code's Explorer. Up/Down move the selected row,
+   * Right opens a folder or moves into it, Left closes it or moves to the folder above, Home/End
+   * jump, Enter opens a file (the editor takes the keyboard) or opens and closes a folder, Space
+   * opens a file keeping the keyboard here, F2 renames, Delete asks to delete, Escape gives the
+   * keyboard back to the editor. Pane shortcuts that don't change the file work (allowedIn "tree");
+   * nothing else reaches the file. True: handled.
+   */
   treeKey(e, cx) {
     const k = e.keystroke;
     if (!(this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search.left !== "search")) { this.treeFocus = false; return false; }
     if (!keystrokeOf(e)) return false; // a modifier alone
-    const id = this.kIdx.tree.get(k);
-    if (id) { this.runAction(id, cx); return true; }
     if (k === "enter" && this.treeDel) { this.confirmTreeDelete(cx); return true; }
     if (k === "escape") { if (this.treeDel) this.treeDel = null; else this.treeFocus = false; cx.notify(); return true; }
-    if (!this.kIdx.pane.has(k)) { this.treeFocus = false; cx.notify(); }
-    return false;
+    const id = this.kIdx.tree.get(k) ?? this.kIdx.pane.get(k);
+    if (id) { this.act(id, cx); return true; }
+    if (["up", "down", "left", "right", "home", "end"].includes(k)) { this.treeMove(k, cx); return true; }
+    if (k === "enter" || k === "space") { this.treeActivate(k === "enter", cx); return true; }
+    return true; // typing, Backspace, editing keys: nothing reaches the file while the tree has the keyboard
+  }
+
+  /** The Explorer's visible rows across roots, in order, for the keyboard: root headers (depth -1) and rows. */
+  navItems() {
+    const out = [], multi = this.stores.length > 1;
+    for (const st of this.stores) {
+      const R = this.rootTree(st), shut = this.rootShut(st);
+      if (multi || st.plain) out.push({ st, rel: "", depth: -1, dir: true, open: !shut, root: true });
+      if (shut) continue;
+      const tr = st.plain ? null : this.trees.get(idOf(st));
+      if (tr?.error || R.errors.get("") || (st.plain ? !R.tree.entries.has("") : !R.index)) continue;
+      for (const row of this.treeRowsOf(st, R)) if (!row.more) out.push({ st, rel: row.rel, depth: row.depth, dir: row.dir, open: !!row.open, link: row.link ?? null });
+    }
+    return out;
+  }
+
+  /** The selected row's index in navItems, or -1. */
+  navIndex(items) {
+    const c = this.treeCur;
+    return c ? items.findIndex((it) => idOf(it.st) === c.id && it.rel === c.rel) : -1;
+  }
+
+  /** Up, Down, Left, Right, Home, End in the tree (filetree.navMove). */
+  treeMove(k, cx) {
+    const items = this.navItems(), { at, toggle } = navMove(items, this.navIndex(items), k), it = items[at];
+    if (!it) return;
+    this.treeDel = null;
+    if (toggle && it.link) return this.gotoRoot(it.link, cx);
+    if (toggle) { if (it.root) this.toggleRepo(it.st, cx); else this.toggleDir(it.st, it.rel, cx); }
+    this.treeCur = this.treeItem(it.st, it.rel, it.dir); this.treeScrollTo = `${it.st.root}|${it.rel}`;
+    cx.notify();
+  }
+
+  /** Enter or Space on the selected row: a file opens (Enter: the editor takes the keyboard), a folder or root opens or closes, a link goes to its root. */
+  treeActivate(enter, cx) {
+    const items = this.navItems(), it = items[this.navIndex(items)];
+    if (!it) return;
+    this.treeDel = null;
+    if (it.link) return this.gotoRoot(it.link, cx);
+    if (it.root) { this.toggleRepo(it.st, cx); return; }
+    if (it.dir) { this.toggleDir(it.st, it.rel, cx); return; }
+    const [o, rel] = this.own(it.st, it.rel), key = `${o.root}|${rel}`;
+    const at = enter && !(this.sel === key && this.cur) ? { line: 0, col: 0 } : null; // Enter puts the cursor in the file
+    if (enter) this.treeFocus = false;
+    cx.spawn(async (cx) => { await this.openFile(it.st, it.rel, cx, at); cx.notify(); });
   }
 
   /** Reveal in File Explorer / Finder / the file manager (this computer's roots only). */
@@ -2126,7 +2414,7 @@ export default class Review extends View {
   /** Open in the external editor from the tree (this computer's files); unsaved edits are saved first. */
   externalItem(st, it, cx) {
     if (st.on || it.dir) return;
-    const f = this.files.find((x) => x.key === `${st.root}|${it.rel}`);
+    const [o, rel] = this.own(st, it.rel), f = this.files.find((x) => x.key === `${o.root}|${rel}`);
     if (f && this.dirty(f) && !f.conflict) this.save(cx, f);
     cx.spawn(async (cx) => {
       try { await openInEditor(this.settings.externalEditor, under(st.root, it.rel), 0, 0, this.settings.externalCommand); }
@@ -2171,7 +2459,28 @@ export default class Review extends View {
   applyFileOp(op, cx, mine) {
     const st = this.stores.find((s) => s.root === op.root && (s.on ?? null) === (op.on ?? null));
     if (!st) return;
-    const R = this.rootTree(st), gone = op.removed ?? op.from ?? null, to = op.to ?? null, now = op.added ?? to;
+    const gone = op.removed ?? op.from ?? null, to = op.to ?? null, now = op.added ?? to;
+    this.treeAfterOp(st, { gone, to, now, made: op.made ?? [] }, cx);
+    // Made inside another root of the space (a plain folder's New File… "app/x.ts" into the repo app,
+    // or a rename into it): that root's tree reads the folders that changed too (P1).
+    if (now != null) {
+      const [o, rel] = this.own(st, now);
+      if (o !== st) this.treeAfterOp(o, { gone: null, to: null, now: rel, made: (op.made ?? []).map((m) => this.own(st, m)).filter(([x]) => x === o).map(([, r]) => r) }, cx);
+    }
+    if (this.mode === "edit") this.refreshTrees(cx, true);
+    if (mine && now != null) { const [o, rel] = this.own(st, now), k = `${o.root}|${rel}`; this.revealInTree(k, cx); this.treeScrollTo = k; }
+    if (gone != null) this.followTabs(st, gone, to, cx);
+    cx.notify();
+  }
+
+  /**
+   * One root's tree after a file operation: open folders follow a renamed folder, a deleted one's
+   * listings go, and the folders that changed are read again (filetree.relistAfter: their parents,
+   * and a renamed open folder and its open subfolders, which have no listing at their new path): from
+   * disk in a plain folder or a folder git doesn't list, else refilled from the repo's file list.
+   */
+  treeAfterOp(st, { gone, to, now, made }, cx) {
+    const R = this.rootTree(st);
     const follow = (set) => { for (const k of [...set]) if (within(k, gone)) { set.delete(k); const n = to != null ? remap(k, gone, to) : null; if (n) set.add(n); } };
     if (gone != null) {
       follow(R.tree.open);
@@ -2179,18 +2488,11 @@ export default class Review extends View {
       if (R.made) follow(R.made);
       R.ver++;
     }
-    if (!st.plain && op.made?.length) { R.made ??= new Set(); for (const m of op.made) R.made.add(m); }
-    // The folders that changed: listed again from disk, or refilled from the index (with made folders).
-    const dirs = new Set([gone != null ? parentOf(gone) : null, now != null ? parentOf(now) : null, ...(op.made ?? []).map(parentOf)].filter((d) => d != null));
-    for (const d of dirs) {
-      if (d && !R.tree.open.has(d)) continue;
+    if (!st.plain && made?.length) { R.made ??= new Set(); for (const m of made) R.made.add(m); }
+    for (const d of relistAfter(R.tree, { gone, now, made })) {
       if (st.plain || this.onDisk(R, d)) this.queueList(st, d, cx);
       else if (R.index) this.fillIndexed(R, d);
     }
-    if (this.mode === "edit") this.refreshTrees(cx, true);
-    if (mine && now != null) { const k = `${st.root}|${now}`; this.revealInTree(k, cx); this.treeScrollTo = k; }
-    if (gone != null) this.followTabs(st, gone, to, cx);
-    cx.notify();
   }
 
   /** Tabs after `gone` (a file or folder) was deleted, or renamed to `to`. */
@@ -2212,8 +2514,9 @@ export default class Review extends View {
     if (this.mode !== "edit" || !reopen.length) return;
     cx.spawn(async (cx) => {
       for (const r of reopen) {
-        const key = `${st.root}|${r.rel}`;
-        if (!this.files.some((f) => f.key === key)) { const g = await this.loadPlain(st, r.rel, cx); if (!this.files.some((f) => f.key === key)) this.files.push(g); }
+        // Renamed into another root of the space (P1): it reopens as that root's file.
+        const [o, rel] = this.own(st, r.rel), key = `${o.root}|${rel}`;
+        if (!this.files.some((f) => f.key === key)) { const g = await this.loadPlain(o, rel, cx); if (!this.files.some((f) => f.key === key)) this.files.push(g); }
         if (!this.opened.includes(key)) this.opened.push(key);
         if (r.sel) this.pick(key, cx);
       }
@@ -2367,6 +2670,7 @@ export default class Review extends View {
       this.cur = this.anchor = null; this.hx = 0;
     }
     this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); cx.notify();
+    if (this.mode === "changes") this.loadCommitted(this.file(), cx); // a committed file's texts load when it's first picked
   }
 
   // ---- actions -------------------------------------------------------------
@@ -2454,6 +2758,7 @@ export default class Review extends View {
 
   enqueue(job, cx) {
     this.writing++;
+    const space = this.spaceId; // the job's space, which may no longer be shown when it ends (P7)
     // Each job runs in its own spawned task: a handler's cx is dead after the handler
     // returns, so the queue must never hold one across an await.
     const prev = this.queue;
@@ -2461,7 +2766,8 @@ export default class Review extends View {
       try { await prev; await job(); }
       catch (e) {
         // Disk no longer matches memory: drop undo (it would act on stale state) and reread everything.
-        this.error = String(e.message ?? e); this.history = []; this.deferred.add("*");
+        const s = this.stateOf(space);
+        if (s) { s.error = String(e.message ?? e); s.history = []; (s.deferred ??= new Set()).add("*"); }
       } finally {
         this.writing--; done();
         if (!this.writing && this.deferred.size) await this.drain(cx);
@@ -2678,7 +2984,7 @@ export default class Review extends View {
   // The diff rows are the editor: the cursor sits in the current file (context and added
   // lines), removed lines are read-only. Edits change memory at once; ctrl-s writes them.
 
-  editable(f) { return !!f && !f.error && f.Ctext !== null; }
+  editable(f) { return !!f && !f.error && typeof f.Ctext === "string"; }
 
   /** Panel split: the Review copy keeps no unsaved text. */
   readOnly(cx) {
@@ -3324,7 +3630,7 @@ export default class Review extends View {
     }[k];
     if (go) { go(); return true; }
     const id = this.kIdx.pane.get(k);
-    if (id) { this.searchFocus = false; this.runAction(id, cx); }
+    if (id) this.act(id, cx);
     return true;
   }
 
@@ -3368,7 +3674,9 @@ export default class Review extends View {
       cx.notify(); return;
     }
     s.busy = true; s.note = { text: "Replacing…", error: false }; cx.notify();
-    const out = { n: 0, files: 0, skipped: [] };
+    // The job holds its own files and stores, and `s` is its space's Search state: a space switch
+    // meanwhile neither waits for it nor gets its note (P7).
+    const out = { n: 0, files: 0, skipped: [] }, space = this.spaceId;
     this.enqueue(async () => {
       const notes = [], indexes = new Map();
       for (const rf of files) {
@@ -3386,7 +3694,7 @@ export default class Review extends View {
           try { for (const w of res.writes) applied.push(await st.apply(f, w)); }
           catch (e) { if (applied.length) await st.undo(applied).catch(() => {}); throw e; } // file and baseline go together
           notes.push(...res.writes.map((w) => this.editNote(f, w)).filter(Boolean));
-          this.deferred.add(norm(f.path)); // open copies reload once the queue is done
+          this.stateOf(space)?.deferred?.add(norm(f.path)); // open copies reload once the queue is done
           out.n += p.count; out.files++;
         } catch (e) {
           const msg = String(e?.message ?? e);
@@ -3522,12 +3830,14 @@ export default class Review extends View {
     const notes = writes.map((w) => this.editNote(f, w)).filter(Boolean);
     this.replace(f, { ...f, diskC: f.Ctext, diskB: f.Btext });
     cx.notify();
+    const space = this.spaceId;
     this.enqueue(async () => {
       let done = 0;
       try { for (const w of writes) { await f.store.apply(f, w); done++; } await this.sendEditNotes(notes); }
       catch (e) {
-        // Memory still holds the edits: whatever didn't reach disk counts as unsaved again.
-        const g = this.files.find((x) => x.key === f.key);
+        // Memory still holds the edits: whatever didn't reach disk counts as unsaved again (in the
+        // file's own space, which may not be the one shown now).
+        const g = this.stateOf(space)?.files?.find((x) => x.key === f.key);
         if (g) for (const w of writes.slice(done)) g[w.target === "baseline" ? "diskB" : "diskC"] = w.before;
         throw e;
       }
@@ -3578,7 +3888,34 @@ export default class Review extends View {
   /** The first key bound to an action, for buttons and menus ("" when it has none). */
   kl(id) { return keyLabel(this.keymap.get(id)?.[0]); }
 
-  /** Runs one action by id (a key, a "mod:wingman" binding, or a command). */
+  /** What has the keyboard, for allowedIn (keymap.js): a box (by kind), Search's results, the tree, else the editor. */
+  focusKind() {
+    const b = this.inBar;
+    if (b) return b === this.quickInput ? "quick" : b === this.commitInput ? "commit" : b === this.pathInput ? "path"
+      : b === this.treeInput ? "treeName" : this.searchInputs?.includes(b) ? "search" : "find";
+    return this.searchFocus ? "results" : this.treeFocus ? "tree" : "editor";
+  }
+
+  /**
+   * Runs action `id` if what has the keyboard allows it (allowedIn), the same for a key and for a
+   * Herdr command: a box that has the keyboard keeps actions off the file and tree behind it. In a
+   * Search box its find keys toggle Search's options; in Quick Open its key moves down the list.
+   */
+  act(id, cx) {
+    const focus = this.focusKind();
+    if (!allowedIn(id, focus)) return false;
+    if (focus === "search") {
+      const flag = { findCase: "cased", findWord: "word", findRegex: "regex" }[id];
+      if (flag) this.searchFlag(flag, cx); else if (id === "replaceAll") this.askReplaceAll(cx);
+      return true;
+    }
+    if (focus === "quick") { this.moveQuick(1, cx); return true; }
+    if (focus === "results") this.searchFocus = false; // the action has the keyboard back in the editor
+    this.runAction(id, cx);
+    return true;
+  }
+
+  /** Runs one action by id (a key, a "mod:wingman" binding, or a command); act checks the focus first. */
   runAction(id, cx) {
     const f = this.file();
     const go = {
@@ -3599,9 +3936,10 @@ export default class Review extends View {
       findNext: () => this.findStep(1, cx), findPrev: () => this.findStep(-1, cx),
       findCase: () => this.findFlag("cased", cx), findWord: () => this.findFlag("word", cx), findRegex: () => this.findFlag("regex", cx),
       replaceAll: () => this.replaceAll(cx), searchFiles: () => this.openSearch(cx),
-      // Only while the tree has the keyboard: Delete in the editor deletes text.
-      renameItem: () => { if (this.treeFocus && this.treeCur) this.startTreeEdit("rename", this.treeCur, cx); },
-      deleteItem: () => { if (this.treeFocus && this.treeCur) this.askTreeDelete(this.treeCur, cx); },
+      // Only while the tree has the keyboard (Delete in the editor deletes text), and never while a
+      // name box is open: F2 there would start the rename again and drop what was typed.
+      renameItem: () => { if (this.treeFocus && this.treeCur && !this.treeEdit && !this.inBar) this.startTreeEdit("rename", this.treeCur, cx); },
+      deleteItem: () => { if (this.treeFocus && this.treeCur && !this.treeEdit && !this.inBar) this.askTreeDelete(this.treeCur, cx); },
     }[id];
     go?.();
   }
@@ -3639,8 +3977,8 @@ export default class Review extends View {
     // The find bar has the keyboard: Esc, the bar's own actions, and switching between find, replace and line.
     if (this.inBar) {
       if (k === "escape") { this.closeFind(cx); return done(); }
-      const id = this.kIdx.find.get(k) ?? (["find", "replace", "goToLine"].includes(this.kIdx.pane.get(k)) ? this.kIdx.pane.get(k) : null);
-      if (id) { this.runAction(id, cx); done(); }
+      const id = this.kIdx.find.get(k) ?? this.kIdx.pane.get(k);
+      if (id && this.act(id, cx)) done();
       return;
     }
     if (this.searchFocus && this.resultsKey(k, cx)) return done();
@@ -3766,7 +4104,7 @@ export default class Review extends View {
   openMenu(ev, cx) {
     const f = this.file(), i = this.rowAt(ev.local_position?.y ?? -1);
     if (!f || i < 0) return;
-    this.handle.focus();
+    this.handle.focus(); this.treeFocus = false; this.searchFocus = false; // a right-click in the file gives it the keyboard
     const r = this.rowsOf(f)[i], inHunk = r.hunk != null, sel = this.selection(f), hasSel = !!sel;
     if (inHunk) this.current = r.hunk;
     // With changed lines selected, Accept/Reject act on those lines only; otherwise on the hunk.
@@ -4089,8 +4427,8 @@ export default class Review extends View {
         .child(div().flex_1().child(f?.conflict?.theirs ? "The agent changed the same lines you're editing." : "The file was deleted while you were editing it."))
         .child(this.button("ours", "Keep mine", t.raised, (cx) => this.resolve("ours", cx)))
         .child(this.button("theirs", f?.conflict?.theirs ? "Take agent's" : "Drop my edits", t.ansi1 + "55", (cx) => this.resolve("theirs", cx)))))
-      .when(!!(this.error || this.status || !f), (e) => e.child(h_flex().px(12).py(6).gap(10).items_center().text_size(12)
-        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? this.status ?? (picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
+      .when(!!(this.error || this.status || !f || f?.lazy), (e) => e.child(h_flex().px(12).py(6).gap(10).items_center().text_size(12)
+        .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? this.status ?? (f?.lazy ? `Loading ${f.rel}…` : picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
         .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
         .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; cx.notify(); })

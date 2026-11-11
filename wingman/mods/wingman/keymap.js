@@ -82,6 +82,34 @@ export function index(keymap, scope) {
   return out;
 }
 
+// Pane actions that change the open file's text or its review: never while the tree has the keyboard.
+const CHANGES_FILE = new Set(["accept", "reject", "acceptFile", "rejectFile", "undo", "redo"]);
+const FIND_BAR = new Set(["find", "replace", "goToLine", "findNext", "findPrev"]);
+const SEARCH_BOX = new Set(["findCase", "findWord", "findRegex", "replaceAll", "searchFiles"]);
+
+/**
+ * Whether action `id` may run while `focus` has the keyboard, whether it came as a key or as a
+ * Herdr command (keys.json's "mod:wingman" section sends Herdr's global keys as commands, past the
+ * pane's own key handling). focus: "editor" (the file, or nothing in particular), "tree" (a tree row
+ * was clicked), "results" (Search's results), "find" (the find, replace or go-to-line box), "search"
+ * (a Search box), "quick" (Quick Open), "treeName" (the tree's name box), "commit" (the commit
+ * message), "path" (Add repo's path box). A box that has the keyboard keeps every action off the
+ * file and tree behind it, except its own.
+ */
+export function allowedIn(id, focus) {
+  const a = BY_ID.get(id);
+  if (!a) return false;
+  switch (focus) {
+    case "editor": return true;
+    case "tree": return a.scope === "tree" || (a.scope === "pane" && !CHANGES_FILE.has(id));
+    case "results": return a.scope === "pane";
+    case "find": return a.scope === "find" || FIND_BAR.has(id);
+    case "search": return SEARCH_BOX.has(id);
+    case "quick": return id === "quickOpen";
+    default: return false; // treeName, commit, path: the box types its own keys
+  }
+}
+
 /** The other actions bound to `key`. */
 export function holders(keymap, key, except) {
   return ACTIONS.filter((a) => a.id !== except && (keymap.get(a.id) ?? []).includes(key)).map((a) => a.id);

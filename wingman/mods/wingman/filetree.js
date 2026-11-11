@@ -50,6 +50,53 @@ export function reveal(tree, rel) {
   return need;
 }
 
+/**
+ * The folders to read again after a file operation, once the tree's open folders have followed it
+ * (`gone`: the path deleted or renamed away, `now`: the path added or renamed to, `made`: folders it
+ * made; each null or absent when not part of it): the folders that held `gone` and now hold `now`
+ * and the made ones (the root, or open ones: a closed folder is read when it's opened), and every
+ * open folder at or under `now` that has no listing (a renamed open folder and its open subfolders,
+ * which would show "Loading…" for good otherwise). Outermost first, no repeats.
+ */
+export function relistAfter(tree, { gone = null, now = null, made = [] } = {}) {
+  const parent = (rel) => (rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "");
+  const out = new Set();
+  for (const d of [gone != null ? parent(gone) : null, now != null ? parent(now) : null, ...(made ?? []).map(parent)])
+    if (d != null && (d === "" || tree.open.has(d))) out.add(d);
+  if (now != null) for (const k of tree.open) if ((k === now || k.startsWith(`${now}/`)) && !tree.entries.has(k)) out.add(k);
+  return [...out].sort((a, b) => depthOf(a) - depthOf(b) || byName(a, b));
+}
+
+/**
+ * Keyboard movement in the Explorer, VS Code's way. `items`: the visible rows in order, each
+ * { depth, dir, open } (a root header has depth -1); `at`: the selected row's index (-1: none);
+ * `key`: up, down, home, end, left, right. Returns { at, toggle }: the row to select, and whether
+ * that row's folder opens or closes instead of moving. Right on a closed folder opens it, on an open
+ * one moves to its first child; Left on an open folder closes it, else moves to the folder above.
+ */
+export function navMove(items, at, key) {
+  const n = items.length;
+  if (!n) return { at: -1, toggle: false };
+  if (at < 0 || at >= n) return { at: key === "end" || key === "up" ? n - 1 : 0, toggle: false };
+  const it = items[at];
+  switch (key) {
+    case "up": return { at: Math.max(0, at - 1), toggle: false };
+    case "down": return { at: Math.min(n - 1, at + 1), toggle: false };
+    case "home": return { at: 0, toggle: false };
+    case "end": return { at: n - 1, toggle: false };
+    case "right":
+      if (!it.dir) return { at, toggle: false };
+      if (!it.open) return { at, toggle: true };
+      return { at: at + 1 < n && items[at + 1].depth > it.depth ? at + 1 : at, toggle: false };
+    case "left": {
+      if (it.dir && it.open) return { at, toggle: true };
+      for (let i = at - 1; i >= 0; i--) if (items[i].depth < it.depth) return { at: i, toggle: false };
+      return { at, toggle: false };
+    }
+  }
+  return { at, toggle: false };
+}
+
 /** Folder paths that are loaded (root and open ones), outermost first: what a refresh re-lists. */
 export function loaded(tree) {
   return [...tree.entries.keys()].filter((k) => k === "" || tree.open.has(k)).sort((a, b) => depthOf(a) - depthOf(b) || byName(a, b));
