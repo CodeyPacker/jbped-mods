@@ -91,3 +91,13 @@ test("duplicate ids and bad runners are errors", () => {
   assert.ok(r.errors.some((e) => /runner/.test(e)));
   assert.ok(r.errors.some((e) => /used twice/.test(e)));
 });
+
+test("notifications default to on every 5 minutes, and bad values are reported", () => {
+  assert.deepEqual(parse(good).profile.notifications, { enabled: true, minutes: 5 });
+  const p = (n) => parse({ profiles: { p: { notifications: n } } });
+  assert.deepEqual(p({ enabled: false, minutes: 15 }).profile.notifications, { enabled: false, minutes: 15 });
+  assert.deepEqual(p({ minutes: 60 }).profile.notifications, { enabled: true, minutes: 60 });
+  for (const bad of [{ minutes: 0 }, { minutes: 61 }, { minutes: 2.5 }, { minutes: "5" }, { enabled: "yes" }, []]) {
+    assert.deepEqual(p(bad).errors, ['profiles.p.notifications: { "enabled": true | false, "minutes": 1..60 }'], JSON.stringify(bad));
+  }
+});

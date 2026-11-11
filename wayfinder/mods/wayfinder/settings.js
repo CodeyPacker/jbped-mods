@@ -96,6 +96,19 @@ export function toggleRepo(raw, profileName, accountId, repo) {
   });
 }
 
+// Background checks (#1): { enabled, minutes }, only the given fields written. At the defaults
+// (enabled, every 5 minutes) the object goes. Checking the values is parseConfig's job.
+export const NOTIFY_DEFAULTS = { enabled: true, minutes: 5 };
+export function setNotifications(raw, profileName, { enabled, minutes } = {}) {
+  return edit(raw, profileName, (p) => {
+    const n = { ...(p.notifications ?? {}) };
+    if (enabled !== undefined) n.enabled = enabled;
+    if (minutes !== undefined) n.minutes = minutes;
+    if ((n.enabled ?? NOTIFY_DEFAULTS.enabled) === NOTIFY_DEFAULTS.enabled && (n.minutes ?? NOTIFY_DEFAULTS.minutes) === NOTIFY_DEFAULTS.minutes && Object.keys(n).every((k) => k in NOTIFY_DEFAULTS)) delete p.notifications;
+    else p.notifications = n;
+  });
+}
+
 // Repos to list for a search: ticked ones first, then up to `limit` matches.
 export function repoRows(all, ticked, query, limit = 50) {
   const q = String(query ?? "").trim().toLowerCase();

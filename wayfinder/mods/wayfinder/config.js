@@ -96,7 +96,12 @@ function checkProfile(name, p, platform, errors) {
     }
     errors.push(...templateErrors(b.launch, `${where}.launch`));
   });
-  return { name, runner, accounts, repos, boards };
+  const n = p.notifications ?? {};
+  if (!isObj(n) || (n.enabled != null && typeof n.enabled !== "boolean") || (n.minutes != null && !(Number.isInteger(n.minutes) && n.minutes >= 1 && n.minutes <= 60))) {
+    errors.push(`${at}.notifications: { "enabled": true | false, "minutes": 1..60 }`);
+  }
+  const notifications = { enabled: isObj(n) && typeof n.enabled === "boolean" ? n.enabled : true, minutes: isObj(n) && Number.isInteger(n.minutes) && n.minutes >= 1 && n.minutes <= 60 ? n.minutes : 5 };
+  return { name, runner, accounts, repos, boards, notifications };
 }
 
 // Returns { config, profile, errors }. `profile` is the active one, normalized; null when errors.

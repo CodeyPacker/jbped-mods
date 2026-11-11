@@ -152,3 +152,18 @@ test("a rename moves each Provider's per-Profile data once, with names as argv",
   await renameProfileData({ name: "work", accounts: [{ provider: "az" }, { provider: "az" }, { provider: "gh" }] }, "office", {}, registry);
   assert.deepEqual(calls, [["work", "office"]]);
 });
+
+test("setNotifications writes only the given fields and drops the object at the defaults", () => {
+  const r1 = e.setNotifications(raw(), "work", { enabled: false });
+  assert.deepEqual(r1.profiles.work.notifications, { enabled: false });
+  valid(r1);
+  const r2 = e.setNotifications(r1, "work", { minutes: 10 });
+  assert.deepEqual(r2.profiles.work.notifications, { enabled: false, minutes: 10 });
+  assert.deepEqual(parseConfig(JSON.stringify(r2), "linux").profile.notifications, { enabled: false, minutes: 10 });
+  const r3 = e.setNotifications(e.setNotifications(r2, "work", { enabled: true }), "work", { minutes: 5 });
+  assert.equal("notifications" in r3.profiles.work, false);
+  assert.equal("notifications" in r2.profiles.home, false);
+  assert.deepEqual(r1.profiles.work.notifications, { enabled: false }); // the input is untouched
+  assert.equal(parseConfig(JSON.stringify(e.setNotifications(raw(), "work", { minutes: 0 })), "linux").errors.length, 1);
+  assert.throws(() => e.setNotifications(raw(), "nope", { enabled: false }), /No profile/);
+});

@@ -13,6 +13,7 @@ import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInS
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
+import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
@@ -230,6 +231,9 @@ export default class Wayfinder extends View {
       repos: {},
     };
     this.renaming = null; // { name, input }: the Profile being renamed
+    this.signInToasted = new Set(); // account ids already toasted for sign-in this session
+    this.lastBackground = null;
+    this.pendingView = null; // { view, boardId, until }: where the last toast's click lands
     this.reload(cx);
     // Reads the layout only (due() gates requests), often enough that a show from anywhere is noticed.
     // Redraws on a show, and once a minute while shown (the "Updated" age).
@@ -249,6 +253,31 @@ export default class Wayfinder extends View {
         cx.notify();
       }
     });
+    cx.timer.every(60_000, (cx) => this.backgroundTick(cx));
+  }
+
+  // The exception to "never while hidden": every notifications.minutes, shown or hidden, the Pull Requests
+  // and every followed Board refresh so their diffs can toast. Skipped when a foreground refresh ran
+  // within the window, so a shown Wayfinder doesn't fetch twice.
+  backgroundTick(cx) {
+    if (this.state.status !== "ok" || !this.profile.notifications.enabled) return;
+    const span = this.profile.notifications.minutes * 60000, now = Date.now();
+    if (now - (this.lastBackground ?? 0) < span) return;
+    if (this.lastRefresh != null && now - this.lastRefresh < span) return;
+    this.lastBackground = now;
+    this.checkSignIn(cx, { toast: true });
+    this.fetchPrs(cx);
+    for (const b of this.profile.boards) this.fetchBoard(b, cx);
+  }
+
+  // Toasts unless Wayfinder is shown on the toast's own view. A click runs the toggle and lands on pendingView.
+  announce(toasts, cx) {
+    const shown = toasts.length ? this.shownNow() : false;
+    for (const x of toasts) {
+      if (shown && ((x.view === "prs" && this.view === "prs") || (x.view === "board" && this.view === "board" && this.board?.id === x.boardId))) continue;
+      notify({ title: x.title, body: x.body, level: "info", icon: "mods/wayfinder/wayfinder.svg", timeout: 12000, action: { name: "tabs-plus.wayfinder" } });
+      this.pendingView = { view: x.view, boardId: x.boardId, until: Date.now() + 120000 };
+    }
   }
 
   get fullscreen() { return Boolean(shared(FULL_KEY)); }
@@ -274,11 +303,19 @@ export default class Wayfinder extends View {
 
   shownNow() { return isShown(layout(), (n) => n.content?.mod === "wayfinder"); }
 
-  // Refreshes on show and every POLL_MS while shown. Never while hidden (D25). True when shown.
+  // Refreshes on show and every POLL_MS while shown. Never while hidden (D25), except backgroundTick. True when shown.
   watch(cx) {
     if (!this.shownNow()) { this.hidden = true; return false; }
     const showing = this.hidden;
     this.hidden = false;
+    if (showing && this.pendingView) {
+      const pv = this.pendingView;
+      this.pendingView = null;
+      if (pv.until > Date.now() && this.profile) {
+        this.showView(pv.view, cx);
+        if (pv.view === "board" && this.profile.boards.some((x) => x.id === pv.boardId)) this.selectBoard(pv.boardId, cx);
+      }
+    }
     if (this.profile && due(this.lastRefresh, Date.now(), { showing })) this.refresh(cx);
     return true;
   }
@@ -372,6 +409,7 @@ export default class Wayfinder extends View {
     this.statusLists = {};
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     this.lastRefresh = null;
+    this.pendingView = null; // signInToasted and lastBackground stay
     if (this.selected) this.fetchTicketLater = true;
     if (this.selectedPr) this.fetchPrLater = true;
     cx.spawn(async (cx) => {
@@ -435,6 +473,9 @@ export default class Wayfinder extends View {
           data = { ...data, tickets: data.tickets.map((x) => (x === tk ? { ...x, columnId: moved.columnId, status: moved.status } : x)) };
         } else delete this.movedRecently[b.id];
       }
+      if (profile.notifications.enabled) {
+        this.announce(toastsFor(newItems({ prevPrs: null, nextPrs: null, prevBoards: { [b.id]: this.boards[b.id]?.data ?? null }, nextBoards: { [b.id]: data } })), cx);
+      }
       this.boards[b.id] = { status: "ok", data, at, tried };
       this.clampCursor(b, data);
       cx.notify();
@@ -461,6 +502,9 @@ export default class Wayfinder extends View {
       const data = await loadPullRequests(profile, io);
       if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
       const at = Date.now();
+      if (profile.notifications.enabled) {
+        this.announce(toastsFor(newItems({ prevPrs: this.prs?.data ?? null, nextPrs: data, prevBoards: {}, nextBoards: {} })), cx);
+      }
       this.prs = { status: "ok", data, at, tried };
       cx.notify();
       await this.saveCache(profile, (c) => withPrs(c, prsKey(profile.accounts), data, at));
@@ -487,12 +531,20 @@ export default class Wayfinder extends View {
     }
   }
 
-  checkSignIn(cx) {
+  // `toast`: the background path only. One warning per Account per session; the panel's card covers the rest.
+  checkSignIn(cx, { toast = false } = {}) {
     const profile = this.profile, io = this.io();
     cx.spawn(async (cx) => {
       const states = await signInStates(profile, io);
       if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
       this.signIn = states;
+      if (toast) {
+        for (const [id, st] of Object.entries(states ?? {})) {
+          if (st?.ok !== false || this.signInToasted.has(id)) continue;
+          this.signInToasted.add(id);
+          notify({ title: "Wayfinder: sign in needed", body: `${id}: ${st.reason}`, level: "warning", icon: "mods/wayfinder/wayfinder.svg", timeout: 12000, action: { name: "tabs-plus.wayfinder" } });
+        }
+      }
       cx.notify();
     });
   }
@@ -819,9 +871,9 @@ export default class Wayfinder extends View {
     const names = s.profileNames ?? [];
     out.push(heading("Profiles"), note("Each Profile is a separate set of Accounts and Boards. Wayfinder shows one at a time, and the switcher lists them in this order."));
     out.push(card("wf-set-profiles", [
-      ...names.map((n, i) => {
+      ...names.flatMap((n, i) => {
         const renaming = this.renaming?.name === n;
-        return h_flex().id(`wf-set-p-${n}`).gap(6).items_center()
+        const row = h_flex().id(`wf-set-p-${n}`).gap(6).items_center()
           .when(renaming, (el) => el.child(field(this.renaming.input, t, 200))
             .child(button(`wf-ren-ok-${n}`, "Save", t, (cx) => this.finishRename(cx), { on: true }))
             .child(button(`wf-ren-no-${n}`, "Cancel", t, (cx) => { this.renaming = null; cx.notify(); }))
@@ -832,6 +884,10 @@ export default class Wayfinder extends View {
           .child(button(`wf-pu-${n}`, "↑", t, (cx) => this.saveConfig((raw) => edits.moveProfile(raw, n, -1), cx)))
           .child(button(`wf-pd-${n}`, "↓", t, (cx) => this.saveConfig((raw) => edits.moveProfile(raw, n, 1), cx)))
           .when(names.length > 1, (el) => el.child(this.removeButton(`profile-${n}`, t, (cx) => this.saveConfig((raw) => edits.removeProfile(raw, n), cx))));
+        if (n !== p?.name) return [row];
+        return [row, h_flex().child(checkRow("wf-notify", p.notifications.enabled,
+          `Background checks every ${p.notifications.minutes} min with toasts for new reviews and assignments`, t,
+          (cx) => this.saveConfig((raw) => edits.setNotifications(raw, p.name, { enabled: !p.notifications.enabled }), cx)))];
       }),
       h_flex().gap(8).items_center().child(field(this.inputs.profile, t, 200))
         .child(button("wf-add-profile", "Add profile", t, (cx) => {
