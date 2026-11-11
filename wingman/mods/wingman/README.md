@@ -134,6 +134,7 @@ Wingman finds a space's repos from its terminals' folders and from the files the
 | Comment on the selected lines, else the current change | `ctrl-m` (or the change's Comment button) |
 | Quick Open | `ctrl-p`: find a file by name across the space's repos (fuzzy, as in VS Code). `name:12` or `name:12:5` opens it at that line; `:12` goes to a line in the current file. With no query it lists recent and changed files. Up and down choose, Tab fills in the chosen path (then add `:line`), Enter opens, Esc closes. |
 | Comment on the last rejection | `ctrl-r` (or the header's Comment last rejection) |
+| Search in files | `ctrl-shift-f`: the Edit tab's Search, with a one-line selection as the query (see Search) |
 
 ## Views
 
@@ -163,6 +164,7 @@ The diff is also an editor. Click in the text to place the cursor and type. Your
 | Find | `ctrl-f` (a one-line selection becomes the query). Enter / Shift+Enter or `f3` / `shift-f3` for the next and previous match. `alt-c` case, `alt-w` whole word, `alt-r` regular expression. Esc closes. |
 | Replace | `ctrl-h`. Enter replaces the current match and moves on; `ctrl-enter` in the replace box, `ctrl-alt-enter` or All replaces every match as one undo step. With regular expressions, `$1` and the like insert groups. |
 | Go to line | `ctrl-g`, then a line or `line:column` |
+| Bracket matching | with the cursor next to `(` `)` `[` `]` `{` `}`, both brackets of the pair get a box. Brackets in strings and comments don't count. None while text is selected. |
 | Save | `ctrl-s` |
 | Undo / redo | `ctrl-z` / `ctrl-shift-y` (one history with accept and reject; redo is for edits) |
 | Scroll sideways | Shift+wheel |
@@ -180,6 +182,17 @@ Line operations act on the cursor's line or every line a text selection covers, 
 Every line operation is also a command for other keys: `wingman.moveLineUp`, `wingman.moveLineDown`, `wingman.copyLineUp`, `wingman.copyLineDown`, `wingman.deleteLine`, `wingman.joinLines` and `wingman.toggleComment`.
 
 Comment, Accept and Reject act on the lines a text selection covers. Clicking the line numbers still selects whole lines. Not supported: input methods that compose characters (Chinese, Japanese, Korean), and wide characters or emoji, which put the cursor in the wrong column.
+
+## Search
+
+`ctrl-shift-f` (or **Search** at the top of the Edit tab's left column, beside **Explorer**) searches the files of every git repo in the space, on another machine too, as `git grep` sees them: tracked and untracked files, not ignored or binary ones. Plain folders aren't searched. From Review or Changes it switches to the Edit tab. A one-line text selection becomes the query.
+
+- Typing searches once you pause (from 2 characters), and Enter searches at once. `alt-c`, `alt-w` and `alt-r` (or **Aa**, **W**, **.\***) toggle match case, whole word and regular expression. Esc gives the keyboard back to the editor and keeps Search open.
+- ▸ beside the box shows **Replace**, **files to include** and **files to exclude**: globs separated by commas, such as `src/**, *.ts`. A glob without a `/` matches at any depth, and a folder matches everything in it.
+- Regular expressions are the subset that git and JavaScript read alike: classes, groups, alternation, quantifiers, anchors, `\b`, `\d \w \s` and their capitals. Lookarounds, lazy quantifiers, backreferences in the query and searches across lines are refused with a message.
+- Results are grouped by file (with the repo first when the space has several), at most 2,000. Click a file to fold it. Click a match, or Down from the box, then Up/Down and Enter, to open the file at that match with it selected. Left and Right fold and unfold. While the results have the keyboard, typing doesn't reach the editor: Enter, Esc or a click in the editor gives it back.
+- With text in **Replace**, each match shows its replacement (`$1`, `$&` and the like insert groups in regex mode) and **Replace All** appears. It asks first ("Replace 12 occurrences in 4 files?"), then rewrites only the lines the results list, from each file as it is on disk then. A file under review is changed the way a saved edit of yours is: on unchanged lines the review baseline takes the same edit, inside the agent's added lines the change stays pending, and the agent gets the edit note. Each write is compare-and-swap: a file changed since it was read is skipped and named. Files with unsaved edits in any Wingman tab block it until they're saved or discarded. Files on other machines are left out, since saving there isn't built yet. Afterwards open files reload and the search runs again. Replace All is not undoable from Wingman.
+- Each space keeps its own query, options, results and which mode the left column shows.
 
 ## Neovim as the editor
 

@@ -8,6 +8,8 @@ for (const sc of ["edit", "pane", "find"]) {
 }
 const km = K.resolve({});
 assert.equal(K.index(km, "edit").get("ctrl-j"), "joinLines");
+assert.equal(K.index(km, "pane").get("ctrl-shift-f"), "searchFiles");
+assert.deepEqual(K.holders(km, "ctrl-shift-f", "searchFiles"), []);
 let o = K.bind({}, km, "joinLines", "ctrl-l");
 assert.deepEqual(o, { joinLines: ["ctrl-j", "ctrl-l"] });
 // moving a key from another action

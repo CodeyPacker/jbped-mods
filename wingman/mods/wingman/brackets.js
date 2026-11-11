@@ -54,3 +54,30 @@ export function matchBracket(lines, pos, { skip = null, maxLines = 2000 } = {}) 
   }
   return null;
 }
+
+// Highlighter token types whose brackets don't count: strings and comments.
+const QUIET = new Set(["string", "char", "regex", "comment", "prolog", "doctype", "cdata"]);
+
+/**
+ * A `skip(line, col)` for matchBracket from the highlighter's per-line spans ([{ text, type }] per
+ * line, highlight.js). A line's ranges are worked out once, when the scan first reaches it. A line
+ * whose spans don't add up to its text (`lines` given, tokens not yet redone after an edit) hides nothing.
+ */
+export function tokenSkip(tokens, lines = null) {
+  const cache = new Map();
+  const rangesOf = (line) => {
+    let r = cache.get(line);
+    if (r) return r;
+    r = [];
+    let at = 0;
+    for (const s of tokens?.[line] ?? []) {
+      const end = at + s.text.length;
+      if (QUIET.has(s.type)) r.push([at, end]);
+      at = end;
+    }
+    if (lines && at !== (lines[line] ?? "").replace(/\r?\n$/, "").length) r = [];
+    cache.set(line, r);
+    return r;
+  };
+  return (line, col) => rangesOf(line).some(([a, b]) => col >= a && col < b);
+}

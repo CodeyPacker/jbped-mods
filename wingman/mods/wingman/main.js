@@ -31,12 +31,22 @@ import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, 
 import { splitLines } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome, pathFor } from "./workspace.js";
 import { REMOTE, REVIEW_NOTE, NVIM_NOTE, EDITOR_NOTE, WORKTREE_NOTE, readOnlyNote, remotePath, rootId, idOf, mapLimit } from "./remote.js";
+import { grepArgs, searchRepo, replacePlan } from "./search.js";
+import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
+import { matchBracket, tokenSkip } from "./brackets.js";
 import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys } from "./journal.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
 // Agents count as working while they are in a turn, including while blocked on a question.
 const ACTIVE = new Set(["working", "blocked"]);
 const base = (p) => p.split("/").pop();
+const SROW = 22; // a Search result row's height
+
+/** A space's Search view state (the Edit tab's left column): kept per space like the rest of the view. */
+function newSearch() {
+  return { left: "explorer", query: "", include: "", exclude: "", replace: "", opts: { cased: false, word: false, regex: false }, more: false,
+    results: null, running: false, seq: 0, collapsed: new Set(), shutVer: 0, sel: null, confirm: false, note: null, busy: false };
+}
 
 /** A path as the agent in `terminal` sees it: /mnt/c/... for an agent running in WSL. */
 function agentPath(path, terminal) {
@@ -183,7 +193,7 @@ export default class Review extends View {
         cx.notify();
       }
     });
-    this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new();
+    this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.searchScroll = VirtualListScrollHandle.new();
     this.initFind();
     this.views = new Map(); this.captures = new Map(); this.tokens = new Map();
     this.reset([]);
@@ -206,6 +216,7 @@ export default class Review extends View {
     this.stores = stores; this.files = []; this.sel = null; this.current = 0; this.history = [];
     this.deferred = new Set(); this.indexTexts = {}; this.error = null;
     this.cur = null; this.anchor = null; this.redo = []; this.hx = 0; this.opened = [];
+    this.search = newSearch(); this.searchFocus = false;
     this.status = stores.length ? "Loading…" : "Waiting for an agent in a git repo in this space, or open a folder.";
   }
 
@@ -225,6 +236,7 @@ export default class Review extends View {
         this.spaceId = key;
         const saved = this.views.get(key);
         if (saved) Object.assign(this, saved); else this.reset([]);
+        this.syncSearchInputs();
         cx.notify();
       }
       if (!sp) return;
@@ -256,7 +268,8 @@ export default class Review extends View {
       if (!same && this.spaceId === key) {
         const left = new Set(found), files = this.files.filter((f) => left.has(f.store));
         const keep = { sel: files.some((f) => f.key === this.sel) ? this.sel : files[0]?.key ?? null, current: this.current,
-          history: this.history.filter((h) => h.snaps ? h.snaps.every((f) => left.has(f.store)) : !h.key || files.some((f) => f.key === h.key)), opened: this.opened.filter((k) => files.some((f) => f.key === k)) };
+          history: this.history.filter((h) => h.snaps ? h.snaps.every((f) => left.has(f.store)) : !h.key || files.some((f) => f.key === h.key)), opened: this.opened.filter((k) => files.some((f) => f.key === k)),
+          search: this.search, searchFocus: this.searchFocus };
         this.reset(found);
         Object.assign(this, keep); this.files = files;
         await this.reloadAll(cx);
@@ -311,8 +324,8 @@ export default class Review extends View {
   machine() { return this.space()?.machine ?? null; }
 
   snapshotView() {
-    const { stores, files, sel, current, history, indexTexts, error, status, redo, opened } = this;
-    return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, cur: null, anchor: null, hx: 0, deferred: new Set() };
+    const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search } = this;
+    return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set() };
   }
 
   // ---- capture (leader only) -----------------------------------------------
@@ -414,7 +427,7 @@ export default class Review extends View {
     finally { c.busy = false; }
   }
 
-  close() { this.scroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) i?.release(); }
+  close() { this.scroll?.release(); this.searchScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, ...(this.searchInputs ?? [])]) i?.release(); }
 
   // ---- loading -------------------------------------------------------------
 
@@ -1085,13 +1098,13 @@ export default class Review extends View {
     return order[(order.indexOf(this.view) + 1) % order.length];
   }
 
-  /** Panel split: shows the other view's copy and hands it the current file and line. */
-  handOff(view, cx, at = null, key = null) {
-    const f = key ? null : this.file();
+  /** Panel split: shows the other view's copy and hands it the current file and line (`extra`: more for it, e.g. { search }). */
+  handOff(view, cx, at = null, key = null, extra = null) {
+    const f = key || extra ? null : this.file();
     if (this.settings.autosave) this.saveAll(cx);
     at ??= f ? this.cur ?? (f.hunks[this.current] ? { line: f.hunks[this.current].n, col: 0 } : null) : null;
     if (!showView(view)) { this.error = `This layout has no Wingman ${view === "edit" ? "Edit" : view === "changes" ? "Changes" : "Review"} panel`; cx.notify(); return; }
-    setShared(GOTO, { view, space: this.spaceId, key: key ?? f?.openKey ?? f?.key ?? null, at, stamp: Date.now() });
+    setShared(GOTO, { view, space: this.spaceId, key: key ?? f?.openKey ?? f?.key ?? null, at, ...(extra ?? {}), stamp: Date.now() });
   }
 
   /** Panel split: what the other copy handed over (GOTO) and save requests from Review (SAVE). */
@@ -1102,7 +1115,8 @@ export default class Review extends View {
       if (g.space === this.spaceId) {
         this.handle.focus();
         const i = g.key?.indexOf("|") ?? -1, store = i > 0 && this.stores.find((st) => st.root === g.key.slice(0, i));
-        if (store && this.view === "edit") cx.spawn(async (cx) => this.openFile(store, g.key.slice(i + 1), cx, g.at));
+        if (g.search && this.view === "edit") this.showSearch(g.search.query, cx);
+        else if (store && this.view === "edit") cx.spawn(async (cx) => this.openFile(store, g.key.slice(i + 1), cx, g.at));
         else if (store && this.visible().some((f) => f.key === g.key)) {
           this.pick(g.key, cx);
           const f = this.file(), line = g.at?.line ?? 0;
@@ -1637,8 +1651,8 @@ export default class Review extends View {
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.openFolder(cx)).child("+ Add repo…"));
     const panel = this.workspacePanel(t);
     if (panel) out.push(panel);
-    return v_flex().id("file-tree").h_full().py(4).overflow_y_scrollbar()
-      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(240).flex_none().border_r(1).border_color(t.border)).children(out);
+    // Its width and border come from the left column around it (renderLeft).
+    return v_flex().id("file-tree").flex_1().min_h(0).py(4).overflow_y_scrollbar().children(out);
   }
 
   // ---- scrolling -------------------------------------------------------------
@@ -1701,7 +1715,7 @@ export default class Review extends View {
   // ---- pointer: click, Shift+click, drag, right-click ------------------------
 
   pointerDown(ev, cx) {
-    this.handle.focus();
+    this.handle.focus(); this.searchFocus = false;
     const f = this.file(), x = ev.local_position?.x ?? -1, y = ev.local_position?.y ?? -1, i = this.rowAt(y);
     if (!f || i < 0) return;
     const r = this.rowsOf(f)[i];
@@ -1783,7 +1797,7 @@ export default class Review extends View {
       if (old && this.settings.autosave && this.dirty(old) && !old.conflict) this.save(cx, old);
       this.cur = this.anchor = null; this.hx = 0;
     }
-    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.reveal(); cx.notify();
+    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); cx.notify();
   }
 
   // ---- actions -------------------------------------------------------------
@@ -2386,10 +2400,11 @@ export default class Review extends View {
     this.pathInput = InputState.new({ placeholder: "A folder on that machine, e.g. /home/me/repo" });
     this.pathInput.on("submit", (_e, cx) => this.addPath(cx));
     this.qo = null; this.recent = []; // Quick Open: null, or { sel, items }; recent: file keys, newest first
+    this.initSearch();
     this.quickInput.on("change", (_e, cx) => { this.rankQuick(); cx.notify(); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
     for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) {
-      i.on("focus", () => { this.inBar = i; });
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
     }
     // Typing a query jumps to the first match from where the search started (VS Code's incremental find).
@@ -2513,6 +2528,396 @@ export default class Review extends View {
         .when(this.findOpts.regex, (e) => e.child(div().text_size(11).text_color(t.dim).child("$1, $2… insert groups")))));
   }
 
+  // ---- Search view (ctrl-shift-f) ----------------------------------------------
+  // The Edit tab's left column has two modes, Explorer (the tree) and Search: git grep over every
+  // repo of the space (search.js), results grouped by file, and Replace All. Its state is per space
+  // (this.search, kept by snapshotView); the boxes are this copy's, refilled on a space switch.
+
+  initSearch() {
+    this.searchInput = InputState.new({ placeholder: "Search" });
+    this.sReplaceInput = InputState.new({ placeholder: "Replace" });
+    this.includeInput = InputState.new({ placeholder: "e.g. src/**, *.ts" });
+    this.excludeInput = InputState.new({ placeholder: "e.g. dist, *.min.js" });
+    this.searchInputs = [this.searchInput, this.sReplaceInput, this.includeInput, this.excludeInput];
+    const fields = [["query", this.searchInput], ["replace", this.sReplaceInput], ["include", this.includeInput], ["exclude", this.excludeInput]];
+    for (const [k, i] of fields) {
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; });
+      i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
+      i.on("change", (_e, cx) => {
+        const s = this.search, v = i.value();
+        if (v === s[k]) return; // refilled on a space switch, or nothing changed
+        s[k] = v; s.confirm = false; s.note = null;
+        if (k === "replace") cx.notify(); else this.scheduleSearch(cx);
+      });
+    }
+    for (const i of [this.searchInput, this.includeInput, this.excludeInput]) i.on("submit", (_e, cx) => this.runSearch(cx));
+    this.sReplaceInput.on("submit", (e, cx) => { if (e?.secondary) this.askReplaceAll(cx); });
+  }
+
+  /** The boxes show the active space's search. */
+  syncSearchInputs() {
+    const s = this.search;
+    if (!this.searchInput || !s) return;
+    for (const [k, i] of [["query", this.searchInput], ["replace", this.sReplaceInput], ["include", this.includeInput], ["exclude", this.excludeInput]])
+      if (i.value() !== s[k]) i.set_value(s[k]);
+  }
+
+  /** Whether the Search column is on screen. */
+  searchShown() { return this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search?.left === "search"; }
+
+  /** ctrl-shift-f: the Edit tab's Search, its box taking a one-line selection as the query. Other panel copies hand off. */
+  openSearch(cx) {
+    const f = this.file();
+    let q = null;
+    if (f && this.hasTextSel()) {
+      const [a, b] = this.ordered();
+      if (a.line === b.line) q = textBetween(linesOf(f), a, b);
+    }
+    if (this.view && this.view !== "edit") return this.handOff("edit", cx, null, null, { search: { query: q } });
+    if (this.mode !== "edit") this.setMode("edit", cx);
+    this.showSearch(q, cx);
+  }
+
+  showSearch(q, cx) {
+    const s = this.search;
+    s.left = "search"; this.treeOn = true; this.searchFocus = false;
+    if (q) { s.query = q; s.note = null; this.searchInput.set_value(q); }
+    this.searchInput.focus();
+    if (q || (s.query && !s.results && !s.running)) this.runSearch(cx);
+    cx.notify();
+  }
+
+  /** The left column's switch: "explorer" or "search". */
+  setLeft(which, cx) {
+    this.search.left = which; this.searchFocus = false;
+    if (which === "search") this.searchInput.focus();
+    else { this.handle.focus(); this.refreshTrees(cx); }
+    cx.notify();
+  }
+
+  /** Typing searches 300 ms after the last key, from 2 characters; an empty box clears the results. */
+  scheduleSearch(cx) {
+    const s = this.search;
+    if (!s.query) { s.seq++; s.results = null; s.running = false; s.sel = null; cx.notify(); return; }
+    cx.notify();
+    if (s.query.length < 2) return;
+    const tick = (s.tick = (s.tick ?? 0) + 1);
+    cx.timer.after(300, (cx) => { if (s.tick === tick && this.search === s) this.runSearch(cx); });
+  }
+
+  searchFlag(k, cx) {
+    const s = this.search;
+    s.opts = { ...s.opts, [k]: !s.opts[k] }; s.confirm = false; s.note = null;
+    if (s.query) this.runSearch(cx); else cx.notify();
+  }
+
+  /** Searches every repo of the space, one after another; a newer search drops this one's results. */
+  runSearch(cx) {
+    const s = this.search, q = s.query, seq = ++s.seq;
+    s.confirm = false;
+    if (!q) { s.results = null; s.running = false; cx.notify(); return; }
+    const opts = { query: q, ...s.opts, include: s.include, exclude: s.exclude }, repos = this.repos();
+    try { grepArgs(opts); } catch (e) { s.results = { opts, files: [], total: 0, truncated: false, error: e.message }; s.running = false; cx.notify(); return; }
+    if (!repos.length) { s.results = null; s.running = false; cx.notify(); return; }
+    s.running = true; cx.notify();
+    cx.spawn(async (cx) => {
+      const files = [], errors = [];
+      let total = 0, truncated = false;
+      for (const st of repos) {
+        if (total >= MAX_RESULTS) { truncated = true; break; }
+        const r = await searchRepo(git, st.root, opts, { on: st.on ?? null, max: MAX_RESULTS - total });
+        if (s.seq !== seq) return;
+        if (r.error) { errors.push(repos.length > 1 ? `${this.repoName(st)}: ${r.error}` : r.error); continue; }
+        for (const f of r.files) files.push({ key: `${st.root}|${f.rel}`, id: idOf(st), st, rel: f.rel, matches: f.matches });
+        total += r.total; truncated ||= r.truncated;
+      }
+      s.results = { opts, files, total, truncated, error: errors[0] ?? null };
+      s.running = false; s.collapsed = new Set(); s.shutVer++;
+      cx.notify();
+    });
+  }
+
+  /** The result rows, rebuilt when the results or the collapsed files change. */
+  searchRows() {
+    const s = this.search, r = s?.results;
+    if (!r) return [];
+    if (s._rowsFor !== r || s._rowsVer !== s.shutVer) { s._rows = resultRows(r.files, s.collapsed); s._rowsFor = r; s._rowsVer = s.shutVer; }
+    return s._rows;
+  }
+
+  toggleResultFile(key, open, cx) {
+    const s = this.search, shut = s.collapsed.has(key);
+    if (open === !shut) return;
+    if (shut) s.collapsed.delete(key); else s.collapsed.add(key);
+    s.shutVer++; cx.notify();
+  }
+
+  /** Up/Down in the results; Up from the first row goes back to the search box. */
+  moveResult(by, cx) {
+    const s = this.search, rows = this.searchRows();
+    if (!rows.length) return;
+    let i = rows.findIndex((r) => r.key === s.sel);
+    i = i < 0 ? (by > 0 ? 0 : rows.length - 1) : i + by;
+    if (i < 0) { this.searchFocus = false; this.searchInput.focus(); cx.notify(); return; }
+    i = Math.min(i, rows.length - 1);
+    s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); cx.notify();
+  }
+
+  /** Left: to a match's file, then collapses it. Right: expands a file. */
+  foldResult(open, cx) {
+    const s = this.search, rows = this.searchRows(), row = rows.find((r) => r.key === s.sel);
+    if (!row) return;
+    if (row.kind === "match" && !open) {
+      s.sel = `f|${row.file.key}`;
+      const i = rows.findIndex((r) => r.key === s.sel);
+      if (i >= 0) this.searchScroll.scroll_to_item(i);
+      cx.notify(); return;
+    }
+    if (row.kind === "file") this.toggleResultFile(row.file.key, open, cx);
+  }
+
+  /** Enter in the results: a file row folds, a match opens and the editor takes the keyboard. */
+  enterResult(cx) {
+    const s = this.search, row = this.searchRows().find((r) => r.key === s.sel);
+    if (!row) return;
+    if (row.kind === "file") this.toggleResultFile(row.file.key, s.collapsed.has(row.file.key), cx);
+    else this.openResult(row, cx, true);
+  }
+
+  /** A click: a file row folds, a match opens; the results keep the keyboard (Up/Down, Enter). */
+  clickResult(key, cx) {
+    const s = this.search, row = this.searchRows().find((r) => r.key === key);
+    if (!row) return;
+    s.sel = key;
+    if (row.kind === "match") return this.openResult(row, cx, false);
+    this.toggleResultFile(row.file.key, s.collapsed.has(row.file.key), cx);
+    this.handle.focus(); this.searchFocus = true; cx.notify();
+  }
+
+  /** Opens a match's file at its line, as Quick Open's name:line:col does, with the match selected. */
+  openResult(row, cx, toEditor) {
+    const { file: rf, m } = row, st = this.stores.find((x) => idOf(x) === rf.id) ?? rf.st;
+    const at = { line: m.line - 1, col: m.col }, key = `${st.root}|${rf.rel}`;
+    cx.spawn(async (cx) => {
+      await this.openFile(st, rf.rel, cx, at);
+      const f = this.file();
+      if (f && f.key === key && !this.treeOnly()) {
+        // A long line's result text is a cut of it: find where the cut starts.
+        const text = body(linesOf(f)[at.line] ?? ""), shift = Math.max(0, text.indexOf(m.text)), [a, b] = m.ranges[0] ?? [m.col, m.col];
+        this.anchor = this.clampPos(f, { line: at.line, col: shift + a }); this.cur = this.clampPos(f, { line: at.line, col: shift + b });
+        this.goalX = null; this.selA = this.selB = null; this.showCursor();
+      }
+      this.searchFocus = !toEditor;
+      cx.notify();
+    });
+  }
+
+  /** Keys while a Search box has the keyboard. Esc: back to the editor; Down (search box): into the results. */
+  searchKey(k, cx, done) {
+    if (k === "escape") { this.inBar = null; this.handle.focus(); cx.notify(); return done(); }
+    if (k === "down" && this.inBar === this.searchInput && this.searchRows().length) {
+      const s = this.search, rows = this.searchRows(), i = Math.max(0, rows.findIndex((r) => r.key === s.sel));
+      this.inBar = null; this.searchFocus = true; this.handle.focus();
+      s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); cx.notify();
+      return done();
+    }
+    const id = this.kIdx.find.get(k), flag = { findCase: "cased", findWord: "word", findRegex: "regex" }[id];
+    if (flag) { this.searchFlag(flag, cx); return done(); }
+    if (id === "replaceAll") { this.askReplaceAll(cx); return done(); }
+    if (this.kIdx.pane.get(k) === "searchFiles") return done();
+  }
+
+  /** Keys while the results have the keyboard. True: handled (other keys never type into the editor). */
+  resultsKey(k, cx) {
+    if (!this.searchShown() || !this.searchRows().length) { this.searchFocus = false; return false; }
+    const go = {
+      up: () => this.moveResult(-1, cx), down: () => this.moveResult(1, cx), enter: () => this.enterResult(cx),
+      left: () => this.foldResult(false, cx), right: () => this.foldResult(true, cx),
+      escape: () => { this.searchFocus = false; cx.notify(); },
+    }[k];
+    if (go) { go(); return true; }
+    const id = this.kIdx.pane.get(k);
+    if (id) { this.searchFocus = false; this.runAction(id, cx); }
+    return true;
+  }
+
+  /** The files Replace All can write: not those on another machine (saving there isn't built yet). */
+  replaceTargets() {
+    const all = this.search.results?.files ?? [], files = all.filter((f) => !f.st.on);
+    return { files, remote: all.length - files.length };
+  }
+
+  /** Replace All, first step: the confirm line. */
+  askReplaceAll(cx) {
+    const s = this.search;
+    if (!s.results?.total || s.running || s.busy || !s.replace || !this.replaceTargets().files.length) return;
+    s.confirm = true; s.note = null; cx.notify();
+  }
+
+  /** A file outside the review as Replace All reads it: its own baseline, like loadPlain. */
+  async plainFile(st, rel) {
+    const path = `${st.root}/${rel}`, text = await readTextFile(path);
+    if (typeof text !== "string") return null;
+    const C = splitLines(text);
+    return { rel, path, basePath: null, store: st, key: `${st.root}|${rel}`, plain: true, created: false, by: null, as: null, Btext: text, Ctext: text, B: C, C, hunks: [] };
+  }
+
+  /**
+   * Replace All, confirmed. Each file is read again (a file under review with its baseline,
+   * store.load), its matching lines are replaced as typed edits (searchview.replaceState: the review
+   * rules for a user's edit apply), and it's written compare-and-swap like a save, with the same edit
+   * note to the agent. A file changed since it was read is skipped and reported. Files with unsaved
+   * edits in any copy block it. Afterwards open copies reload and the search runs again.
+   */
+  replaceAllFiles(cx) {
+    const s = this.search, r = s.results, rep = s.replace;
+    s.confirm = false;
+    if (!r || s.running || s.busy) return;
+    const { files, remote } = this.replaceTargets();
+    if (!files.length) return;
+    const keys = files.map((f) => f.key);
+    const held = [...new Set([...this.files.filter((f) => keys.includes(f.key) && this.dirty(f)).map((f) => f.key), ...this.heldElsewhere(keys)])];
+    if (held.length) {
+      s.note = { text: `Unsaved edits in ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}: save or discard them first`, error: true };
+      cx.notify(); return;
+    }
+    s.busy = true; s.note = { text: "Replacing…", error: false }; cx.notify();
+    const out = { n: 0, files: 0, skipped: [] };
+    this.enqueue(async () => {
+      const notes = [], indexes = new Map();
+      for (const rf of files) {
+        const st = rf.st;
+        try {
+          if (!indexes.has(st)) indexes.set(st, await st.index());
+          const entry = indexes.get(st)[rf.rel];
+          const f = entry ? await st.load(rf.rel, entry) : await this.plainFile(st, rf.rel);
+          if (typeof f?.Ctext !== "string") { out.skipped.push(`${base(rf.rel)} (deleted)`); continue; }
+          const [p] = replacePlan([{ rel: rf.rel, matches: rf.matches }], { [rf.rel]: f.Ctext }, r.opts, rep);
+          if (!p) continue;
+          const res = replaceState(f, p.text);
+          if (!res) { out.skipped.push(`${base(rf.rel)} (its line count would change)`); continue; }
+          const applied = [];
+          try { for (const w of res.writes) applied.push(await st.apply(f, w)); }
+          catch (e) { if (applied.length) await st.undo(applied).catch(() => {}); throw e; } // file and baseline go together
+          notes.push(...res.writes.map((w) => this.editNote(f, w)).filter(Boolean));
+          this.deferred.add(norm(f.path)); // open copies reload once the queue is done
+          out.n += p.count; out.files++;
+        } catch (e) {
+          const msg = String(e?.message ?? e);
+          out.skipped.push(`${base(rf.rel)} (${/changed since it was read/.test(msg) ? "changed since it was read" : msg})`);
+        }
+      }
+      try { await this.sendEditNotes(notes); } catch (e) { log(`replace notes: ${e.message ?? e}`); }
+    }, cx);
+    const queued = this.queue;
+    cx.spawn(async (cx) => {
+      await queued;
+      s.busy = false;
+      const parts = [`Replaced ${many(out.n, "occurrence")} in ${many(out.files, "file")}`];
+      if (out.skipped.length) parts.push(`skipped ${out.skipped.join(", ")}`);
+      if (remote) parts.push(`${many(remote, "file")} on another machine left out`);
+      s.note = { text: parts.join("; "), error: out.skipped.length > 0 };
+      if (this.search === s) this.runSearch(cx); else cx.notify();
+    });
+  }
+
+  /** The Edit tab's left column: the Explorer / Search switch over the tree or the Search view. */
+  renderLeft(t, full = false) {
+    const on = this.search.left === "search";
+    const tab = (id, label, here) => div().id(`left-${id}`).h(22).px(8).flex().items_center().rounded(4).text_size(11.5).cursor_pointer()
+      .text_color(here ? t.foreground : t.muted).when(here, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
+      .on_click((_e, cx) => this.setLeft(id, cx)).child(label);
+    return v_flex().id("left-column").h_full().min_h(0)
+      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(on ? 300 : 240).flex_none().border_r(1).border_color(t.border))
+      .child(h_flex().h(30).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
+        .child(tab("explorer", "Explorer", !on))
+        .child(tab("search", `Search  ${this.kl("searchFiles")}`, on)))
+      .child(on ? this.renderSearch(t) : this.renderTree(t, full));
+  }
+
+  renderSearch(t) {
+    const s = this.search, r = s.results, rows = this.searchRows(), multi = this.repos().length > 1;
+    const chip = (id, label, on, flip) => div().id(id).h(22).px(6).flex().flex_none().items_center().rounded(4).text_size(11).cursor_pointer()
+      .bg(on ? t.accent + "77" : t.raised).hover((st) => st.opacity(0.85)).on_click((_e, cx) => flip(cx)).child(label);
+    const label = (text) => div().text_size(10.5).text_color(t.dim).child(text);
+    const sum = summaryOf({ running: s.running, results: r, repos: this.repos().length, plain: this.stores.filter((x) => x.plain).length });
+    const preview = !!s.replace && !!r?.total, { files: targets, remote } = this.replaceTargets();
+    return v_flex().id("search-view").flex_1().min_h(0)
+      .child(v_flex().flex_none().px(6).pt(6).pb(4).gap(4)
+        .child(h_flex().gap(4).items_center()
+          .child(div().id("search-more").w(16).h(22).flex().flex_none().items_center().justify_center().rounded(4).text_size(10).text_color(t.dim).cursor_pointer()
+            .hover((st) => st.bg(t.hover)).on_click((_e, cx) => { s.more = !s.more; cx.notify(); }).child(s.more ? "▾" : "▸"))
+          .child(div().flex_1().min_w(0).child(Input.new(this.searchInput)))
+          .child(chip("search-cased", "Aa", s.opts.cased, (cx) => this.searchFlag("cased", cx)))
+          .child(chip("search-word", "W", s.opts.word, (cx) => this.searchFlag("word", cx)))
+          .child(chip("search-regex", ".*", s.opts.regex, (cx) => this.searchFlag("regex", cx))))
+        .when(s.more, (e) => e.child(v_flex().pl(20).gap(4)
+          .child(Input.new(this.sReplaceInput))
+          .child(label("files to include")).child(Input.new(this.includeInput))
+          .child(label("files to exclude")).child(Input.new(this.excludeInput)))))
+      .child(h_flex().flex_none().min_h(24).px(8).gap(6).items_center()
+        .child(div().flex_1().min_w(0).text_size(11).text_color(sum.error ? t.ansi1 : t.muted).child(sum.text))
+        .when(preview && targets.length > 0 && !s.confirm && !s.busy && !s.running, (e) => e.child(this.button("search-replace-all", "Replace All", t.raised, (cx) => this.askReplaceAll(cx)).flex_none())))
+      .when(!!s.confirm, (e) => e.child(v_flex().flex_none().mx(6).mb(4).p(8).gap(6).rounded(6).bg(t.raised).text_size(11)
+        .child(div().text_color(t.foreground).child(`Replace ${many(occurrences(targets), "occurrence")} in ${many(targets.length, "file")}?`))
+        .when(remote > 0, (e) => e.child(div().text_color(t.dim).child(`${many(remote, "file")} on another machine left out: saving there isn't built yet.`)))
+        .child(h_flex().gap(6)
+          .child(this.button("search-replace-yes", "Replace", t.ansi1 + "55", (cx) => this.replaceAllFiles(cx)))
+          .child(this.button("search-replace-no", "Cancel", t.background, (cx) => { s.confirm = false; cx.notify(); })))))
+      .when(preview && !targets.length, (e) => e.child(div().flex_none().px(8).pb(4).text_size(11).text_color(t.dim).child("Replace isn't available for files on other machines yet")))
+      .when(!!s.note, (e) => e.child(div().flex_none().px(8).pb(4).text_size(11).text_color(s.note.error ? t.ansi1 : t.dim).child(s.note.text)))
+      .child(div().id("search-results").flex_1().min_h(0).relative().overflow_hidden()
+        .on_size_change((size, cx) => { if (Math.abs((this.searchH ?? 0) - size.height) > 0.5) { this.searchH = size.height; cx.notify(); } })
+        .when(rows.length > 0, (e) => e
+          .child(v_virtual_list("search-rows", rows.length, SROW, (i) => rows[i].key,
+            (range) => rows.slice(range.start, range.end).map((row) => this.searchRow(row, t, multi, preview)))
+            .w_full().h(Math.max(SROW, this.searchH ?? 300)).track_scroll(this.searchScroll)
+            .on_item_click((key, cx) => this.clickResult(key, cx)))
+          .child(Scrollbar.vertical("search-rows").viewport_from_layout().absolute().inset_0())));
+  }
+
+  /** One result row (inside the virtual list: no handlers here, clicks come through on_item_click). */
+  searchRow(row, t, multi, preview) {
+    const s = this.search, on = row.key === s.sel, selBg = this.searchFocus ? t.selected : t.hover;
+    if (row.kind === "file") {
+      const f = row.file, cut = f.rel.lastIndexOf("/") + 1;
+      return h_flex().w_full().h(SROW).px(6).gap(4).items_center().whitespace_nowrap().cursor_pointer()
+        .when(on, (e) => e.bg(selBg))
+        .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(s.collapsed.has(f.key) ? "▸" : "▾"))
+        .child(div().flex_none().text_size(12).child(f.rel.slice(cut)))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child((multi ? this.repoName(f.st) + (cut ? "/" : "") : "") + f.rel.slice(0, Math.max(0, cut - 1))))
+        .child(div().flex_none().px(5).rounded(8).bg(t.raised).text_size(10).text_color(t.muted).child(fmt(occurrences([f]))));
+    }
+    const m = row.m, pieces = matchPieces(m.text, m.ranges, preview ? { opts: s.results.opts, replace: s.replace } : null);
+    return h_flex().w_full().h(SROW).pl(22).pr(6).items_center().overflow_hidden().whitespace_nowrap().text_size(12).cursor_pointer()
+      .when(on, (e) => e.bg(selBg))
+      .children(pieces.map((p) => {
+        const d = div().flex_none().child(p.text);
+        if (p.kind === "hit") return d.bg(t.ansi3 + "55").rounded(2);
+        if (p.kind === "old") return d.bg(t.ansi1 + "40").text_color(t.ansi1).line_through();
+        if (p.kind === "new") return d.bg(t.ansi2 + "40").text_color(t.ansi2);
+        return d.text_color(t.muted);
+      }));
+  }
+
+  // ---- bracket matching ---------------------------------------------------------
+
+  /**
+   * The bracket pair beside the cursor in the current file, or null (also while text is selected).
+   * Worked out again only when the cursor, the text or its highlighting changed. Brackets in strings
+   * and comments don't count, as the highlighter's tokens tell (brackets.tokenSkip).
+   */
+  bracketPair(f) {
+    if (!f || f.error || f.Ctext === null || !this.cur || this.hasTextSel()) return null;
+    const c = this.cur, m = this.bmMemo;
+    if (m && m.C === f.C && m.tok === f.newTok && m.line === c.line && m.col === c.col) return m.pair;
+    const lines = linesOf(f), skip = tokenSkip(f.newTok, lines);
+    let pair = matchBracket(lines, c, { skip });
+    if (pair && (skip(pair.open.line, pair.open.col) || skip(pair.close.line, pair.close.col))) pair = null; // a bracket in a string
+    this.bmMemo = { C: f.C, tok: f.newTok, line: c.line, col: c.col, pair };
+    return pair;
+  }
+
   // ---- saving ---------------------------------------------------------------
 
   /** The writes that bring disk up to memory for `f`. */
@@ -2607,7 +3012,7 @@ export default class Review extends View {
       find: () => this.openFind("find", cx), replace: () => this.openFind("replace", cx), goToLine: () => this.openFind("line", cx),
       findNext: () => this.findStep(1, cx), findPrev: () => this.findStep(-1, cx),
       findCase: () => this.findFlag("cased", cx), findWord: () => this.findFlag("word", cx), findRegex: () => this.findFlag("regex", cx),
-      replaceAll: () => this.replaceAll(cx),
+      replaceAll: () => this.replaceAll(cx), searchFiles: () => this.openSearch(cx),
     }[id];
     go?.();
   }
@@ -2638,6 +3043,8 @@ export default class Review extends View {
     }
     if (this.commitInput && this.inBar === this.commitInput) return; // the commit message box types its own keys
     if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); cx.notify(); done(); } return; }
+    // A Search box has the keyboard (searchKey); then the results, after Down or a click (resultsKey).
+    if (this.inBar && this.searchInputs?.includes(this.inBar)) return this.searchKey(k, cx, done);
     // The find bar has the keyboard: Esc, the bar's own actions, and switching between find, replace and line.
     if (this.inBar) {
       if (k === "escape") { this.closeFind(cx); return done(); }
@@ -2645,6 +3052,7 @@ export default class Review extends View {
       if (id) { this.runAction(id, cx); done(); }
       return;
     }
+    if (this.searchFocus && this.resultsKey(k, cx)) return done();
     if (this.cur && this.editable(f)) {
       const id = this.kIdx.edit.get(k);
       if (id) { this.runAction(id, cx); return done(); }
@@ -2965,6 +3373,8 @@ export default class Review extends View {
     const found = r.side === "new" && this.bar ? this.matches(f) : null;
     const hits = (found?.byLine?.get(r.line) ?? []).filter((k) => { const [a, b] = clip(found.ms[k].from, found.ms[k].to); return a < b; });
     const onHit = hits.length ? this.onMatch(found.ms) : -1;
+    // D2: the matched bracket pair's boxes on this row (never on removed lines).
+    const bm = r.side === "new" && this.bm ? [this.bm.open, this.bm.close].filter((p) => p.line === r.line).map((p) => clip(p.col, p.col + 1)).filter(([a, b]) => a < b) : [];
     return h_flex().w_full().h(ROW).flex_none().whitespace_nowrap()
       .when(r.kind === "+", (e) => e.bg(t.ansi2 + "22")).when(r.kind === "-", (e) => e.bg(t.ansi1 + "22"))
       .when(selected, (e) => e.bg(t.selection).border_l(2).border_color(t.accent))
@@ -2973,6 +3383,7 @@ export default class Review extends View {
       .child(div().flex_1().h_full().relative().overflow_hidden()
         .children(hits.map((k) => { const [a, b] = clip(found.ms[k].from, found.ms[k].to); return div().absolute().top(1).h(ROW - 2).rounded(2).left(x(a)).w(Math.max(2, x(b) - x(a)))
           .bg(k === onHit ? t.ansi3 + "88" : t.ansi3 + "38"); }))
+        .children(bm.map(([a, b]) => div().absolute().top(1).h(ROW - 2).left(x(a)).w(Math.max(2, x(b) - x(a))).rounded(2).border_1().border_color(t.dim).bg(t.raised)))
         .when(!!mark, (e) => e.child(div().absolute().top(0).h(ROW).left(mark.left).w(mark.w).bg(t.selection)))
         .child(seg
           ? div().absolute().top(0).h(ROW).left(ind * cw).w((visualCol(text, seg.to) - v0) * cw).overflow_hidden()
@@ -2989,6 +3400,7 @@ export default class Review extends View {
     const t = theme(), f = this.file(), vis = this.visible(), total = vis.reduce((n, x) => n + x.hunks.length, 0);
     const tag = (x) => x.created ? "new" : x.Ctext === null ? "deleted" : `${x.hunks.length}`;
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;
+    this.bm = f ? this.bracketPair(f) : null; // D2: read by row()
     const picked = this.files.find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine(), noReview = !!away && this.mode === "review"; // Review isn't available on another machine yet
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
@@ -3008,8 +3420,8 @@ export default class Review extends View {
           .child(this.button("accept-all", "Accept all files", t.ansi2 + "55", (cx) => this.everything("accept", cx))))
         .child(this.button("settings", "⚙ Settings", t.raised, () => this.openSettings()).flex_none()))
       .child(h_flex().flex_1().min_h(0)
-      .when(this.treeOnly(), (e) => e.child(this.renderTree(t, true)))
-      .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderTree(t)))
+      .when(this.treeOnly(), (e) => e.child(this.renderLeft(t, true)))
+      .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))
       .when(this.mode === "changes", (e) => e.child(this.renderChanges(t)))
       .when(!this.treeOnly(), (e) => e.child(v_flex().flex_1().min_w(0).h_full()
       // File tabs scroll sideways in their own area; the hint and file buttons stay pinned right.

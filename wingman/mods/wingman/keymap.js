@@ -45,6 +45,7 @@ export const ACTIONS = [
   { id: "goToLine", label: "Go to line", group: "Find", scope: "pane", keys: ["ctrl-g"] },
   { id: "findNext", label: "Next match", group: "Find", scope: "pane", keys: ["f3"] },
   { id: "findPrev", label: "Previous match", group: "Find", scope: "pane", keys: ["shift-f3"] },
+  { id: "searchFiles", label: "Search in files", group: "Find", scope: "pane", keys: ["ctrl-shift-f"] },
   { id: "findCase", label: "Toggle match case (find bar)", group: "Find", scope: "find", keys: ["alt-c"] },
   { id: "findWord", label: "Toggle whole word (find bar)", group: "Find", scope: "find", keys: ["alt-w"] },
   { id: "findRegex", label: "Toggle regular expression (find bar)", group: "Find", scope: "find", keys: ["alt-r"] },
