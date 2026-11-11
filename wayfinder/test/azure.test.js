@@ -215,3 +215,16 @@ test("ticket fetches the item, parent, comments (pinned preview version) and lin
   assert.ok(io.calls.some((c) => typeof c === "string" && c.includes("/comments?") && c.includes("api-version=7.1-preview.4")));
   await assert.rejects(azure.ticket({ org: ORG }, { id: "1 or 1=1", project: "P" }, io), /no work item/);
 });
+
+test("review maps a same-repo PR and rejects one from a fork", async () => {
+  const pr = { sourceRefName: "refs/heads/feat/x", targetRefName: "refs/heads/main", description: "d", repository: { id: "r1" } };
+  const routes = (d) => ({ "pullRequests/5/workitems": { value: [{ id: 7 }] }, "_apis/git/pullrequests/5": d, "_apis/wit/workitems?ids=7": { value: [item(7)] } });
+  const row = { key: "r1!5", repo: "P/r" };
+  const r = await azure.review({ org: ORG }, row, fakeIo("work", routes(pr)));
+  assert.equal(r.branch, "feat/x");
+  assert.equal(r.target, "main");
+  assert.equal(r.fork, false);
+  assert.deepEqual(r.criteria.map((c) => c.id), ["7"]);
+  const forked = { ...pr, forkSource: { name: "refs/heads/feat/x", repository: { id: "r2" } } };
+  await assert.rejects(azure.review({ org: ORG }, row, fakeIo("work", routes(forked))), /comes from a fork/);
+});

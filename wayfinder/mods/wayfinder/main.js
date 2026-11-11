@@ -168,6 +168,7 @@ export default class Wayfinder extends View {
     this.checks = null;
     this.boards = {}; // board id -> { status: "cached" | "loading" | "ok" | "error", data, at, tried, error }
     this.boardSeq = {}; // board id -> the newest fetch's number: an older result is dropped
+    this.movedRecently = {}; // board id -> { key, columnId, status, until }: the last Move, kept through stale reads
     this.hidden = true; // until seen on screen: the first show refreshes
     this.lastRefresh = null;
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
@@ -331,6 +332,7 @@ export default class Wayfinder extends View {
     const before = this.profile?.name ?? this.lastProfile;
     this.state = { status: "loading" };
     this.boards = {};
+    this.movedRecently = {};
     this.tickets = {};
     this.prs = null;
     this.found = {};
@@ -388,6 +390,16 @@ export default class Wayfinder extends View {
       }
       if (this.profile?.name !== profile.name || this.boardSeq[b.id] !== seq) return;
       const at = Date.now();
+      // A service can answer with the pre-move Column for a while after a Move (Q4). For 15 seconds
+      // after the write, the moved card keeps its new Column. A read that agrees, or the window
+      // running out, drops the entry.
+      const moved = this.movedRecently[b.id];
+      if (moved) {
+        const tk = moved.until > at ? data.tickets.find((x) => x.key === moved.key) : null;
+        if (tk && (tk.columnId !== moved.columnId || tk.status !== moved.status)) {
+          data = { ...data, tickets: data.tickets.map((x) => (x === tk ? { ...x, columnId: moved.columnId, status: moved.status } : x)) };
+        } else delete this.movedRecently[b.id];
+      }
       this.boards[b.id] = { status: "ok", data, at, tried };
       this.clampCursor(b, data);
       cx.notify();
@@ -1010,6 +1022,7 @@ export default class Wayfinder extends View {
     cx.spawn(async (cx) => {
       try {
         await moveTicket(p, b, data, before, columnId, io);
+        if (this.profile?.name === p.name) this.movedRecently[b.id] = { key: summary.key, columnId: after.columnId, status, until: Date.now() + 15000 };
         this.moving = null;
         delete this.tickets[summary.key]; // its Column changed: the detail reloads
         if (this.selected?.summary.key === summary.key) this.fetchTicket(cx);

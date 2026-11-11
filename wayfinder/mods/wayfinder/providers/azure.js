@@ -292,6 +292,7 @@ export function mapReview(pr, items) {
   if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
   return {
     branch: branchOf(pr.sourceRefName), target: branchOf(pr.targetRefName) || null, description: pr.description ?? "",
+    fork: Boolean(pr.forkSource), // set only when the source branch lives in a fork
     criteria: items.map((w) => ({ id: String(w.id), title: w.fields?.["System.Title"] ?? "", text: htmlToMarkdown(w.fields?.["Microsoft.VSTS.Common.AcceptanceCriteria"]) })),
   };
 }
@@ -391,7 +392,9 @@ export const azure = {
     const items = ids.length
       ? (await rest(org, tok, io, `_apis/wit/workitems?ids=${ids.join(",")}&fields=System.Title,Microsoft.VSTS.Common.AcceptanceCriteria`)).value ?? []
       : [];
-    return mapReview(d, items);
+    const r = mapReview(d, items);
+    if (r.fork) throw new Error("This Pull Request comes from a fork. Reviews check out branches from the repo itself.");
+    return r;
   },
 
   // ref: a TicketSummary's ref from board().
