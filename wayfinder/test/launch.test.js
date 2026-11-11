@@ -83,13 +83,13 @@ function fixture(def = "main", setHead = true) {
 
 test("Launch makes a worktree per repo on a new branch, and reuses it after", async () => {
   const { home, io, clone } = fixture();
-  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe"], io), []);
+  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe"], io), { folder: "1-t", names: [] });
   const first = await makeLaunchWorktrees("1-", "1-t", [{ path: clone, name: "fe" }], io);
   assert.deepEqual(first.made, ["fe"]); assert.equal(first.branch, "1-t");
   assert.equal(first.path, join(home, ".herdr/worktrees/1-t"));
   assert.ok(existsSync(join(first.path, "fe/.git")));
   assert.equal(sh("git branch --show-current", join(first.path, "fe")).stdout.trim(), "1-t");
-  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe", "be"], io), ["fe"]);
+  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe", "be"], io), { folder: "1-t", names: ["fe"] });
   const again = await makeLaunchWorktrees("1-", "1-t", [{ path: clone, name: "fe" }], io);
   assert.deepEqual(again.reused, ["fe"]); assert.deepEqual(again.made, []);
 });
@@ -98,7 +98,7 @@ test("a second Launch after a title edit reuses the Ticket's folder and branch",
   const { home, io, clone } = fixture();
   assert.equal(sh("git clone -q origin.git clone2", home).status, 0);
   await makeLaunchWorktrees("1-", "1-old-title", [{ path: clone, name: "fe" }], io);
-  assert.deepEqual(await existingWorktrees("1-", "1-new-title", ["fe"], io), ["fe"]);
+  assert.deepEqual(await existingWorktrees("1-", "1-new-title", ["fe"], io), { folder: "1-old-title", names: ["fe"] }); // the dialog names the reused folder
   const again = await makeLaunchWorktrees("1-", "1-new-title", [{ path: clone, name: "fe" }, { path: join(home, "clone2"), name: "be" }], io);
   assert.equal(again.path, join(home, ".herdr/worktrees/1-old-title")); assert.equal(again.branch, "1-old-title");
   assert.deepEqual(again.reused, ["fe"]); assert.deepEqual(again.made, ["be"]);

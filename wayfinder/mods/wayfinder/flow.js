@@ -122,9 +122,12 @@ const script = async (io, text, name, args, timeout = 300000) => {
 
 // The repo names that already have a worktree, under the Ticket's existing folder (found by prefix) or
 // ~/.herdr/worktrees/<folder>.
+// Returns { folder, names }: the folder a Launch would use (existing by prefix, else `folder`) and the
+// repo names that already have a worktree in it.
 export async function existingWorktrees(prefix, folder, names, io) {
-  if (!names.length) return [];
-  return (await script(io, EXISTS_SH, "wayfinder-exists", [prefix, folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const lines = (await script(io, EXISTS_SH, "wayfinder-exists", [prefix, folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  const first = /^folder (.+)$/.exec(lines[0] ?? "");
+  return { folder: first ? first[1] : folder, names: lines.filter((l) => !l.startsWith("folder ")) };
 }
 
 // repos: [{ path, name }]. Reuses the Ticket's existing folder (by prefix), else makes `folder`; the branch

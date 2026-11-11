@@ -1117,13 +1117,14 @@ export default class Wayfinder extends View {
   openLaunch(tk, cx) {
     const repos = this.launchRepos();
     const key = this.selected.summary.key;
-    this.launch = { key, selected: repos.map((r) => r.id), exists: null, status: "idle" };
+    this.launch = { key, selected: repos.map((r) => r.id), exists: null, folder: null, status: "idle" };
     const io = this.io();
     cx.spawn(async (cx) => {
       let exists = [];
-      try { exists = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map(repoName), io); } catch { /* shown as not made */ }
+      let folder = null;
+      try { ({ names: exists, folder } = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map(repoName), io)); } catch { /* shown as not made */ }
       if (this.launch?.key !== key) return;
-      this.launch.exists = exists;
+      this.launch.exists = exists; this.launch.folder = folder;
       cx.notify();
     });
   }
@@ -1176,7 +1177,7 @@ export default class Wayfinder extends View {
     return v_flex().id("wf-launch-card").p(12).gap(8).rounded(8).bg(t.surface).border_1().border_color(t.accent)
       .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Launch"))
       .child(note(open ? `The space "${open.name}" is open. Launch selects it.`
-        : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} in ~/.herdr/worktrees/${ticketFolder(tk)}, on branch ${ticketFolder(tk)}.`))
+        : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} in ~/.herdr/worktrees/${L.folder ?? ticketFolder(tk)}, on branch ${L.folder ?? ticketFolder(tk)}.`))
       .children(repos.length ? repos.map((r) => h_flex().gap(8).items_center()
         .child(checkRow(`wf-launch-r-${r.id}`, L.selected.includes(r.id), r.id, t, (cx) => {
           L.selected = L.selected.includes(r.id) ? L.selected.filter((x) => x !== r.id) : [...L.selected, r.id]; cx.notify();
@@ -1326,7 +1327,7 @@ export default class Wayfinder extends View {
           .map((pr) => `- ${link(`${pr.id} ${pr.title}`, pr.url)}${pr.draft || pr.state ? ` · ${pr.draft ? "draft" : pr.state}` : ""}`).join("\n"))))
         .child(section(`Comments (${tk.comments.length + tk.moreComments})`))
         .when(Boolean(ub) && this.canUpdate(ub), (el) => el.child(this.commentForm(t, k)))
-        .when(tk.moreComments > 0, (el) => el.child(md("more", link(`${tk.moreComments} older comments`, tk.url))))
+        .when(tk.moreComments > 0, (el) => el.child(md("more", link(tk.moreComments === 1 ? "1 older comment" : `${tk.moreComments} older comments`, tk.url))))
         .children(tk.comments.map((c, i) => v_flex().gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
           .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
           .child(rich(`c${i}`, c.body))));

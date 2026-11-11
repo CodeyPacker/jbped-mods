@@ -107,7 +107,8 @@ const PICK = 'pick() { d=""; for e in "$HOME/.herdr/worktrees/$1"*; do if [ -d "
 
 // Which worktrees exist already. argv: Ticket prefix, wanted folder (relative), then repo names. Prints
 // one name per line.
-export const EXISTS_SH = `${PICK}; pick "$1" "$2"; shift 2; for r in "$@"; do [ -e "$d/$r/.git" ] && echo "$r"; done; exit 0`;
+// First "folder <name>": the folder a Launch would use (an existing one by prefix, else the wanted one).
+export const EXISTS_SH = `${PICK}; pick "$1" "$2"; shift 2; echo "folder $(basename "$d")"; for r in "$@"; do [ -e "$d/$r/.git" ] && echo "$r"; done; exit 0`;
 
 // Makes a Ticket's worktrees (D18). argv: Ticket prefix, wanted folder, then pairs of repo path and name.
 // The folder is the first existing one with the prefix, else the wanted one, and the branch is its name.
