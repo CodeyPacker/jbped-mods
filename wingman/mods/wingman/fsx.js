@@ -10,6 +10,7 @@ import { exec, readTextFile, writeTextFile, appHome } from "herdr";
 import { inside } from "./fileops.js";
 import { onWindows, toWsl, distroOf } from "./git.js";
 import { byteLength, chunkBytes, sha256Hex } from "./sha256.js";
+import { withTimeout, LIMITS } from "./remote.js";
 
 // ---- paths (pure) ---------------------------------------------------------------
 
@@ -48,12 +49,25 @@ export const basename = (p) => split(p).rest.at(-1) ?? "";
 const WSL_FILES = /^(?:\/\/|\\\\)(?:wsl\.localhost|wsl\$)[\\/]/i;
 const noSh = new Set(); // machines found to have no sh
 
+/** wsl.exe's arguments that pick the distro holding `path` (none for the default distro's paths). */
+export const distroArgs = (path) => { const d = distroOf(String(path ?? "")); return d ? ["-d", d] : []; };
+
+// Calls to another machine get a time limit here too (remote.LIMITS), so a call that never answers
+// fails, with a message saying so, instead of holding up every save queued behind it.
+export { LIMITS };
+
+/** exec on machine `opts.on`, with the time limit. */
+export const execOn = (cmd, args, opts) => withTimeout(exec(cmd, args, opts), (opts.timeout ?? 30000) + LIMITS.grace, `${cmd} on ${opts.on}`);
+
+/** readTextFile on machine `on` (null: here, no limit), with the time limit; rejects as readTextFile does. */
+export const readOn = (path, { on = null } = {}) => (on ? withTimeout(readTextFile(path, { on }), LIMITS.read, `Reading ${path} on ${on}`) : readTextFile(path));
+
 // Runs a POSIX sh script with `args` where `path` lives, or returns null when that is a Windows
 // machine (PowerShell's turn).
 async function sh(script, path, args, on) {
   if (on) {
     if (noSh.has(on)) return null;
-    try { return await exec("sh", ["-c", script, "wingman", path, ...args], { on }); }
+    try { return await execOn("sh", ["-c", script, "wingman", path, ...args], { on }); }
     catch (e) {
       if (!/cannot start sh/i.test(String(e?.message ?? e))) throw e;
       noSh.add(on);
@@ -62,8 +76,7 @@ async function sh(script, path, args, on) {
   }
   if (!onWindows()) return exec("sh", ["-c", script, "wingman", path, ...args]);
   if (!WSL_FILES.test(path)) return null;
-  const d = distroOf(path);
-  return exec("wsl.exe", [...(d ? ["-d", d] : []), "-e", "sh", "-c", script, "wingman", toWsl(path), ...args], { timeout: 15000 });
+  return exec("wsl.exe", [...distroArgs(path), "-e", "sh", "-c", script, "wingman", toWsl(path), ...args], { timeout: 15000 });
 }
 
 // "d" or "f" for a FileSystemInfo. Links keep folder attributes even when dangling, so their target
@@ -77,8 +90,8 @@ function ps(block, path, on) {
   // Windows PowerShell otherwise writes the console code page; exec decodes UTF-8. PowerShell
   // reads curly single quotes as quotes too, so they're doubled like '.
   const lit = "'" + path.replace(/\//g, "\\").replace(/['‘’‚‛]/g, "$&$&") + "'";
-  return exec("powershell", ["-NoProfile", "-NonInteractive", "-Command",
-    `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ${KIND_FN}; & { param($p) ${block} } ${lit}`], { on });
+  const args = ["-NoProfile", "-NonInteractive", "-Command", `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ${KIND_FN}; & { param($p) ${block} } ${lit}`];
+  return on ? execOn("powershell", args, { on }) : exec("powershell", args);
 }
 
 const firstLine = (s) => String(s ?? "").trim().split(/\r?\n/)[0].trim();
@@ -134,7 +147,7 @@ export async function pathKind(path, { on = null } = {}) {
 
 /** UTF-8 text or null when absent/unreadable. */
 export async function readText(path, { on = null } = {}) {
-  return (await readTextFile(path, { on }).catch(() => null)) ?? null;
+  return (await readOn(path, { on }).catch(() => null)) ?? null;
 }
 
 // ---- writing --------------------------------------------------------------------
@@ -152,22 +165,32 @@ export const WINDOWS_NOTE = "Saving on a Windows machine isn't supported yet";
 
 const isDrive = (p) => /^[A-Za-z]:/.test(p);
 
+// Windows drive and share paths here go to PowerShell as quoted literals (psWith), never through
+// cmd: cmd /c reads a path's , ; = ^ & % as its own syntax, so a name could delete or make another.
+const winHere = (path) => isDrive(path) || (onWindows() && /^\/\/[^/]/.test(path) && !WSL_FILES.test(path));
+const MKDIR_PS = `try { [void][IO.Directory]::CreateDirectory($p); 'ok' } catch { wmWhy $_ }`;
+
 /** Deletes a file here (Windows drive and WSL paths included). */
 async function removeHere(path) {
-  const r = WSL_FILES.test(path) ? await exec("wsl.exe", ["-e", "rm", "-f", "--", toWsl(path)])
-    : isDrive(path)
-    ? await exec("cmd", ["/c", "del", "/f", "/q", path.replace(/\//g, "\\")])
-    : await exec("rm", ["-f", "--", path]);
+  if (winHere(path)) {
+    const r = await psWith(OPS_PS.rm, [path, "", ""], null), line = firstLine(r.stdout);
+    if (line !== "ok" && line !== "missing") throw new Error(`delete ${path}: ${line.replace(/^error /, "") || (r.stderr || "").trim() || `exit ${r.code}`}`);
+    return;
+  }
+  const r = WSL_FILES.test(path) ? await exec("wsl.exe", [...distroArgs(path), "-e", "rm", "-f", "--", toWsl(path)]) : await exec("rm", ["-f", "--", path]);
   if (r.code !== 0) throw new Error(`delete ${path}: ${(r.stderr || r.stdout).trim()}`);
 }
 
 /** Creates a folder and its parents here. Mods may only write under ~/.config/herdr-app through
- *  fs/promises, so folders inside a repo are made by the OS's own mkdir. */
+ *  fs/promises, so folders inside a repo are made by the OS's own mkdir (.NET's on Windows). */
 async function makeDirHere(path) {
-  const win = isDrive(path);
-  const r = WSL_FILES.test(path) ? await exec("wsl.exe", ["-e", "mkdir", "-p", "--", toWsl(path)]) : win ? await exec("cmd", ["/c", "mkdir", path.replace(/\//g, "\\")]) : await exec("mkdir", ["-p", "--", path]);
-  // cmd's mkdir creates parents but fails when the folder exists, which is fine here.
-  if (r.code !== 0 && !(win && /already exists/i.test(r.stderr + r.stdout))) throw new Error(`mkdir ${path}: ${(r.stderr || r.stdout).trim()}`);
+  if (winHere(path)) {
+    const r = await psWith(MKDIR_PS, [path, "", ""], null), line = firstLine(r.stdout);
+    if (line !== "ok") throw new Error(`mkdir ${path}: ${line.replace(/^error /, "") || (r.stderr || "").trim() || `exit ${r.code}`}`);
+    return;
+  }
+  const r = WSL_FILES.test(path) ? await exec("wsl.exe", [...distroArgs(path), "-e", "mkdir", "-p", "--", toWsl(path)]) : await exec("mkdir", ["-p", "--", path]);
+  if (r.code !== 0) throw new Error(`mkdir ${path}: ${(r.stderr || r.stdout).trim()}`);
 }
 
 // The machine's write script. $1 step, $2 path, $3 temp token, $4 expected: a SHA-256 in hex,
@@ -249,7 +272,7 @@ async function proveBig(on) {
   let size = SAFE_CALL;
   try {
     const piece = "w".repeat(BIG_ARG), n = BIG_CALL / BIG_ARG;
-    const r = await exec("sh", ["-c", 'printf %s "$@" | wc -c', "wingman", ...Array(n).fill(piece)], { on, timeout: 20000 });
+    const r = await execOn("sh", ["-c", 'printf %s "$@" | wc -c', "wingman", ...Array(n).fill(piece)], { on, timeout: 20000 });
     if (r.code === 0 && Number(r.stdout.trim()) === BIG_CALL) size = BIG_CALL;
   } catch {}
   callSize.set(on, size);
@@ -259,7 +282,7 @@ async function proveBig(on) {
 /** Runs WRITE_SH on machine `on`; a machine without sh is a Windows machine. */
 async function writeSh(on, args, timeout = 60000) {
   if (noSh.has(on)) throw new Error(WINDOWS_NOTE);
-  try { return await exec("sh", ["-c", WRITE_SH, "wingman", ...args], { on, timeout }); }
+  try { return await execOn("sh", ["-c", WRITE_SH, "wingman", ...args], { on, timeout }); }
   catch (e) {
     if (!/cannot start sh/i.test(String(e?.message ?? e))) throw e;
     noSh.add(on);
@@ -298,7 +321,7 @@ const outcome = (r) => firstLine(r.stdout);
  */
 async function staleOrForeign(path, expected, on) {
   if (expected !== null) {
-    const again = await readTextFile(path, { on }).catch(() => undefined);
+    const again = await readOn(path, { on }).catch(() => undefined);
     if (again === expected) return new Error(`${basename(path)} isn't plain UTF-8 text (a byte-order mark, or bytes that aren't UTF-8): Wingman doesn't save it on another machine, so bytes you didn't edit stay as they are`);
   }
   return staleError(path);
@@ -363,7 +386,7 @@ export async function makeDir(path, { on = null } = {}) {
   if (!on) return makeDirHere(path);
   if (noSh.has(on)) throw new Error(WINDOWS_NOTE);
   let r;
-  try { r = await exec("mkdir", ["-p", "--", path], { on }); }
+  try { r = await execOn("mkdir", ["-p", "--", path], { on }); }
   catch (e) { throw /cannot start mkdir/i.test(String(e?.message ?? e)) ? new Error(WINDOWS_NOTE) : e; }
   if (r.code !== 0) throw new Error(`mkdir ${path}: ${(r.stderr || r.stdout).trim()}`);
 }
@@ -417,6 +440,7 @@ case $op in
     e=$(rm -f -- "$1" 2>&1) || say "error $e"
     say ok ;;
   rmtree)
+    case \${2%/} in ''|/mnt|/mnt/[a-zA-Z]|/home|/Users) say "error refusing to delete inside $2" ;; esac
     case $1 in "$2"/?*) ;; *) say "error $1 isn't inside $2" ;; esac
     case $1 in /|'') say "error refusing to delete $1" ;; esac
     h=\${HOME%/}
@@ -455,6 +479,7 @@ try {
   rm: `if ([IO.Directory]::Exists($p)) { "error $p is a folder"; return }; if (-not [IO.File]::Exists($p)) { 'missing'; return }
 try { $i = [IO.FileInfo]::new($p); if ($i.Attributes -band 1) { $a = [int]$i.Attributes -band -2; if (-not $a) { $a = 128 }; $i.Attributes = [IO.FileAttributes]$a }; [IO.File]::Delete($p); 'ok' } catch { wmWhy $_ }`,
   rmtree: `$f = [IO.Path]::GetFullPath($p).TrimEnd('\\'); $r = [IO.Path]::GetFullPath($q).TrimEnd('\\')
+if ($r -ieq [IO.Path]::GetPathRoot($r).TrimEnd('\\')) { "error refusing to delete inside $r"; return }
 if (-not $f.StartsWith($r + '\\', [StringComparison]::OrdinalIgnoreCase)) { "error $f isn't inside $r"; return }
 if ($f -ieq [IO.Path]::GetPathRoot($f).TrimEnd('\\')) { "error refusing to delete a drive's root"; return }
 $h = [Environment]::GetFolderPath('UserProfile').TrimEnd('\\')
@@ -475,14 +500,29 @@ function psWith(block, args, on) {
 
 const OPS_MS = 300000; // a large folder's delete can take minutes on a Windows drive
 
+/**
+ * Whether `p` is a folder no project is: "/", a drive or share root, /mnt or /mnt/<letter>, a WSL
+ * distro's root, the folder that holds home folders, or a well-known system folder ("/usr",
+ * "C:/Windows", "/mnt/c/Program Files"). Such a root is only there because a terminal sits in it.
+ */
+export function systemFolder(p) {
+  let s = String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "").replace(/^\/\/(?:wsl\.localhost|wsl\$)\/[^/]+/i, "");
+  if (s === "" || /^\/\/[^/]+(?:\/[^/]+)?$/.test(s)) return true;
+  const mnt = /^\/mnt\/([a-zA-Z])(\/.*)?$/.exec(s);
+  if (mnt) s = `${mnt[1]}:${mnt[2] ?? ""}`;
+  if (/^[A-Za-z]:(?:\/(?:Users|Windows|Program Files|Program Files \(x86\)|ProgramData))?$/i.test(s)) return true;
+  return /^\/(?:mnt|home|Users|usr|etc|var|bin|sbin|lib|lib32|lib64|libx32|opt|boot|proc|sys|dev|run|srv|snap|System|Library|Applications|private|Volumes)$/.test(s);
+}
+
 /** Runs one step where `root` lives; resolves with the answer line. */
 async function runOp(op, root, paths, extra, on) {
+  if (systemFolder(root)) throw new Error(`File operations aren't available in ${root}: open a project folder`);
   for (const p of paths) if (!inside(p, root)) throw new Error(`${p} isn't inside ${root}`);
   const args = [...paths, ...extra];
   let r;
   if (on) {
     if (noSh.has(on)) throw new Error(WINDOWS_NOTE);
-    try { r = await exec("sh", ["-c", OPS_SH, "wingman", op, ...args], { on, timeout: OPS_MS }); }
+    try { r = await execOn("sh", ["-c", OPS_SH, "wingman", op, ...args], { on, timeout: OPS_MS }); }
     catch (e) {
       if (!/cannot start sh/i.test(String(e?.message ?? e))) throw e;
       noSh.add(on);
@@ -490,8 +530,8 @@ async function runOp(op, root, paths, extra, on) {
     }
   } else if (!onWindows()) r = await exec("sh", ["-c", OPS_SH, "wingman", op, ...args], { timeout: OPS_MS });
   else if (WSL_FILES.test(root)) {
-    const d = distroOf(root), wsl = (a) => (WSL_FILES.test(a) ? toWsl(a) : a);
-    r = await exec("wsl.exe", [...(d ? ["-d", d] : []), "-e", "sh", "-c", OPS_SH, "wingman", op, ...args.map(wsl)], { timeout: OPS_MS });
+    const wsl = (a) => (WSL_FILES.test(a) ? toWsl(a) : a);
+    r = await exec("wsl.exe", [...distroArgs(root), "-e", "sh", "-c", OPS_SH, "wingman", op, ...args.map(wsl)], { timeout: OPS_MS });
   } else {
     const [p, q = "", c = ""] = op === "rmtree" ? [paths[0], extra[0]] : op === "mv" ? [paths[0], paths[1], extra[0]] : [paths[0]];
     r = await psWith(OPS_PS[op], [p, q, c], null);
@@ -537,7 +577,7 @@ const HOMEISH = /^(?:\/home|\/Users|\/root|[A-Za-z]:\/Users|\/home\/[^/]+|\/User
  */
 export async function deleteTree(path, root, { on = null } = {}) {
   const p = String(path ?? "").replace(/\\/g, "/").replace(/\/+$/, ""), s = p.replace(/^\/\/(?:wsl\.localhost|wsl\$)\/[^/]+/i, "");
-  if (!p || s === "" || /^[A-Za-z]:$/.test(p) || HOMEISH.test(s)) throw new Error(`refusing to delete ${path || "an empty path"}`);
+  if (!p || s === "" || /^[A-Za-z]:$/.test(p) || HOMEISH.test(s) || systemFolder(p)) throw new Error(`refusing to delete ${path || "an empty path"}`);
   if (!on) {
     let home = "";
     try { home = appHome().replace(/\\/g, "/").replace(/\/\.config\/herdr-app\/?$/, ""); } catch {}
@@ -574,7 +614,7 @@ export async function fingerprints(paths, { on }) {
   if (!paths.length) return {};
   if (noSh.has(on)) return {};
   let r;
-  try { r = await exec("sh", ["-c", PRINTS_SH, "wingman", ...paths], { on, timeout: 20000 }); }
+  try { r = await execOn("sh", ["-c", PRINTS_SH, "wingman", ...paths], { on, timeout: 20000 }); }
   catch (e) { if (/cannot start sh/i.test(String(e?.message ?? e))) noSh.add(on); return {}; }
   const lines = r.stdout.split("\n"), out = {};
   paths.forEach((p, i) => { const x = lines[i]?.trim(); if (x) out[p] = x === "-" ? null : x; });

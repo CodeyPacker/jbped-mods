@@ -273,6 +273,26 @@ assert a==b' "$base/fakeship.orig" "$H/layouts/fakeship-wingman.json"
 # ---- sh ----
 run_suite
 
+# ---- the hook installer itself (mods/wingman/install/install.sh): a linked settings.json, a ' in the path ----
+MODE=sh
+hb="$root/hook it's here"; mkdir -p "$hb/wingman/install" "$hb/wingman/hooks" "$root/dotfiles" "$root/hookcfg"
+cp "$share/mods/wingman/install/install.sh" "$hb/wingman/install/"
+printf '#!/bin/sh\necho "ran $1" >>"%s"\n' "$root/hook.log" >"$hb/wingman/hooks/wingman-hook.sh"
+echo '{"theme":"dark"}' >"$root/dotfiles/settings.json"; chmod 600 "$root/dotfiles/settings.json"
+ln -s "$root/dotfiles/settings.json" "$root/hookcfg/settings.json"
+if CLAUDE_CONFIG_DIR="$root/hookcfg" HERDR_WINGMAN_DIR="$root/hookdata" sh "$hb/wingman/install/install.sh" install >/dev/null 2>&1; then
+  check "hook installer: a linked settings.json stays a link" test -L "$root/hookcfg/settings.json"
+  check "hook installer: the hooks went into the link's target" grep -q herdr-wingman-hook "$root/dotfiles/settings.json"
+  check "hook installer: the target keeps its mode" sh -c "[ \"\$(stat -c %a '$root/dotfiles/settings.json')\" = 600 ]"
+  # Each hook command runs the hook, whatever the path holds.
+  : >"$root/hook.log"
+  python3 -I -c 'import json,sys; [print(h["command"]) for e in json.load(open(sys.argv[1]))["hooks"].values() for g in e for h in g["hooks"]]' "$root/hookcfg/settings.json" >"$root/cmds"
+  while IFS= read -r c; do sh -c "$c"; done <"$root/cmds"
+  check "hook installer: a ' in the path still runs the hook" sh -c "grep -qx 'ran post' '$root/hook.log' && grep -qx 'ran prompt' '$root/hook.log'"
+  CLAUDE_CONFIG_DIR="$root/hookcfg" sh "$hb/wingman/install/install.sh" uninstall >/dev/null 2>&1
+  check "hook installer: uninstall through the link keeps it a link and the other keys" sh -c "[ -L '$root/hookcfg/settings.json' ] && grep -q '\"theme\": \"dark\"' '$root/dotfiles/settings.json' && ! grep -q herdr-wingman '$root/dotfiles/settings.json'"
+else bad "hook installer runs"; fi
+
 # ---- the real layouts parse and round-trip through a patch cleanly (when present) ----
 if [ -d "$real/layouts" ]; then
   MODE=sh

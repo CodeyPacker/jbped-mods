@@ -1,7 +1,7 @@
 // Windows only (Windows Node and WSL), not in run.sh's set: the Explorer's file operations through
 // PowerShell (drive paths) and through wsl.exe (WSL's own files). From the tests folder in cmd:
 //   set "WINGMAN_TEST_HOME=%TEMP%"&& node --import ./register.mjs windows/fileops.test.mjs
-import { createFile, createDir, movePath, deleteFile, deleteTree, pathKind } from "../../mods/wingman/fsx.js";
+import { createFile, createDir, movePath, deleteFile, deleteTree, pathKind, makeDir, removeFile } from "../../mods/wingman/fsx.js";
 import { exec } from "herdr";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, rm, chmod, stat } from "node:fs/promises";
@@ -27,6 +27,24 @@ try {
   await timed("createDir", () => createDir(at("p/q"), root));
   await assert.rejects(createDir(at("p"), root), /already exists/);
   for (const n of odd) { await createFile(at(`odd/${n}`), root); assert.ok(existsSync(at(`odd/${n}`)), n); }
+
+  // The review store's own writes (makeDir, removeFile) with names cmd /c would read as its syntax:
+  // , ; = split a name in two, ^ & % are cmd's own. Each makes or deletes only what it names.
+  const hostile = ["a,b", "a;b", "a=b", "a^b", "a&b", "%TEMP%", "x ,;=^&% y"];
+  await mkdir(at("h"));
+  for (const n of ["a", "b", "b.txt", "x", "y.txt"]) await writeFile(at(`h/${n}`), "decoy");
+  for (const n of hostile) {
+    await timed(`makeDir ${n}`, () => makeDir(at(`h/${n}/sub`)));
+    assert.ok(existsSync(at(`h/${n}/sub`)), n);
+    await writeFile(at(`h/${n}.txt`), "t");
+    await removeFile(at(`h/${n}.txt`), "t");
+    assert.ok(!existsSync(at(`h/${n}.txt`)), n);
+  }
+  await makeDir(at("h/a,b/sub")); // already there: fine
+  assert.deepEqual((await readdir(at("h"))).sort(), [...hostile, "a", "b", "b.txt", "x", "y.txt"].sort());
+  for (const n of ["a", "b", "b.txt", "x", "y.txt"]) assert.equal(await readFile(at(`h/${n}`), "utf8"), "decoy", n);
+  await writeFile(at("h/file"), "f");
+  await assert.rejects(makeDir(at("h/file")), /mkdir/); // a file in the way
 
   await timed("movePath", () => movePath(at("a.txt"), at("b.txt"), root));
   assert.equal(await readFile(at("b.txt"), "utf8"), "keep");
@@ -78,6 +96,8 @@ try {
   await refused(createFile(`${outside.replace(/\\/g, "/")}/x`, root));
   await refused(deleteTree("C:/", "C:/"));
   await refused(deleteTree("C:/Users", "C:/"));
+  await assert.rejects(createFile("C:/wingman-should-not-exist.txt", "C:/"), /aren't available/);
+  await assert.rejects(deleteTree(at("x"), "C:/"), /aren't available/);
   assert.equal(await readFile(at(".git/config"), "utf8"), "c");
 } finally { await rm(base, { recursive: true, force: true }); await rm(outside, { recursive: true, force: true }); }
 

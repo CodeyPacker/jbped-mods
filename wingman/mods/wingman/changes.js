@@ -55,23 +55,38 @@ export function reviewTag(key, review) {
 }
 
 /**
+ * git's global option that reads every path as itself, never as a pattern: without it "app/[slug]/x"
+ * also matches "app/s/x", "*" matches every file and a leading ":" is pathspec magic. It goes before
+ * the subcommand, and covers paths read from --pathspec-from-file too.
+ */
+export const LITERAL = "--literal-pathspecs";
+
+/**
  * The git commands that put a file back as HEAD has it: a tracked file is restored (index and
  * working tree); one HEAD doesn't have is unstaged and deleted.
  */
 export function discardCommands(rel, inHead) {
   return inHead
-    ? [["restore", "--source=HEAD", "--staged", "--worktree", "--", rel]]
-    : [["rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", rel], ["clean", "-f", "-q", "--", rel]];
+    ? [[LITERAL, "restore", "--source=HEAD", "--staged", "--worktree", "--", rel]]
+    : [[LITERAL, "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", rel], [LITERAL, "clean", "-f", "-q", "--", rel]];
 }
+
+/** A path in C quotes, as git reads a pathspec file's line: any name (quotes, newlines, spaces at either end) reads back exactly. */
+const cquote = (p) => `"${p.replace(/[\\"\x00-\x1f\x7f]/g, (c) => (c === "\\" || c === '"' ? `\\${c}` : `\\${c.charCodeAt(0).toString(8).padStart(3, "0")}`))}"`;
+
+/** The text of a pathspec file naming `paths` (git's --pathspec-from-file, one quoted path per line). */
+export const pathspecText = (paths) => paths.map(cquote).join("\n") + "\n";
 
 /**
  * The git commands that commit exactly `paths` with `message`: stage them (new and deleted files
- * too), then commit only them, leaving anything else that was staged as it was.
+ * too), then commit only them, leaving anything else that was staged as it was. The paths come
+ * from `specFile` (pathspecText's text), not the command line, which has room for only so many.
  */
-export function commitCommands(paths, message) {
+export function commitCommands(paths, message, specFile) {
   if (!paths.length) throw new Error("No files checked");
   if (!message.trim()) throw new Error("Write a commit message");
-  return [["add", "-A", "--", ...paths], ["commit", "-m", message.trim(), "--", ...paths]];
+  const from = ["--pathspec-from-file", specFile];
+  return [[LITERAL, "add", "-A", ...from], [LITERAL, "commit", "-m", message.trim(), ...from]];
 }
 
 /** git arguments for line counts of uncommitted changes against HEAD. */

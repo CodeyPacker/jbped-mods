@@ -25,14 +25,14 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git, onWindows } from "./git.js";
-import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
+import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
 import { splitLines } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome, pathFor } from "./workspace.js";
-import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, rootId, idOf, mapLimit } from "./remote.js";
+import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, rootId, idOf, mapLimit, addSleeper } from "./remote.js";
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
@@ -168,6 +168,7 @@ export default class Review extends View {
     // Opened as a popup (reason or follow-up prompt): a small form, none of the pane's work.
     if (props()?.form) return this.initForm(cx);
     this.id = Math.random().toString(36).slice(2);
+    this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
     this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false };
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
@@ -405,7 +406,7 @@ export default class Review extends View {
               if (!store) continue;
               log(`${sp.name}: capturing ${store.root}${store.on ? ` on ${store.on}` : ""}`);
               // after: a capture on another machine checks its saved state once (a pass may be left over).
-              c = { capture: new Capture(store), space: sp.id, active: g.active, busy: false, by: g.by, after: !!store.on };
+              c = { capture: new Capture(store, log), space: sp.id, active: g.active, busy: false, by: g.by, after: !!store.on };
               this.captures.set(`${sp.id}|${root}`, c);
             }
             caps.push(c);
@@ -538,6 +539,7 @@ export default class Review extends View {
   }
 
   close() {
+    this.dropSleeper?.();
     this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
     // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
     // whenever the runtime drops the instance (a task still waiting would keep it, and all of this).
@@ -1537,7 +1539,7 @@ export default class Review extends View {
       try {
         for (const args of discardCommands(f.rel, f.inHead)) {
           const r = await this.git(f.store, args);
-          if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim()}`);
+          if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
         }
         this.error = null; this.commitNote = `Discarded ${f.rel}`;
       } catch (e) { this.error = String(e.message ?? e); }
@@ -1558,19 +1560,23 @@ export default class Review extends View {
   commit(cx) {
     const st = this.commitStore();
     if (!st || this.committing) return;
+    const rels = this.checkedIn(st).map((f) => f.rel), spec = st.tempPath("pathspec");
     let cmds;
-    try { cmds = commitCommands(this.checkedIn(st).map((f) => f.rel), this.commitInput.value()); }
+    try { cmds = commitCommands(rels, this.commitInput.value(), spec); }
     catch (e) { this.error = String(e.message ?? e); cx.notify(); return; }
     const held = this.heldElsewhere(this.checkedIn(st).map((f) => f.key));
     if (held.length) { this.error = `Unsaved edits in Edit: ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}. Save or discard them first`; cx.notify(); return; }
     this.committing = true; this.error = null; this.commitNote = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        for (const args of cmds) {
-          const r = await this.git(st, args, { timeout: 120000 });
-          if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim()}`);
-        }
-        this.commitNote = `Committed ${cmds[1].length - 4} file${cmds[1].length === 5 ? "" : "s"} to ${base(st.root)}`;
+        await st.remember(rels).catch(() => {}); // what Review's files are now, so their commit is recognised
+        await st.withTemp(spec, pathspecText(rels), async () => {
+          for (const args of cmds) {
+            const r = await this.git(st, args, { timeout: 120000 });
+            if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
+          }
+        });
+        this.commitNote = `Committed ${rels.length} file${rels.length === 1 ? "" : "s"} to ${base(st.root)}`;
         this.commitInput.set_value(""); this.unchecked.clear();
       } catch (e) { this.error = String(e.message ?? e); }
       finally { this.committing = false; }

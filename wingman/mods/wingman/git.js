@@ -8,6 +8,7 @@
 // Another machine (`on`, a space's machine) runs its own git there through herdr-core: no WSL
 // routing, and no core.filemode override (git there set it for its own file system).
 import { exec, readTextFile, appHome } from "herdr";
+import { withTimeout, LIMITS } from "./remote.js";
 
 export const onWindows = () => /^[A-Za-z]:/.test(appHome());
 const UNC = /^\/\/(?:wsl\.localhost|wsl\$)\/([^/]+)(\/.*)?$/i;
@@ -100,11 +101,13 @@ export async function ownerOf(cwd, on = null) {
  */
 export async function inRepo(cmd, args, { cwd = null, timeout, on = null } = {}) {
   const opts = timeout ? { timeout } : {};
-  if (on) return exec(cmd, args, { ...(cwd ? { cwd } : {}), on, ...opts });
+  // Another machine: a time limit here too (Herdr's own aside), so a call that never answers fails.
+  if (on) return withTimeout(exec(cmd, args, { ...(cwd ? { cwd } : {}), on, ...opts }), (timeout ?? 30000) + LIMITS.grace, `${cmd} on ${on}`);
   const owner = await ownerOf(cwd);
   if (owner === "wsl") {
-    const at = cwd ? ["--cd", toWsl(cwd)] : [];
-    return exec("wsl.exe", [...at, "-e", cmd, ...args.map(wslArg)], opts);
+    // A folder in a distro's own files runs in that distro; a Windows drive in the default one.
+    const d = cwd ? distroOf(cwd) : null, at = cwd ? ["--cd", toWsl(cwd)] : [];
+    return exec("wsl.exe", [...(d ? ["-d", d] : []), ...at, "-e", cmd, ...args.map(wslArg)], opts);
   }
   const fm = onWindows() && cmd === "git" ? ["-c", "core.filemode=false"] : [];
   return exec(cmd, [...fm, ...args], { ...(cwd ? { cwd } : {}), ...opts });

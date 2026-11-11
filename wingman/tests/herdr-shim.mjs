@@ -1,10 +1,16 @@
 import { execFile } from "node:child_process";
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFile, writeFile, rename, stat } from "node:fs/promises";
 // `on` (another machine) runs here, recorded in `remoteCalls`. Like Herdr, a remote program that
 // can't start rejects; machine "nosh" has no sh (a Windows machine).
 // With WINGMAN_REMOTE_HC set (the path of hc.exe or hc), machine WINGMAN_REMOTE_ON (default "wsl")
 // is reached for real, through `hc exec --on` and `hc file read --on`, the route a mod's call takes.
 export const remoteCalls = [];
+// Like Herdr, a local read of a text file over 1 MiB rejects (it never truncates).
+export const READ_LIMIT = 1048576;
+// Tests may stand in for a call: `fake.exec(cmd, args, opts)` / `fake.read(path, opts)` returning
+// undefined falls through to the real call. Every exec here is recorded in `execCalls`.
+export const fake = { exec: null, read: null };
+export const execCalls = [];
 const hcRoute = (on) => process.env.WINGMAN_REMOTE_HC && on === (process.env.WINGMAN_REMOTE_ON || "wsl") ? process.env.WINGMAN_REMOTE_HC : null;
 const hcJson = (hcPath, args) => new Promise((res, rej) =>
   execFile(hcPath, args, { encoding: "utf8", maxBuffer: 64 << 20 }, (_e, stdout, stderr) => {
@@ -13,6 +19,9 @@ const hcJson = (hcPath, args) => new Promise((res, rej) =>
   }));
 const b64 = (s) => Buffer.from(s ?? "", "base64").toString("utf8");
 export const exec = (cmd, args, opts = {}) => {
+  execCalls.push({ cmd, args, ...opts });
+  const f = fake.exec?.(cmd, args, opts);
+  if (f !== undefined) return f;
   if (opts.on) {
     remoteCalls.push({ cmd, args, ...opts });
     const hcPath = hcRoute(opts.on);
@@ -24,10 +33,12 @@ export const exec = (cmd, args, opts = {}) => {
     if (opts.on === "nosh" && cmd === "sh") return Promise.reject(new Error("cannot start sh: program not found"));
   }
   return new Promise((res, rej) =>
-    execFile(cmd, args, { cwd: opts.cwd, encoding: "utf8" }, (e, stdout, stderr) =>
+    execFile(cmd, args, { cwd: opts.cwd, encoding: "utf8", maxBuffer: 64 << 20 }, (e, stdout, stderr) =>
       opts.on && e?.code === "ENOENT" ? rej(new Error(`cannot start ${cmd}: program not found`)) : res({ code: e ? (e.code ?? 1) : 0, stdout, stderr })));
 };
 export const readTextFile = (p, opts = {}) => {
+  const f = fake.read?.(p, opts);
+  if (f !== undefined) return f;
   if (opts.on) {
     remoteCalls.push({ read: p, ...opts });
     const hcPath = hcRoute(opts.on);
@@ -37,7 +48,9 @@ export const readTextFile = (p, opts = {}) => {
       return j.text;
     });
   }
-  return readFile(p, "utf8").catch(() => null);
+  if (opts.on) return readFile(p, "utf8").catch(() => null);
+  return stat(p).then((s) => { if (s.isFile() && s.size > READ_LIMIT) throw new Error("Text file exceeds 1 MiB"); }, () => {})
+    .then(() => readFile(p, "utf8").catch(() => null));
 };
 export async function writeTextFile(p, text, expected) {
   if ((await readTextFile(p)) !== expected) throw new Error("stale snapshot");

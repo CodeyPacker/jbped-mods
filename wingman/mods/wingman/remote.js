@@ -63,3 +63,42 @@ export async function mapLimit(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
   return out;
 }
+
+// ---- time limits ------------------------------------------------------------------
+// A mod has no setTimeout: a copy lends its cx.sleep (addSleeper), and one watch loop wakes every
+// TICK ms while any timed call is waiting, failing those past their limit. Without a sleeper
+// nothing times out here (exec still has Herdr's own timeout).
+const sleepers = new Set(), waiting = new Set(), TICK = 250;
+let watching = false;
+
+/** Time limits of calls to another machine: reads LIMITS.read; exec its own timeout (Herdr's default
+ *  30 s) plus LIMITS.grace. Tests may change them. */
+export const LIMITS = { read: 20000, grace: 10000 };
+
+/** Registers a way to wait `ms` (a copy's cx.sleep); returns a function that removes it. */
+export function addSleeper(fn) { sleepers.add(fn); return () => sleepers.delete(fn); }
+
+async function watch() {
+  if (watching) return;
+  watching = true;
+  try {
+    while (waiting.size) {
+      const sleep = [...sleepers].at(-1);
+      if (!sleep) break;
+      try { await sleep(TICK); } catch { break; } // its copy closed: the next timed call starts again
+      const now = Date.now();
+      for (const w of waiting) if (now >= w.at) { waiting.delete(w); w.fail(); }
+    }
+  } finally { watching = false; }
+}
+
+/** `p`, or a rejection "<what> timed out after N s" when it hasn't settled within `ms`. */
+export function withTimeout(p, ms, what) {
+  if (!sleepers.size || !ms) return p;
+  return new Promise((resolve, reject) => {
+    const w = { at: Date.now() + ms, fail: () => reject(new Error(`${what} timed out after ${Math.max(1, Math.round(ms / 1000))} s`)) };
+    waiting.add(w);
+    Promise.resolve(p).then((v) => { waiting.delete(w); resolve(v); }, (e) => { waiting.delete(w); reject(e); });
+    watch();
+  });
+}

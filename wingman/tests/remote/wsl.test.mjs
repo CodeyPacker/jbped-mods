@@ -24,7 +24,7 @@ process.env.WINGMAN_REMOTE_HC = hcPath;
 
 const { exec, readTextFile, remoteCalls } = await import("herdr");
 const { Store } = await import("../../mods/wingman/store.js");
-const { STATUS_V2, parseStatusV2, onDisk, NUMSTAT, parseNumstat, discardCommands, commitCommands, READ, statusLetter } = await import("../../mods/wingman/changes.js");
+const { STATUS_V2, parseStatusV2, onDisk, NUMSTAT, parseNumstat, discardCommands, commitCommands, pathspecText, READ, statusLetter } = await import("../../mods/wingman/changes.js");
 const { STATUS_TREE, parseStatus: parseTree } = await import("../../mods/wingman/filetree.js");
 const { listDir, pathKind, writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, STALE, createFile, createDir, movePath, deleteFile, deleteTree } = await import("../../mods/wingman/fsx.js");
 const { newTarget, renameTarget } = await import("../../mods/wingman/fileops.js");
@@ -94,10 +94,17 @@ try {
   await assert.rejects(Store.open(`${root}/nope`, on));
 
   // Commit the checked files only; discard one tracked and one new file.
-  for (const args of commitCommands(["src/a.txt", "gone.txt"], "remote commit")) {
-    const r = await st.git(args, { timeout: 120000 });
-    assert.equal(r.code, 0, r.stderr);
-  }
+  const commit = async (rels, msg) => {
+    const spec = st.tempPath("pathspec");
+    await st.withTemp(spec, pathspecText(rels), async () => {
+      for (const args of commitCommands(rels, msg, spec)) {
+        const r = await st.git(args, { timeout: 120000 });
+        assert.equal(r.code, 0, r.stderr);
+      }
+    });
+    assert.equal(await pathKind(spec, { on }), null);
+  };
+  await timed("commit (2 files)", () => commit(["src/a.txt", "gone.txt"], "remote commit"));
   assert.notEqual(await st.head(), head);
   assert.equal((await st.git(["log", "-1", "--format=%s"])).stdout.trim(), "remote commit");
   let now = parseStatusV2((await st.git(STATUS_V2)).stdout).list;
@@ -108,6 +115,19 @@ try {
   assert.deepEqual(now, []);
   assert.equal(await readTextFile(`${root}/keep.txt`, { on }), "keep\n");
   assert.equal(await readTextFile(`${root}/new file.txt`, { on }), null);
+  // Names, not patterns: discarding app/[slug]/p.txt leaves app/s/p.txt; committing "*" commits only "*".
+  await sh(`cd "$1" && mkdir -p 'app/[slug]' app/s && echo 1 > 'app/[slug]/p.txt' && echo 1 > app/s/p.txt && echo 1 > '*' && git add -A && git commit -qm pat && echo 2 > 'app/[slug]/p.txt' && echo 2 > app/s/p.txt && echo 2 > '*'`, root);
+  for (const args of discardCommands("app/[slug]/p.txt", true)) assert.equal((await st.git(args)).code, 0);
+  assert.equal(await readTextFile(`${root}/app/[slug]/p.txt`, { on }), "1\n");
+  assert.equal(await readTextFile(`${root}/app/s/p.txt`, { on }), "2\n");
+  // 400 files with long names in one commit: their names (about 80 KB) go in a file there.
+  const many = Array.from({ length: 400 }, (_, i) => `deep/${"long-folder-name-".repeat(6)}/${String(i).padStart(3, "0")}-${"x".repeat(80)}.txt`);
+  await sh(`cd "$1" && d=$(dirname "$2") && mkdir -p "$d" && i=0 && while [ $i -lt 400 ]; do n=$(printf %03d $i); printf '%s\\n' "$n" > "$d/$n-$3.txt"; i=$((i+1)); done`, root, many[0], "x".repeat(80));
+  await timed("commit (401 files, long names)", () => commit(["*", ...many], "many"));
+  const shown = (await st.git(["show", "--name-only", "-z", "--format=", "HEAD"])).stdout.split("\0").filter(Boolean).sort();
+  assert.deepEqual(shown, ["*", ...many].sort());
+  assert.deepEqual(parseStatusV2((await st.git(STATUS_V2)).stdout).list.map((x) => x.rel), ["app/s/p.txt"]);
+  for (const args of discardCommands("app/s/p.txt", true)) assert.equal((await st.git(args)).code, 0);
   assert.ok(remoteCalls.every((c) => c.on === on));
 
   // ---- D1: writes there (fsx.writeText through hc exec: the Windows command line route) ----------

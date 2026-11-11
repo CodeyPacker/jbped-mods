@@ -4,7 +4,7 @@ Run all: `sh wingman/tests/run.sh`. Run some: `sh wingman/tests/run.sh git chang
 
 `run.sh` builds a temp app home (`WINGMAN_TEST_HOME`, with `mods/wingman` symlinked to the repo and an empty `data/wingman`) and removes it afterward.
 
-`herdr-shim.mjs` stands in for the `"herdr"` module (exec, file IO, `appHome()`). `register.mjs` and `hooks.mjs` map the import to it.
+`herdr-shim.mjs` stands in for the `"herdr"` module (exec, file IO, `appHome()`). `register.mjs` and `hooks.mjs` map the import to it. Like Herdr, its local `readTextFile` rejects a file over 1 MiB. Every `exec` is recorded in `execCalls`, and a test can answer calls itself with `fake.exec` / `fake.read` (return undefined to fall through), for example a call that never settles (`routes.test.mjs`).
 
 `main.js` imports UI modules and is not covered.
 

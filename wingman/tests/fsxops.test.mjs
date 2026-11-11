@@ -1,7 +1,7 @@
 // The Explorer's file operations in fsx.js (createFile, createDir, movePath, deleteFile, deleteTree)
 // on a real file system: here (local sh), as machine "vps" (the shim runs it here through `on`), and
 // refused on "nosh" (a Windows machine).
-import { createFile, createDir, movePath, deleteFile, deleteTree, OPS_SH, WINDOWS_NOTE } from "../mods/wingman/fsx.js";
+import { createFile, createDir, movePath, deleteFile, deleteTree, OPS_SH, WINDOWS_NOTE, systemFolder } from "../mods/wingman/fsx.js";
 import { newTarget, renameTarget } from "../mods/wingman/fileops.js";
 import { remoteCalls } from "herdr";
 import assert from "node:assert/strict";
@@ -148,6 +148,37 @@ if (winTemp && existsSync(winTemp)) {
     console.log(`case-only rename checked on ${r}`);
   } finally { rmSync(r, { recursive: true, force: true }); }
 } else console.log("case-only rename on a case-insensitive file system: skipped (no Windows drive)");
+
+// A root that is no project ("/", a drive or share root, /mnt/<letter>, the folder of home folders, a
+// system folder) only exists because a terminal sits there: every file operation is refused.
+for (const p of ["/", "", "C:/", "C:", "c:\\", "//server/share", "//server/share/", "//wsl.localhost/Ubuntu", "//wsl$/Debian/", "//wsl.localhost/Ubuntu/mnt/c",
+  "/mnt", "/mnt/c", "/mnt/D/", "/home", "/Users", "C:/Users", "/mnt/c/Users", "/usr", "/etc", "/var", "/System", "/Library", "C:/Windows", "c:/program files", "C:/Program Files (x86)", "/mnt/c/ProgramData"]) assert.ok(systemFolder(p), p);
+for (const p of ["/home/me", "/home/me/proj", "/home/me/proj/usr", "/mnt/c/dev", "/mnt/c/dev/Windows", "C:/dev", "C:/Users/me", "/tmp", "/tmp/x", "/srv/app", "/opt/project", "/root",
+  "//wsl.localhost/Ubuntu/home/me", "//server/share/proj", "/mnt/wsl", "/Users/me"]) assert.ok(!systemFolder(p), p);
+{
+  const victim = mkdtempSync(`${tmpdir()}/fsxops-victim-`);
+  writeFileSync(`${victim}/keep`, "k");
+  try {
+    for (const on of [null, "vps"]) {
+      const o = { on }, no = (p) => assert.rejects(p, /File operations aren't available in \/|refusing/);
+      await no(deleteTree(victim, "/", o));
+      await no(deleteFile(`${victim}/keep`, "/", o));
+      await no(createFile(`${victim}/new`, "/", o));
+      await no(createDir(`${victim}/new`, "/", o));
+      await no(movePath(`${victim}/keep`, `${victim}/moved`, "/", o));
+      await assert.rejects(createFile("/mnt/c/x.txt", "/mnt/c", o), /File operations aren't available in \/mnt\/c/);
+      await assert.rejects(deleteTree("/home/someone/proj", "/home", o), /refusing|aren't available/);
+      await assert.rejects(deleteTree("/usr", "/", o), /refusing|aren't available/);
+    }
+    assert.deepEqual(readdirSync(victim), ["keep"]);
+    // The script refuses a recursive delete under such a root on its own, too.
+    const sh = (...a) => execFileSync("sh", ["-c", OPS_SH, "wingman", ...a], { encoding: "utf8" }).trim();
+    assert.match(sh("rmtree", victim, ""), /^error refusing to delete inside/);
+    assert.match(sh("rmtree", "/mnt/c/x", "/mnt/c"), /^error refusing to delete inside/);
+    assert.match(sh("rmtree", "/home/x", "/home/"), /^error refusing to delete inside/);
+    assert.ok(existsSync(`${victim}/keep`));
+  } finally { rmSync(victim, { recursive: true, force: true }); }
+}
 
 // A Windows machine elsewhere: refused, nothing run there.
 await assert.rejects(createFile("C:/r/a.txt", "C:/r", { on: "nosh" }), (e) => e.message === WINDOWS_NOTE);

@@ -10,7 +10,7 @@ import * as fs from "fs/promises";
 import { readTextFile, writeTextFile, appHome, terminals, agents, exec } from "herdr";
 import { Store, ensureDir, parkStale } from "./store.js";
 import { hostPath } from "./capture.js";
-import { writeText, removeFile } from "./fsx.js";
+import { writeText, removeFile, readOn, execOn } from "./fsx.js";
 import { REMOTE, remotePath, rootId, addressOn, idOn, mapLimit } from "./remote.js";
 import { DIR_SH } from "./hooksetup.js";
 
@@ -117,7 +117,7 @@ export class Journal {
    */
   async drainOn(on, { dataDir = "", max = REMOTE.journalMax } = {}) {
     let r;
-    try { r = await exec("sh", ["-c", EVENTS_SH, "wingman", dataDir, String(max * 5)], { on, timeout: 20000 }); }
+    try { r = await execOn("sh", ["-c", EVENTS_SH, "wingman", dataDir, String(max * 5)], { on, timeout: 20000 }); }
     catch (e) {
       if (!/cannot start sh/i.test(String(e?.message ?? e))) throw e;
       hookThere.set(on, false); // a Windows machine: no hook there
@@ -128,7 +128,7 @@ export class Journal {
     hookThere.set(on, true);
     const [, dir, ...rest] = r.stdout.split("\0");
     const names = rest.filter((n) => n.endsWith(".json")).sort().slice(0, max);
-    const texts = await mapLimit(names, REMOTE.parallel, (n) => readTextFile(`${dir}/events/${n}`, { on }).then((text) => ({ text }), (error) => ({ error })));
+    const texts = await mapLimit(names, REMOTE.parallel, (n) => readOn(`${dir}/events/${n}`, { on }).then((text) => ({ text }), (error) => ({ error })));
     let adopted = 0;
     const spaces = [], gone = [];
     for (let i = 0; i < names.length; i++) {
@@ -158,7 +158,7 @@ export class Journal {
       gone.push(`${dir}/events/${name}`);
     }
     if (gone.length) {
-      const rm = await exec("rm", ["-f", "--", ...gone], { on, timeout: 20000 });
+      const rm = await execOn("rm", ["-f", "--", ...gone], { on, timeout: 20000 });
       if (rm.code !== 0) this.log(`events on ${on}: rm: ${(rm.stderr || rm.stdout).trim()}`);
     }
     if (spaces.length) await addSpaceRepos(spaces);
@@ -179,7 +179,7 @@ export class Journal {
     const rel = file.slice(store.root.length + 1);
     const head = file.slice(0, store.root.length);
     if (!rel || (on ? head !== store.root : head.toLowerCase() !== store.root.toLowerCase())) return null;
-    const read = (p) => (on ? readTextFile(p, { on }) : readTextFile(p));
+    const read = (p) => readOn(p, { on });
     const put = (p, text, before) => (on ? writeText(p, text, before, { on }) : writeTextFile(p, text, before));
     const res = event.tool_response ?? {};
     const created = res.type === "create";
@@ -219,7 +219,7 @@ mkdir -p -- "$d/feedback" && printf 'dir %s' "$d"`;
 /** The feedback file on machine `on` for Herdr's terminal address `terminal` (one call). Throws when
  *  the hook isn't installed there. */
 async function feedbackPath(on, terminal, dataDir) {
-  const r = await exec("sh", ["-c", FEEDBACK_SH, "wingman", dataDir], { on, timeout: 20000 });
+  const r = await execOn("sh", ["-c", FEEDBACK_SH, "wingman", dataDir], { on, timeout: 20000 });
   if (r.code !== 0) throw new Error(`feedback on ${on}: ${(r.stderr || r.stdout).trim() || `exit ${r.code}`}`);
   if (!r.stdout.startsWith("dir ")) { hookThere.set(on, false); throw new Error(`the Claude hook isn't installed on ${on}`); }
   return `${r.stdout.slice(4)}/feedback/${idOn(on, terminal)}.ctx`;
@@ -232,7 +232,7 @@ async function feedbackPath(on, terminal, dataDir) {
  */
 export async function queueFeedback(terminal, text, { on = null, dataDir = "" } = {}) {
   if (on) {
-    const path = await feedbackPath(on, terminal, dataDir), before = await readTextFile(path, { on });
+    const path = await feedbackPath(on, terminal, dataDir), before = await readOn(path, { on });
     const lines = before ? JSON.parse(before).split("\n") : [];
     lines.push(text);
     await writeText(path, JSON.stringify(lines.join("\n")), before, { on });
@@ -250,7 +250,7 @@ export async function queueFeedback(terminal, text, { on = null, dataDir = "" } 
  *  true when it was still queued. */
 export async function withdrawFeedback(terminal, text, { on = null, dataDir = "" } = {}) {
   if (on) {
-    const path = await feedbackPath(on, terminal, dataDir), before = await readTextFile(path, { on });
+    const path = await feedbackPath(on, terminal, dataDir), before = await readOn(path, { on });
     if (!before) return false;
     const all = JSON.parse(before).split("\n"), lines = all.filter((l) => l !== text);
     if (lines.length === all.length) return false;

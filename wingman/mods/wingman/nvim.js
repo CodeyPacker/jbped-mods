@@ -27,6 +27,9 @@ export function exArg(p) {
   return p.replace(/[ \\%#|"]/g, "\\$&").replace(/</g, "<lt>");
 }
 
+/** wsl.exe's -d for a path in a distro's own files (none for a Windows drive: the default distro). */
+const distroArgs = (p) => { const d = /^\/\/(?:wsl\.localhost|wsl\$)\/([^/]+)/i.exec(String(p).replace(/\\/g, "/"))?.[1]; return d ? ["-d", d] : []; };
+
 const socketFor = (space, how) => (how === "wsl" || !onWindows() ? `/tmp/wingman-nvim-${space}.sock` : `\\\\.\\pipe\\wingman-nvim-${space}`);
 
 // Buffers reload when the file changes on disk (the agent's writes) unless they hold unsaved edits.
@@ -48,13 +51,15 @@ export async function openInNvim(space, root, path, line) {
   if (t) {
     const keys = `<C-\\><C-N>:drop +${line + 1} ${exArg(file)}<CR>zz`;
     const args = ["--server", sock, "--remote-send", keys];
-    const r = how === "wsl" ? await exec("wsl.exe", ["-e", "nvim", ...args]) : await exec("nvim", args);
+    // The distro this Neovim was started in (its terminal's -d), where its socket is.
+    const at = t.argv?.indexOf("-d") ?? -1, d = how === "wsl" && at >= 0 ? ["-d", t.argv[at + 1]] : [];
+    const r = how === "wsl" ? await exec("wsl.exe", [...d, "-e", "nvim", ...args]) : await exec("nvim", args);
     if (r.code !== 0) throw new Error(`nvim: ${(r.stderr || r.stdout).trim()}`);
     run("pane.focus", { terminal: t.address });
     return;
   }
   const nv = ["nvim", "--listen", sock, "-c", INIT, `+${line + 1}`, file];
-  const argv = how === "wsl" ? ["wsl.exe", "--cd", wslPath(root), "-e", ...nv] : nv;
+  const argv = how === "wsl" ? ["wsl.exe", ...distroArgs(root), "--cd", wslPath(root), "-e", ...nv] : nv;
   run("terminal.open", { argv, folder: root, place: "right", name: "Neovim" });
 }
 
@@ -92,8 +97,9 @@ export function editorArgv(id, path, line, col, template = "") {
   return [ed.cmd, ...(unc ? ["--remote", `wsl+${unc[1]}`, "-g", unc[2] + at] : ["-g", p + at])];
 }
 
-// cmd.exe re-reads its command line, so a .cmd launcher only gets arguments without these.
-const CMD_UNSAFE = /[&|<>^%!"\r\n]/;
+// cmd.exe re-reads its command line, so a .cmd launcher only gets arguments without these. An
+// argument with a space is quoted (safe); , ; = split an unquoted one into several for the launcher.
+const CMD_UNSAFE = /[&|<>^%!"\r\n,;=]/;
 
 /**
  * Opens `path` at `line`/`col` (0-based) in the chosen editor. On Windows an .exe on PATH runs

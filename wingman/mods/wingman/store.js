@@ -4,7 +4,9 @@
 import { readTextFile } from "herdr";
 import { git, hostOf } from "./git.js";
 import { splitLines, parseHunks, wholeHunk } from "./model.js";
-import { writeText, removeFile, makeDir } from "./fsx.js";
+import { writeText, removeFile, makeDir, fingerprints, readOn } from "./fsx.js";
+import { sha256Hex } from "./sha256.js";
+import { REMOTE, mapLimit } from "./remote.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 export const norm = (p) => { const s = p.replace(/\\/g, "/").replace(/^\/\/\?\//, ""); return isWindows(s) ? s.toLowerCase() : s; };
@@ -20,6 +22,13 @@ export async function swap(path, before, after, on = null) {
 }
 
 const lf = (t) => (t == null ? null : t.replace(/\r\n/g, "\n"));
+
+/** The most a text Herdr reads may have (1 MiB): a bigger file is never reviewed. */
+export const MAX_TEXT = 1048576;
+
+/** What a version of a file is, for telling whether a commit holds it: the SHA-256 of its text
+ *  with CRLF read as LF, or "-" for no file. */
+export const sumOf = async (t) => (t == null ? "-" : await sha256Hex(lf(t)));
 
 /** The branch a HEAD file names ("ref: refs/heads/x" -> "x"), or "@<sha>" when detached. */
 export function branchOf(headText) {
@@ -65,7 +74,8 @@ export class Store {
   /** git in the repo, where it lives. */
   git(args, opts = {}) { return git(args, { cwd: this.root, on: this.on, ...opts }); }
 
-  read(path) { return readTextFile(path, { on: this.on }); }
+  /** A file's text (null when absent). On another machine with a time limit (fsx.readOn). */
+  read(path) { return this.on ? readOn(path, { on: this.on }) : readTextFile(path); }
 
   /**
    * What a batch of watched paths means: "all" (the index changed or the batch
@@ -104,26 +114,117 @@ export class Store {
   }
 
   /**
-   * Whether the agent's change to `rel` is committed: the file on disk is what HEAD has, and a
-   * commit since the entry was recorded changed it (before the entry recorded HEAD: HEAD differs
-   * from the baseline).
+   * Whether the agent's change to `rel` is committed: the file on disk is what HEAD has, and HEAD
+   * has the agent's change, `sum` (sumOf of the file as last seen differing from HEAD, see
+   * observe). So a change put aside (git stash, a discard) while HEAD moves is never taken for
+   * committed. Entries from before sums were kept (no `sum`): a commit since the entry was
+   * recorded changed the file (before the entry recorded HEAD: HEAD differs from the baseline).
+   * A file that can't be read (over 1 MiB, gone meanwhile) isn't committed.
    */
-  async committed(rel, e, head) {
-    const [c, h] = await Promise.all([this.read(`${this.root}/${rel}`), this.blobAt(head, rel)]);
+  async committed(rel, e, head, sum = e.sum ?? null) {
+    let c, h;
+    try { [c, h] = await Promise.all([this.read(`${this.root}/${rel}`), this.blobAt(head, rel)]); } catch { return false; }
     if (lf(c) !== lf(h)) return false;
+    if (sum) return (await sumOf(h)) === sum;
     if (e.head) return e.head !== head && lf(await this.blobAt(e.head, rel)) !== lf(h);
-    const b = await this.read(`${this.dir}/baselines/${e.baseline}`);
+    const b = await this.read(`${this.dir}/baselines/${e.baseline}`).catch(() => null);
     return lf(e.created ? null : b ?? "") !== lf(h);
   }
 
   /**
+   * Each file's sumOf on disk now (undefined when it can't be read). Here the texts are read (one
+   * that didn't change since the last look isn't hashed again); on another machine one call hashes
+   * them all there and only contents not seen before are read.
+   */
+  async diskSums(rels) {
+    const out = new Map(), seen = (this.seenSums ??= new Map());
+    if (seen.size > 2000) seen.clear();
+    if (!this.on) {
+      for (const rel of rels) {
+        const t = await this.read(`${this.root}/${rel}`).catch(() => undefined);
+        if (t === undefined) continue;
+        const k = seen.get(rel);
+        if (k?.text === t) { out.set(rel, k.sum); continue; }
+        const sum = await sumOf(t);
+        seen.set(rel, { text: t, sum }); out.set(rel, sum);
+      }
+      return out;
+    }
+    // Hashed in calls of at most about 20 KB of paths (a call's safe size is 30 KB in all).
+    const paths = rels.map((r) => `${this.root}/${r}`), fp = {}, groups = [[]];
+    let size = 0;
+    for (const p of paths) {
+      if (size + p.length > 20000 && groups.at(-1).length) { groups.push([]); size = 0; }
+      groups.at(-1).push(p); size += p.length + 1;
+    }
+    for (const g of groups) if (g.length) Object.assign(fp, await fingerprints(g, { on: this.on }));
+    await mapLimit(rels, REMOTE.parallel, async (rel, i) => {
+      const raw = fp[paths[i]];
+      if (raw === undefined) return;
+      if (raw === null) { out.set(rel, "-"); return; }
+      if (!seen.has(raw)) {
+        const t = await this.read(paths[i]).catch(() => null);
+        if (t == null) return;
+        seen.set(raw, await sumOf(t));
+      }
+      out.set(rel, seen.get(raw));
+    });
+    return out;
+  }
+
+  /** HEAD's sumOf for `rel`, kept while HEAD stays. */
+  async headSum(head, rel) {
+    if (this.sumsHead !== head) { this.sumsHead = head; this.headSums = new Map(); }
+    if (!this.headSums.has(rel)) this.headSums.set(rel, head ? await sumOf(await this.blobAt(head, rel)) : "-");
+    return this.headSums.get(rel);
+  }
+
+  /**
+   * Remembers what each reviewed file (`entries`: [rel, entry]) has while it differs from HEAD:
+   * the agent's change, and any edit after it, as it would be committed. Kept in sums.json
+   * (baseline name -> sum), apart from the index so the panes aren't reloaded for it; only names
+   * in `keep` stay. Returns the sums. Compare-and-swap: when the write loses, the next look retries.
+   */
+  async observe(entries, head, keep = null) {
+    const path = `${this.dir}/sums.json`;
+    const before = this.on && this.sumsText !== undefined ? this.sumsText : await this.read(path).catch(() => null);
+    let sums = {};
+    try { sums = before ? JSON.parse(before) : {}; } catch {}
+    const next = { ...sums }, disk = await this.diskSums(entries.map(([rel]) => rel));
+    for (const [rel, e] of entries) {
+      const d = disk.get(rel);
+      if (d !== undefined && d !== (await this.headSum(head, rel))) next[e.baseline] = d;
+    }
+    if (keep) for (const k of Object.keys(next)) if (!keep.has(k)) delete next[k];
+    const text = JSON.stringify(next);
+    if (text !== (before ?? "{}")) {
+      try { await writeText(path, text, before, { on: this.on }); this.sumsText = text; }
+      catch { this.sumsText = undefined; return sums; }
+    } else this.sumsText = before;
+    return next;
+  }
+
+  /** observe for the files `rels` that are under review, before a commit (the leader looks only every few seconds). */
+  async remember(rels) {
+    const files = await this.index(), entries = rels.filter((r) => files[r]).map((r) => [r, files[r]]);
+    if (entries.length) await this.observe(entries, await this.head());
+  }
+
+  /**
    * The capture leader's pass over the index: entries get their branch and space (old ones),
-   * entries of another branch are parked and come back when the repo is on it again, and
-   * committed changes leave the review for index.done (the Changes view marks them as AI's).
-   * Committed changes are looked for when HEAD moved since the last pass. Compare-and-swap:
-   * when someone else wrote the index first, the next pass tries again.
+   * entries of another branch are parked and come back when the repo is on it again, each file's
+   * content is remembered while it differs from HEAD (observe), and committed changes leave the
+   * review for index.done (the Changes view marks them as AI's). Committed changes are looked for
+   * when HEAD moved since the last pass. Compare-and-swap: when someone else wrote the index
+   * first, the next pass tries again. A pass still running when the next is due skips that one.
    */
   async reconcile(spaceOf = () => null) {
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try { await this.reconcileOnce(spaceOf); } finally { this.reconciling = false; }
+  }
+
+  async reconcileOnce(spaceOf) {
     const path = `${this.dir}/index.json`, before = await this.read(path);
     if (!before) return;
     const index = JSON.parse(before), branch = await this.branch(), head = await this.head();
@@ -138,9 +239,11 @@ export class Store {
       const rel = k.slice(e.branch.length + 1);
       if (e.branch === branch && !index.files[rel]) { index.files[rel] = e; delete index.parked[k]; changed = true; }
     }
+    const live = Object.entries(index.files), keep = new Set([...live, ...Object.entries(index.parked ?? {})].map(([, e]) => e.baseline));
+    const sums = live.length || before.includes('"parked"') ? await this.observe(live, head, keep) : {};
     if (head && head !== this.checkedHead) {
-      for (const [rel, e] of Object.entries(index.files)) {
-        if (!(await this.committed(rel, e, head))) continue;
+      for (const [rel, e] of live) {
+        if (!(await this.committed(rel, e, head, sums[e.baseline] ?? e.sum ?? null))) continue;
         (index.done ??= {})[`${branch}|${rel}`] = { by: e.by ?? null, space: e.space ?? null, created: !!e.created, head, at: Date.now() };
         delete index.files[rel]; changed = true;
       }
@@ -180,6 +283,17 @@ export class Store {
       catch (e) { out.push({ rel, store: this, key: `${this.root}|${rel}`, error: String(e.message ?? e), hunks: [] }); }
     }
     return out;
+  }
+
+  /** A fresh path for a temp file in the review store (on the repo's machine), `kind` its suffix. */
+  tempPath(kind) { return `${this.dir}/tmp-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.${kind}`; }
+
+  /** Writes `text` to `path` (tempPath's), runs `run()`, and removes the file afterwards, whatever happened. */
+  async withTemp(path, text, run) {
+    await makeDir(this.dir, { on: this.on });
+    await writeText(path, text, null, { on: this.on });
+    try { return await run(); }
+    finally { await removeFile(path, text, { on: this.on }).catch(() => {}); }
   }
 
   /** Applies one model write ({ target, before, after }) to disk; returns it with its path. */
