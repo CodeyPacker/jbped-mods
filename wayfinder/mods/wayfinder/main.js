@@ -99,8 +99,9 @@ const field = (state, t, w = 260) => div().on_mouse_down("left", stop)
 const linkText = (s) => String(s ?? "").replace(/([[\]\\])/g, "\\$1");
 const link = (label, url) => url ? `[${linkText(label)}](<${url}>)` : linkText(label);
 
-function card(tk, t, selected, onClick) {
-  return v_flex().id(`wf-card-${tk.key}`).gap(6).p(10).rounded(8).bg(t.surface).border_1().border_color(selected ? t.accent : t.border)
+// `cursor`: the card the arrow keys are on (#20).
+function card(tk, t, selected, onClick, cursor = false) {
+  return v_flex().id(`wf-card-${tk.key}`).gap(6).p(10).rounded(8).bg(cursor ? t.hover : t.surface).border_1().border_color(selected ? t.accent : cursor ? t.foreground : t.border)
     .cursor_pointer().hover((s) => s.border_color(selected ? t.accent : t.input))
     .on_mouse_down("left", stop).on_click((_e, cx) => onClick(cx))
     .child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
@@ -263,6 +264,44 @@ export default class Wayfinder extends View {
 
   mineKey(b) { return `wayfinder.mine.${this.profile.name}.${b.id}`; }
 
+  // The Board's Columns as shown: Tracked Statuses or the Provider's, with the Mine filter.
+  columnsOf(b, data) {
+    const mine = load(this.mineKey(b), "0") === "1";
+    return byColumn(b.trackedStatuses?.length ? trackColumns(data, b.trackedStatuses) : data, { mine });
+  }
+
+  // Arrow keys move between cards and Columns (#20). Enter opens the card, and while the detail panel
+  // is open it follows the cursor. True when the key was used.
+  boardKey(key, cx) {
+    const b = this.board, data = b && this.boards[b.id]?.data;
+    if (this.view !== "board" || !data) return false;
+    const cols = this.columnsOf(b, data);
+    if (!cols.length) return false;
+    let c = this.cursor?.board === b.id ? { ...this.cursor } : null;
+    if (!c) {
+      if (!["left", "right", "up", "down", "enter"].includes(key)) return false;
+      const first = Math.max(0, cols.findIndex((x) => x.tickets.length));
+      c = { board: b.id, col: first, row: 0 };
+    } else if (key === "left" || key === "right") {
+      // To the next Column that has cards, keeping the row where it can.
+      const step = key === "left" ? -1 : 1;
+      let i = c.col + step;
+      while (i >= 0 && i < cols.length && !cols[i].tickets.length) i += step;
+      if (i < 0 || i >= cols.length) return true;
+      c.col = i; c.row = Math.min(c.row, cols[i].tickets.length - 1);
+    } else if (key === "up") c.row = Math.max(0, c.row - 1);
+    else if (key === "down") c.row = Math.min(cols[c.col].tickets.length - 1, c.row + 1);
+    else if (key === "home") c.row = 0;
+    else if (key === "end") c.row = Math.max(0, cols[c.col].tickets.length - 1);
+    else if (key !== "enter") return false;
+    c.col = Math.min(c.col, cols.length - 1);
+    c.row = Math.max(0, Math.min(c.row, cols[c.col].tickets.length - 1));
+    this.cursor = c;
+    const tk = cols[c.col].tickets[c.row];
+    if (tk && (key === "enter" || this.selected)) this.openTicket(b, tk, cx);
+    return true;
+  }
+
   reload(cx) {
     const before = this.profile?.name ?? this.lastProfile;
     this.state = { status: "loading" };
@@ -394,6 +433,7 @@ export default class Wayfinder extends View {
   // Opens the detail panel on a Ticket, or switches it to another.
   openTicket(b, summary, cx) {
     this.selected = { boardId: b.id, summary };
+    this.handle.focus(); // a card's click stops the root's, which would focus: keys need it (#20)
     if (this.tickets[summary.key]?.status !== "ok") this.fetchTicket(cx);
     cx.notify();
   }
@@ -855,13 +895,14 @@ export default class Wayfinder extends View {
       content = entry.status === "error" ? this.message(t, "Couldn't load this Board", [entry.error]) : skeletonColumns(t);
     } else {
       content = h_flex().id("wf-columns").size_full().min_w(0).min_h(0).px(16).pb(16).gap(12).items_start().overflow_x_scrollbar()
-        .children(byColumn(b.trackedStatuses?.length ? trackColumns(entry.data, b.trackedStatuses) : entry.data, { mine }).map(({ column, tickets }) =>
+        .children(this.columnsOf(b, entry.data).map(({ column, tickets }, ci) =>
           v_flex().id(`wf-col-${column.id}`).w(COLUMN_W).flex_none().max_h_full().rounded(10).bg(t.chrome).border_1().border_color(t.border)
             .child(h_flex().h(36).px(12).gap(8).flex_none().items_center()
               .child(div().text_size(12).font_semibold().text_color(t.foreground).truncate().child(column.name))
               .child(div().text_size(11).text_color(t.dim).child(String(tickets.length))))
             .child(v_flex().id(`wf-col-body-${column.id}`).px(8).pb(8).gap(8).overflow_y_scrollbar()
-              .children(tickets.map((tk) => card(tk, t, this.selected?.summary.key === tk.key, (cx) => this.openTicket(b, tk, cx)))))));
+              .children(tickets.map((tk, ri) => card(tk, t, this.selected?.summary.key === tk.key, (cx) => { this.cursor = { board: b.id, col: ci, row: ri }; this.openTicket(b, tk, cx); },
+                this.cursor?.board === b.id && this.cursor.col === ci && this.cursor.row === ri))))));
     }
     const panel = this.selected?.boardId === b.id && !(si && !si.ok) ? this.ticketPanel(t) : null;
     // The detail panel takes the full height under the header, beside the Board's bar and Columns.
@@ -1136,9 +1177,11 @@ export default class Wayfinder extends View {
       .track_focus(this.handle)
       .on_mouse_down("left", () => this.handle.focus())
       .on_key_down((e, cx) => {
-        if (e.key !== "escape") return;
-        if (this.selected) this.closeTicket(); else this.setFullscreen(false);
-        cx.notify();
+        if (e.key === "escape") {
+          if (this.selected) this.closeTicket(); else this.setFullscreen(false);
+          cx.notify(); return;
+        }
+        if (this.boardKey(e.key, cx)) { cx.stop_propagation(); cx.notify(); }
       })
       .child(this.header(t))
       .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));
