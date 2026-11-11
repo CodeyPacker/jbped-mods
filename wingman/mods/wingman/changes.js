@@ -44,3 +44,35 @@ export function commitCommands(paths, message) {
   if (!message.trim()) throw new Error("Write a commit message");
   return [["add", "-A", "--", ...paths], ["commit", "-m", message.trim(), "--", ...paths]];
 }
+
+/** git arguments for line counts of uncommitted changes against HEAD. */
+export const NUMSTAT = [...READ, "diff", "HEAD", "--numstat", "-z", "--no-renames"];
+/** The same in a repo with no commits yet: staged, then unstaged (run both, pass both outputs to parseNumstat). */
+export const NUMSTAT_NO_HEAD = [[...READ, "diff", "--cached", "--numstat", "-z", "--no-renames"], [...READ, "diff", "--numstat", "-z", "--no-renames"]];
+
+/** `git diff --numstat -z` outputs (one or more) as Map<rel, { add, del, binary }>; counts for the same file add up. A binary file ("-\t-\tpath") has add 0, del 0, binary true. */
+export function parseNumstat(...outs) {
+  const map = new Map();
+  for (const out of outs) {
+    for (const e of out.split("\0")) {
+      if (!e) continue;
+      const a = e.indexOf("\t"), b = e.indexOf("\t", a + 1);
+      const rel = e.slice(b + 1);
+      const binary = e.slice(0, a) === "-";
+      const cur = map.get(rel) ?? { add: 0, del: 0, binary: false };
+      if (!binary) {
+        cur.add += Number(e.slice(0, a));
+        cur.del += Number(e.slice(a + 1, b));
+      }
+      cur.binary = cur.binary || binary;
+      map.set(rel, cur);
+    }
+  }
+  return map;
+}
+
+/** Lines in a text, for a new untracked file's `add`: "a\nb\n" -> 2, "a\nb" -> 2, "" -> 0. */
+export function countLines(text) {
+  if (!text) return 0;
+  return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+}

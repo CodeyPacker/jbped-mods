@@ -1,4 +1,4 @@
-import { parseStatus, statusLetter, reviewTag, discardCommands, commitCommands } from "../mods/wingman/changes.js";
+import { parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, parseNumstat, countLines } from "../mods/wingman/changes.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,4 +26,19 @@ for (const c of discardCommands("b.txt", true)) git(...c);
 assert.equal(readFileSync(d + "/new.txt", "utf8"), "n\n"); assert.ok(!existsSync(d + "/u.txt")); assert.ok(!existsSync(d + "/s.txt"));
 assert.equal(git("status", "--porcelain").trim(), "");
 rmSync(d, { recursive: true, force: true });
+// parseNumstat: normal, binary, a tab in the path, two outputs merged.
+assert.deepEqual(parseNumstat("3\t1\ta.js\0-\t-\timg.png\0"), new Map([["a.js", { add: 3, del: 1, binary: false }], ["img.png", { add: 0, del: 0, binary: true }]]));
+assert.deepEqual(parseNumstat("1\t2\tdir/x\ty z.txt\0"), new Map([["dir/x\ty z.txt", { add: 1, del: 2, binary: false }]]));
+assert.deepEqual(parseNumstat("1\t0\ta.js\0", "2\t1\ta.js\0-\t-\tb.bin\0").get("a.js"), { add: 3, del: 1, binary: false });
+assert.equal(parseNumstat("1\t0\ta.js\0", "2\t1\ta.js\0-\t-\tb.bin\0").get("b.bin").binary, true);
+assert.equal(parseNumstat("").size, 0);
+// countLines
+assert.equal(countLines("a\nb\n"), 2); assert.equal(countLines("a\nb"), 2); assert.equal(countLines(""), 0); assert.equal(countLines("\n\n"), 2);
+// Real git: NUMSTAT against HEAD counts a modified tracked file.
+const r = mkdtempSync(tmpdir() + "/wm-num-"), rg = (...a) => execFileSync("git", a, { cwd: r, encoding: "utf8" });
+rg("init", "-q"); rg("config", "user.email", "t@t"); rg("config", "user.name", "t");
+writeFileSync(r + "/f.txt", "1\n2\n3\n"); rg("add", "."); rg("commit", "-qm", "init");
+writeFileSync(r + "/f.txt", "1\nX\n3\n4\n");
+assert.deepEqual(parseNumstat(rg(...NUMSTAT)).get("f.txt"), { add: 2, del: 1, binary: false });
+rmSync(r, { recursive: true, force: true });
 console.log("changes tests pass");
