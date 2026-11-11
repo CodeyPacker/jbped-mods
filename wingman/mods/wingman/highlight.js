@@ -1,6 +1,7 @@
 // Prism highlighting as per-line spans, tokenized in chunks so Herdr's script
 // runtime never runs long enough to interrupt it.
 import Prism from "./grammars.js"; // core + JS (prism.js) plus markup, C#, JSON, Markdown, CSS, TS, JSX, TSX
+import { packSpans } from "./spans.js";
 
 const LANGS = {
   // .js goes through JSX too: React projects often keep JSX in .js files.
@@ -26,7 +27,7 @@ export const languageOf = (path) => {
   return NAMES.find(([re]) => re.test(name))?.[1] ?? LANGS[name.split(".").pop()] ?? null;
 };
 
-// Prism token tree -> one array of {text, type} spans per line.
+// Prism token tree -> one array of {text, type} spans per line (packed by the callers: spans.js).
 function tokenLines(code, grammar) {
   const lines = [[]];
   const walk = (tokens, type) => {
@@ -44,14 +45,14 @@ function tokenLines(code, grammar) {
   return lines;
 }
 
-/** Per-line spans for `lines`, tokenized in chunks cut at blank lines (multi-line tokens stay whole). */
+/** Per-line spans for `lines` (packed), tokenized in chunks cut at blank lines (multi-line tokens stay whole). */
 async function chunked(lines, grammar, cx) {
-  if (!grammar) return lines.map((l) => (l ? [{ text: l, type: null }] : []));
+  if (!grammar) return lines.map((l) => packSpans(l ? [{ text: l, type: null }] : []));
   const out = [];
   for (let i = 0; i < lines.length;) {
     let end = Math.min(lines.length, i + 150);
     while (end < lines.length && end < i + 300 && lines[end - 1] !== "") end++;
-    out.push(...tokenLines(lines.slice(i, end).join("\n"), grammar));
+    for (const l of tokenLines(lines.slice(i, end).join("\n"), grammar)) out.push(packSpans(l));
     i = end;
     await cx.sleep(0);
   }
@@ -96,10 +97,10 @@ async function regions(lines, cx) {
  */
 export function highlightLines(lines, language) {
   const grammar = language === "html" || language === "vue" ? Prism.languages.template : language && Prism.languages[language];
-  return lines.map((l) => (!l ? [] : grammar ? tokenLines(l, grammar)[0] : [{ text: l, type: null }]));
+  return lines.map((l) => packSpans(!l ? [] : grammar ? tokenLines(l, grammar)[0] : [{ text: l, type: null }]));
 }
 
-/** Per-line spans for `code`. */
+/** Per-line spans for `code`, packed (spans.js unpacks a line). */
 export async function highlight(code, language, cx) {
   const lines = code.replace(/\r/g, "").split("\n");
   if (language === "html" || language === "vue") return regions(lines, cx);

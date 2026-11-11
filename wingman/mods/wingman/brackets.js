@@ -1,4 +1,5 @@
-// Bracket matching for the built-in editor. Pure: no imports.
+// Bracket matching for the built-in editor. Pure: no Herdr imports.
+import { spans } from "./spans.js";
 
 const OPEN_TO_CLOSE = { "(": ")", "[": "]", "{": "}" };
 const CLOSE_TO_OPEN = { ")": "(", "]": "[", "}": "{" };
@@ -59,8 +60,8 @@ export function matchBracket(lines, pos, { skip = null, maxLines = 2000 } = {}) 
 const QUIET = new Set(["string", "char", "regex", "comment", "prolog", "doctype", "cdata"]);
 
 /**
- * A `skip(line, col)` for matchBracket from the highlighter's per-line spans ([{ text, type }] per
- * line, highlight.js). A line's ranges are worked out once, when the scan first reaches it. A line
+ * A `skip(line, col)` for matchBracket from the highlighter's per-line spans ([{ text, type }] or
+ * packed, per line: highlight.js, spans.js). A line's ranges are worked out once, when the scan first reaches it. A line
  * whose spans don't add up to its text (`lines` given, tokens not yet redone after an edit) hides nothing.
  */
 export function tokenSkip(tokens, lines = null) {
@@ -70,7 +71,7 @@ export function tokenSkip(tokens, lines = null) {
     if (r) return r;
     r = [];
     let at = 0;
-    for (const s of tokens?.[line] ?? []) {
+    for (const s of spans(tokens?.[line])) {
       const end = at + s.text.length;
       if (QUIET.has(s.type)) r.push([at, end]);
       at = end;

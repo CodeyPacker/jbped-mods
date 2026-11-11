@@ -9,7 +9,7 @@
 // never overwrites someone else's edit: the view reports it and reloads.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
-import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
+import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, machines, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
 import { Store, PlainRoot, norm, shows } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
@@ -36,6 +36,7 @@ import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, ro
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
+import { spans as spansOf } from "./spans.js";
 import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys } from "./journal.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
@@ -43,12 +44,20 @@ const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, A
 const ACTIVE = new Set(["working", "blocked"]);
 const base = (p) => p.split("/").pop();
 const SROW = 22; // a Search result row's height
+const TOK_CHARS = 4e6; // the highlight cache's texts, in characters (tok)
 
 /** A space's Search view state (the Edit tab's left column): kept per space like the rest of the view. */
 function newSearch() {
   return { left: "explorer", query: "", include: "", exclude: "", replace: "", opts: { cased: false, word: false, regex: false }, more: false,
     results: null, running: false, seq: 0, collapsed: new Set(), shutVer: 0, sel: null, confirm: false, note: null, busy: false };
 }
+
+/**
+ * A file state for undo and redo, without its caches (fields starting with "_": rowsOf's rows,
+ * matches' find results). They're rebuilt when the state is shown again; kept, every undo step
+ * would hold a row object per line of the file.
+ */
+const bare = (f) => Object.fromEntries(Object.entries(f).filter(([k]) => !k.startsWith("_")));
 
 /** A path as the agent in `terminal` sees it: /mnt/c/... for an agent running in WSL. */
 function agentPath(path, terminal) {
@@ -243,6 +252,8 @@ export default class Review extends View {
         this.spaceId = key;
         const saved = this.views.get(key);
         if (saved) Object.assign(this, saved); else this.reset([]);
+        this.views.delete(key); // the live state is on the instance now (saved again on leaving)
+        this.pruneViews();
         this.syncSearchInputs();
         cx.notify();
       }
@@ -281,6 +292,19 @@ export default class Review extends View {
         if (this.mode === "edit") this.refreshTrees(cx);
       }
     } finally { this.following = false; }
+  }
+
+  /**
+   * Drops the kept views of spaces that are gone: their files, highlighting and undo steps would
+   * stay for good otherwise. A space on another machine is only known gone while that machine's
+   * layout is loaded (offline, its spaces aren't listed), and a view with unsaved edits stays.
+   */
+  pruneViews() {
+    const live = new Set(spaces().map((s) => s.id)), ready = new Set(machines().filter((m) => m.layout === "ready").map((m) => m.name));
+    for (const [k, v] of this.views) {
+      if (live.has(k) || v.stores.some((st) => st.on && !ready.has(st.on)) || v.files.some((f) => this.dirty(f))) continue;
+      this.views.delete(k); this.rootsAt?.delete(k);
+    }
   }
 
   /** A repo's store (on machine `on`), or null when the folder isn't (or isn't yet) a repo: retried after 30 s. */
@@ -452,7 +476,13 @@ export default class Review extends View {
     finally { c.busy = false; }
   }
 
-  close() { this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release(); }
+  close() {
+    this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
+    // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
+    // whenever the runtime drops the instance (a task still waiting would keep it, and all of this).
+    for (const m of [this.views, this.tokens, this.trees, this.ftrees, this.captures]) m?.clear();
+    this.files = []; this.committed = []; this.history = []; this.redo = []; this.qo = null;
+  }
 
   // ---- loading -------------------------------------------------------------
 
@@ -652,12 +682,20 @@ export default class Review extends View {
     return out;
   }
 
-  // Highlighting cached by content, so a reload re-tokenizes only text that changed.
+  // Highlighting cached by content, so a reload re-tokenizes only text that changed. Each key is a
+  // copy of a whole text, so the cache is capped by text size too (TOK_CHARS), not only by count:
+  // Herdr's one memory limit is shared by every copy of every mod.
   async tok(text, rel, cx) {
     const key = `${languageOf(rel)}\0${text}`;
     if (!this.tokens.has(key)) {
-      this.tokens.set(key, await highlight(text, languageOf(rel), cx));
-      if (this.tokens.size > 40) this.tokens.delete(this.tokens.keys().next().value);
+      const lines = await highlight(text, languageOf(rel), cx);
+      if (this.tokens.has(key)) return this.tokens.get(key); // another call made it meanwhile
+      this.tokens.set(key, lines);
+      this.tokChars = (this.tokChars ?? 0) + key.length;
+      while (this.tokens.size > 1 && (this.tokens.size > 40 || this.tokChars > TOK_CHARS)) {
+        const old = this.tokens.keys().next().value;
+        this.tokens.delete(old); this.tokChars -= old.length;
+      }
     }
     return this.tokens.get(key);
   }
@@ -1624,19 +1662,23 @@ export default class Review extends View {
    */
   refreshTrees(cx, force = false) {
     // force: right after a file operation, remote roots too, and again after a pass already running.
-    if (force) for (const st of this.stores) this.rootTree(st).passAt = 0;
+    if (force) for (const st of this.stores) { const R = this.rootTree(st); R.passAt = R.listAt = 0; }
     if (this.treeBusy) { if (force) this.treeAgain = true; return; }
     this.treeBusy = true;
     cx.spawn(async (cx) => {
       let changed = false;
+      // Outside the Edit view (Quick Open in Review or Changes) only the repos' file lists are
+      // needed: no status, folder index or plain root listings, which only the tree shows.
+      const edit = this.mode === "edit", at = edit ? "passAt" : "listAt";
       try {
         for (const st of this.stores) {
           const R = this.rootTree(st);
           // A root on another machine: one pass at most every 10 s (a remote call is about 200 ms).
           if (st.on) {
-            if (Date.now() - (R.passAt ?? 0) < REMOTE.treeMs) continue;
-            R.passAt = Date.now();
+            if (Date.now() - (R[at] ?? 0) < REMOTE.treeMs) continue;
+            R[at] = Date.now();
           }
+          if (st.plain && !edit) continue;
           if (st.plain) {
             if (this.rootShut(st)) continue;
             if (!R.tree.entries.has("")) { this.queueList(st, "", cx); continue; }
@@ -1645,7 +1687,7 @@ export default class Review extends View {
             if (stale && Date.now() - stale[1] > 30000) this.queueList(st, stale[0], cx);
             continue;
           }
-          const [r, s] = await Promise.all([this.git(st, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]), this.git(st, STATUS_TREE)]);
+          const [r, s] = await Promise.all([this.git(st, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]), edit ? this.git(st, STATUS_TREE) : null]);
           if (r.code !== 0) {
             const error = (r.stderr || r.stdout).trim();
             if (this.trees.get(idOf(st))?.error !== error) { this.trees.set(idOf(st), { error }); changed = true; }
@@ -1653,8 +1695,10 @@ export default class Review extends View {
           }
           if (this.trees.get(idOf(st))?.list !== r.stdout) {
             const paths = [...new Set(r.stdout.split("\0").filter(Boolean))];
-            this.trees.set(idOf(st), { list: r.stdout, paths, set: new Set(paths) });
+            this.trees.set(idOf(st), { list: r.stdout, paths });
+            if (!edit) changed = true;
           }
+          if (!edit) continue;
           const out = s.code === 0 ? s.stdout : "";
           if (R.statOut !== out) {
             const { marks, ignored } = parseTreeStatus(out);
@@ -2287,7 +2331,7 @@ export default class Review extends View {
       notes.push(...saves.map((w) => this.editNote(f, w)).filter(Boolean));
       Object.assign(state, { diskC: f.Ctext, diskB: f.Btext, conflict: null });
       state[write.target === "baseline" ? "diskB" : "diskC"] = write.after;
-      entry.snaps.push(f);
+      entry.snaps.push(bare(f));
       this.files[this.files.indexOf(f)] = state;
       jobs.push([state, writes]);
     }
@@ -2320,7 +2364,7 @@ export default class Review extends View {
   swapEdit(entry, other, cx) {
     const now = this.files.find((x) => x.key === entry.key);
     if (!now) return;
-    other.push({ edit: true, key: entry.key, state: now, cur: this.cur, at: 0 });
+    other.push({ edit: true, key: entry.key, state: bare(now), cur: this.cur, at: 0 });
     this.replace(now, { ...entry.state, diskC: now.diskC, diskB: now.diskB, conflict: now.conflict, edited: true });
     this.sel = entry.key; this.cur = entry.cur; this.anchor = null;
     this.settle(); this.showCursor(); this.retokenize(cx); cx.notify();
@@ -2662,7 +2706,7 @@ export default class Review extends View {
     const { state, cursor } = edit(f, a, b, text, (ls) => highlightLines(ls, lang));
     const last = this.history[this.history.length - 1], now = Date.now();
     if (group && last?.edit && last.group && last.key === f.key && now - last.at < 1000) last.at = now;
-    else this.history.push({ edit: true, key: f.key, state: f, cur: this.cur, at: now, group });
+    else this.history.push({ edit: true, key: f.key, state: bare(f), cur: this.cur, at: now, group });
     this.redo = [];
     state.edited = true;
     this.replace(f, state);
@@ -3818,7 +3862,7 @@ export default class Review extends View {
         .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi4 + (current ? "77" : "40")).text_size(11).child(`Comment  ${this.kl("comment")}`))
         .child(div().flex_1().pl(8).text_color(t.dim).text_size(11).child(`change ${r.hunk + 1} of ${f.hunks.length}`));
     }
-    const spans = expandTabs((r.side === "old" ? f.oldTok : f.newTok)?.[r.line] ?? []);
+    const spans = expandTabs(spansOf((r.side === "old" ? f.oldTok : f.newTok)?.[r.line]));
     const text = r.side === "new" ? body(linesOf(f)[r.line]) : r.seg ? body(f.B[r.line]) : "";
     // E5: a wrapped segment shows its own columns, after the wrapping indent.
     const seg = r.seg, v0 = seg ? visualCol(text, seg.from) : 0, ind = seg?.ind ?? 0, last = !seg || seg.to === text.length;
