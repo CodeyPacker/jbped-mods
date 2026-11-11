@@ -7,6 +7,7 @@
 //     boards(account, io)  -> BoardRef[]            // what it can show, for discovery: { title, url, ref, teamDefault? }
 //     board(account, ref, io) -> Board
 //     ticket(account, ref, io) -> Ticket            // "ticket"
+//     review(account, pr, io) -> { branch, target, description, criteria: [{ id, title, text }] } // "review"
 //     imageName(account, url) -> string | null      // "images": a safe file name, null if not its image
 //     downloadImage(account, url, path, io)         // "images": saves it to path, keeps a file already there
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
@@ -50,7 +51,7 @@
 // PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt? }
 //   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
 
-export const CAPABILITIES = ["boards", "board", "ticket", "images", "pullRequests", "repos", "statuses", "signInState", "move", "update"];
+export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "repos", "statuses", "signInState", "move", "update"];
 
 export const NO_COLUMN = "__none__";
 

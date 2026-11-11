@@ -1,5 +1,6 @@
 // Loads and checks wayfinder.json. Pure: no Herdr imports, so it runs under node for tests.
 import { validOrg } from "./providers/azure.js";
+import { templateErrors } from "./launch.js";
 
 export const PROVIDERS = ["github", "azure"];
 // Wayfinder never stores secrets (ADR 0002). A field with one of these names is an error.
@@ -68,7 +69,10 @@ function checkProfile(name, p, platform, errors) {
     }
   });
   repos.forEach((r, i) => {
-    if (isObj(r) && !isStr(r.path)) errors.push(`${at}.repos[${i}].path: the local clone's folder`);
+    if (!isObj(r)) return;
+    if (!isStr(r.path)) errors.push(`${at}.repos[${i}].path: the local clone's folder`);
+    if (r.prRepo != null && !(isStr(r.prRepo) && r.prRepo.includes("/"))) errors.push(`${at}.repos[${i}].prRepo: the Pull Request repo it clones, "owner/name" or "project/repo"`);
+    errors.push(...templateErrors(r.review, `${at}.repos[${i}].review`));
   });
   boards.forEach((b, i) => {
     if (!isObj(b)) return;
@@ -82,6 +86,7 @@ function checkProfile(name, p, platform, errors) {
     if (b.trackedStatuses != null && (!Array.isArray(b.trackedStatuses) || !b.trackedStatuses.every(isStr))) {
       errors.push(`${where}.trackedStatuses: a list of state names, or null`);
     }
+    errors.push(...templateErrors(b.launch, `${where}.launch`));
   });
   return { name, runner, accounts, repos, boards };
 }
@@ -104,5 +109,6 @@ export function parseConfig(text, platform) {
   const active = raw.activeProfile ?? Object.keys(raw.profiles)[0];
   if (!profiles[active]) errors.push(`activeProfile: no profile "${active}"`);
   if (raw.templates != null && !isObj(raw.templates)) errors.push("templates: must be an object");
-  return { config: raw, profile: errors.length ? null : profiles[active], profileNames: Object.keys(profiles), errors };
+  else for (const k of ["launch", "review"]) errors.push(...templateErrors(raw.templates?.[k], `templates.${k}`));
+  return { config: raw, profile: errors.length ? null : profiles[active], profileNames: Object.keys(profiles), templates: isObj(raw.templates) ? raw.templates : {}, errors };
 }

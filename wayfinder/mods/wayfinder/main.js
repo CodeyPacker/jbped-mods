@@ -6,11 +6,12 @@
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input } from "gpui-base";
-import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, window as herdrWindow } from "herdr";
+import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
+import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -115,7 +116,7 @@ function card(tk, t, selected, onClick) {
 const prAge = (pr) => pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}`
   : pr.createdAt ? ` · opened ${formatAge(Date.now() - Date.parse(pr.createdAt))}` : "";
 
-function prRow(pr, t) {
+function prRow(pr, t, review = null) {
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
     .child(v_flex().flex_1().min_w(0).gap(4)
       .child(h_flex().gap(8).items_center().min_w(0)
@@ -123,6 +124,9 @@ function prRow(pr, t) {
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
       .child(div().text_size(11).text_color(t.dim).truncate()
         .child(`${pr.id} · ${pr.author.name}${prAge(pr)}`)))
+    .when(Boolean(review?.state?.status === "error"), (el) => el.child(div().max_w(260).flex_none().text_size(11).text_color(t.blocked).child(review.state.error)))
+    .when(Boolean(review), (el) => el.child(button(`wf-pr-review-${pr.key}`, review.state?.status === "busy" ? (review.state.message ?? "Starting…") : "Review", t,
+      (cx) => review.start(cx), { on: review.state?.status === "busy" })))
     .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
 }
 
@@ -163,6 +167,8 @@ export default class Wayfinder extends View {
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
     this.tickets = {}; // ticket key -> { status, data, error }
     this.images = {}; // image url -> { status, file, error }: saved files stay across reloads
+    this.launch = null; // the Launch dialog: { key, selected: repo ids, exists: names | null, status, error, message }
+    this.reviews = {}; // pr key -> { status: "busy" | "error", message, error }
     this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
     this.found = {}; // settings: account id -> { boards: { status, data, error }, repos: { ... } }
     this.statusLists = {}; // settings: board id -> { status, data, error }
@@ -867,6 +873,127 @@ export default class Wayfinder extends View {
       .when(Boolean(panel), (el) => el.child(panel));
   }
 
+  // Launch (#13, D5, D18). The repos offered are the Board's, else the Profile's.
+  launchRepos() {
+    const p = this.profile, b = p.boards.find((x) => x.id === this.selected?.boardId);
+    const ids = b?.repos?.length ? b.repos : p.repos.map((r) => r.id);
+    return ids.map((id) => p.repos.find((r) => r.id === id)).filter(Boolean);
+  }
+
+  launchTemplate() {
+    const b = this.profile.boards.find((x) => x.id === this.selected?.boardId);
+    return resolveTemplate(DEFAULT_LAUNCH, this.state.templates?.launch, b?.launch);
+  }
+
+  openLaunch(tk, cx) {
+    const repos = this.launchRepos();
+    const key = this.selected.summary.key;
+    this.launch = { key, selected: repos.map((r) => r.id), exists: null, status: "idle" };
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      let exists = [];
+      try { exists = await existingWorktrees(ticketFolder(tk), repos.map(repoName), io); } catch { /* shown as not made */ }
+      if (this.launch?.key !== key) return;
+      this.launch.exists = exists;
+      cx.notify();
+    });
+  }
+
+  addLaunchRepo(cx) {
+    const boardId = this.selected?.boardId, name = this.profile.name;
+    cx.spawn(async (cx) => {
+      const folder = await pickFolder({ prompt: "Pick a local clone for this Board" });
+      if (!folder) return;
+      let id = null;
+      this.saveConfig((raw) => { const r = edits.addRepo(raw, name, { path: folder, boardId }); id = r.id; return r.raw; }, cx, {
+        after: () => { if (this.launch && id && !this.launch.selected.includes(id)) this.launch.selected.push(id); },
+      });
+    });
+  }
+
+  startLaunch(tk, cx) {
+    const L = this.launch, p = this.profile;
+    if (!L || L.status === "busy") return;
+    // A second Launch selects the space it made (D18).
+    const name = launchSpaceName(tk);
+    const open = spaces().find((x) => x.name === name);
+    if (open) { run("space.select", { id: open.id }); this.launch = null; return; }
+    const repos = this.launchRepos().filter((r) => L.selected.includes(r.id));
+    let argv;
+    const tpl = this.launchTemplate();
+    try { argv = agentArgv(tpl); } catch (e) { L.status = "error"; L.error = String(e.message ?? e); return; }
+    const folder = ticketFolder(tk), branch = folder;
+    L.status = "busy"; L.message = repos.length ? "Making worktrees…" : "Starting…"; L.error = null;
+    const io = this.io(), runner = p.runner;
+    cx.spawn(async (cx) => {
+      try {
+        const made = await makeLaunchWorktrees(folder, branch, repos.map((r) => ({ path: r.path, name: repoName(r) })), io);
+        const info = repos.map((r) => ({ id: r.id, branch, worktree: `${made.path}/${repoName(r)}` }));
+        run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
+        if (this.launch === L) this.launch = null;
+      } catch (e) {
+        L.status = "error"; L.error = `Launch failed: ${e.message ?? e}`;
+      }
+      cx.notify();
+    });
+  }
+
+  launchCard(t, tk) {
+    const L = this.launch, repos = this.launchRepos(), tpl = this.launchTemplate();
+    const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
+    const exists = (r) => L.exists?.includes(repoName(r));
+    const open = spaces().some((x) => x.name === launchSpaceName(tk));
+    return v_flex().id("wf-launch-card").p(12).gap(8).rounded(8).bg(t.surface).border_1().border_color(t.accent)
+      .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Launch"))
+      .child(note(open ? `The space "${launchSpaceName(tk)}" is open. Launch selects it.`
+        : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} in ~/.herdr/worktrees/${ticketFolder(tk)}, on branch ${ticketFolder(tk)}.`))
+      .children(repos.length ? repos.map((r) => h_flex().gap(8).items_center()
+        .child(checkRow(`wf-launch-r-${r.id}`, L.selected.includes(r.id), r.id, t, (cx) => {
+          L.selected = L.selected.includes(r.id) ? L.selected.filter((x) => x !== r.id) : [...L.selected, r.id]; cx.notify();
+        }))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(r.path))
+        .child(note(L.exists == null ? "" : exists(r) ? "worktree exists" : ""))) : [note("No repos for this Board yet. Add a local clone, or launch without one.")])
+      .child(h_flex().gap(8).items_center()
+        .child(button("wf-launch-add", "Add repo…", t, (cx) => this.addLaunchRepo(cx)))
+        .child(div().flex_1())
+        .when(L.status === "busy", (el) => el.child(note(L.message ?? "Working…")))
+        .child(button("wf-launch-go", open ? "Show space" : "Launch", t, (cx) => { this.startLaunch(tk, cx); cx.notify(); }, { on: true })))
+      .when(L.status === "error", (el) => el.child(note(L.error, t.blocked)));
+  }
+
+  // Review (#14, D15 to D17): the PR's clone from the Profile's repos, else asked for once.
+  startReview(accountId, pr, cx) {
+    if (this.reviews[pr.key]?.status === "busy") return;
+    const name = reviewSpaceName(pr);
+    const open = spaces().find((x) => x.name === name);
+    if (open) { run("space.select", { id: open.id }); return; }
+    const st = this.reviews[pr.key] = { status: "busy", message: "Starting…" };
+    const profileName = this.profile.name, io = this.io(), runner = this.profile.runner;
+    cx.spawn(async (cx) => {
+      try {
+        let repo = this.profile.repos.find((r) => r.prRepo === pr.repo);
+        if (!repo) {
+          st.message = "Pick its clone…"; cx.notify();
+          const folder = await pickFolder({ prompt: `Pick your local clone of ${pr.repo}` });
+          if (!folder) { delete this.reviews[pr.key]; cx.notify(); return; }
+          let id = null;
+          this.saveConfig((raw) => { const r = edits.addRepo(raw, profileName, { path: folder, prRepo: pr.repo }); id = r.id; return r.raw; }, cx);
+          repo = { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo: pr.repo };
+        }
+        st.message = "Reading the Pull Request…"; cx.notify();
+        const info = await loadReviewInfo(this.profile, accountId, pr, io);
+        st.message = "Making the worktree…"; cx.notify();
+        const tpl = resolveTemplate(DEFAULT_REVIEW, this.state.templates?.review, repo.review);
+        const made = await makeReviewWorktree(reviewFolder(pr), { path: repo.path, name: repoName(repo) }, info.branch, io);
+        run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
+        delete this.reviews[pr.key];
+      } catch (e) {
+        this.reviews[pr.key] = { status: "error", error: `Review failed: ${e.message ?? e}` };
+      }
+      cx.notify();
+    });
+  }
+
   // The detail panel (D11, D23): the summary shows at once, the rest when the Ticket arrives.
   ticketPanel(t) {
     const sum = this.selected.summary;
@@ -902,12 +1029,15 @@ export default class Wayfinder extends View {
       .child(div().text_size(12).text_color(t.muted).truncate().child(`${(tk ?? sum).id} · ${(tk ?? sum).type}`))
       .child(div().flex_1())
       .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .when(Boolean(tk), (el) => el.child(button("wf-launch", this.launch?.key === k ? "Cancel launch" : "Launch", t,
+        (cx) => { if (this.launch?.key === k) this.launch = null; else this.openLaunch(tk, cx); cx.notify(); }, { on: this.launch?.key === k })))
       .child(button("wf-ticket-close", "Close", t, (cx) => { this.closeTicket(); cx.notify(); }));
 
     const body = v_flex().id(`wf-ticket-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
       .child(div().text_size(16).font_semibold().text_color(t.foreground).child((tk ?? sum).title))
       .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
       .when(!tk && entry.status === "loading", (el) => el.child(skeletonTicket(t)));
+    if (tk && this.launch?.key === k) body.child(this.launchCard(t, tk));
     if (tk) {
       body
         .child(v_flex().gap(6)
@@ -970,7 +1100,7 @@ export default class Wayfinder extends View {
           ...(ok.length > 1 ? [div().pt(4).text_size(12).text_color(t.dim).child(`${l.account} · ${a?.login ?? a?.org ?? ""}`)] : []),
           ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
-            .children(g.prs.map((pr) => prRow(pr, t)))),
+            .children(g.prs.map((pr) => prRow(pr, t, { state: this.reviews[pr.key], start: (cx) => this.startReview(l.account, pr, cx) })))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
       });

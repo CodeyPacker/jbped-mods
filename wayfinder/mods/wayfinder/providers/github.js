@@ -193,6 +193,21 @@ export function mapPrs(nodes) {
 }
 
 // Repos the login can reach (own, collaborator, org member), for following (PR filter).
+// A Review's data (D16): the branches, the description, and the issues it closes as criteria. GitHub
+// issues have no acceptance criteria field, so each issue's body stands in.
+export const REVIEW_QUERY = `query($id: ID!) {
+  node(id: $id) { ... on PullRequest { headRefName baseRefName body isCrossRepository
+    closingIssuesReferences(first: 20) { nodes { number title body } } } }
+}`;
+
+export function mapReview(node) {
+  if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
+  return {
+    branch: node.headRefName, target: node.baseRefName ?? null, description: node.body ?? "", fork: Boolean(node.isCrossRepository),
+    criteria: (node.closingIssuesReferences?.nodes ?? []).map((i) => ({ id: `#${i.number}`, title: i.title ?? "", text: i.body ?? "" })),
+  };
+}
+
 export const REPOS_QUERY = `query($after: String) {
   viewer { repositories(first: ${PAGE}, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
     pageInfo { hasNextPage endCursor } nodes { nameWithOwner isArchived } } }
@@ -232,7 +247,7 @@ async function graphql(account, io, query, variables) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "pullRequests", "repos", "signInState"],
+  capabilities: ["boards", "board", "ticket", "pullRequests", "review", "repos", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -278,6 +293,12 @@ export const github = {
       after = r.pageInfo.endCursor;
     }
     return [...new Set(out)].sort(byName);
+  },
+
+  async review(account, pr, io) {
+    const r = mapReview((await graphql(account, io, REVIEW_QUERY, { id: pr.key })).node);
+    if (r.fork) throw new Error("This Pull Request comes from a fork. Reviews check out branches from the repo itself.");
+    return r;
   },
 
   async pullRequests(account, io) {

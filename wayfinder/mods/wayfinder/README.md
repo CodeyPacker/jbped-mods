@@ -19,6 +19,12 @@ Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side
 
 Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Toggle`, `Wayfinder: Close`, `Wayfinder: Fullscreen`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfinder shows one Profile at a time, and switching saves it as `activeProfile` in `wayfinder.json` (rewritten as formatted JSON), so it holds across restarts. Fullscreen hides the terminals and gives the panel the whole work area. Another panel, Close, or a space with the panel closed puts them back, and opening Wayfinder again returns to fullscreen. Wayfinder remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfinder saves them through az into `data/wayfinder-images/` in the herdr-app folder and keeps them there. Click another card to switch it, or the Board outside the cards to close it. Esc closes the detail panel, then a second Esc leaves fullscreen. Toggle shows Wayfinder, or hides it when it is what the panel shows. To bind it to a key, add it to `keys.json`, e.g. `"global": { "ctrl-shift-g": "tabs-plus.wayfinderToggle" }`. The tab bar (tabs-plus) runs it, because a hidden Wayfinder gets no commands.
 
+## Launch and Review
+
+- **Launch** (in a Ticket's detail panel) lists the Board's repos (its `repos`, else every repo in the Profile) and marks those with a worktree already. "Add repo…" picks a local clone and adds it to the Profile and the Board. Launch fetches each repo and adds a worktree at `~/.herdr/worktrees/<id>-<slug>/<repo>` on branch `<id>-<slug>` from the default branch, then opens a space named `<id> <title>` there with the agent, and the Ticket (description, acceptance criteria, repos) as its first message. Launching again reuses the worktrees, and selects the space while it is open.
+- **Review** (on each Pull Request row) finds the clone whose `prRepo` is the PR's repo, or asks for it once and saves it. It fetches the PR branch into a detached worktree at `~/.herdr/worktrees/review-<id>/<repo>` and opens a space named `Review <id>`. The agent's first message holds the acceptance criteria of every linked Ticket (GitHub: the body of each issue the PR closes), else the PR description. Nothing is posted to the PR. PRs from forks aren't supported.
+- The agent comes from templates: `{ "agent": "claude", "model": "opus", "args": [], "prompt": "…" }`, each field optional. Launch uses `templates.launch` in the file, then the Board's `launch`. Review uses `templates.review`, then the repo's `review`. The defaults run `claude`. The agent starts through the Profile's runner, in a login shell.
+
 ## Settings
 
 The Settings icon (the gear) in the header edits `wayfinder.json` for you, and each change is saved at once:
@@ -45,7 +51,7 @@ Refresh reloads the lists. A change that would make the file invalid is refused 
         { "id": "gh-work", "provider": "github", "login": "<gh user>" },
         { "id": "ado", "provider": "azure", "org": "https://dev.azure.com/<org>", "projects": ["<project>"] }
       ],
-      "repos": [{ "id": "frontend", "remote": "<clone url>", "path": "/home/me/src/frontend" }],
+      "repos": [{ "id": "frontend", "path": "/home/me/src/frontend", "prRepo": "<owner>/frontend" }],
       "boards": [
         { "id": "team", "account": "gh-work", "ref": { "owner": "<user or org>", "number": 1 } },
         { "id": "sprint", "account": "ado", "ref": { "project": "<project>", "team": "<team>" } }

@@ -195,6 +195,15 @@ export function imageName(account, url) {
   return m && ext ? `${m[1].toLowerCase()}.${ext[1].toLowerCase()}` : null;
 }
 
+const branchOf = (ref) => String(ref ?? "").replace(/^refs\/heads\//, "");
+export function mapReview(pr, items) {
+  if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
+  return {
+    branch: branchOf(pr.sourceRefName), target: branchOf(pr.targetRefName) || null, description: pr.description ?? "",
+    criteria: items.map((w) => ({ id: String(w.id), title: w.fields?.["System.Title"] ?? "", text: htmlToMarkdown(w.fields?.["Microsoft.VSTS.Common.AcceptanceCriteria"]) })),
+  };
+}
+
 export function mapTicket(w, { org, project, columnField = null, parent = null, comments = { comments: [], moreComments: 0 }, pullRequests = [] }) {
   const f = w.fields ?? {}, type = f["System.WorkItemType"] ?? "";
   const a = f["System.AssignedTo"], p = f["Microsoft.VSTS.Common.Priority"];
@@ -219,7 +228,7 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "images", "pullRequests", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "pullRequests", "review", "repos", "statuses", "signInState"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -249,6 +258,24 @@ export const azure = {
     // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
     const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
     if (r.code !== 0) throw new Error(firstLine(r) || `az answered ${r.code}`);
+  },
+
+  // A Review's data (D16): the branches, the description, and the acceptance criteria of every linked
+  // work item. pr: a PrSummary from pullRequests() (key "<repo id>!<number>", repo "<project>/<repo>").
+  async review(account, pr, io) {
+    const [repoId, n] = String(pr.key).split("!");
+    if (!repoId || !/^\d+$/.test(n ?? "")) throw new Error("This row has no Pull Request to review");
+    const project = pr.repo.slice(0, pr.repo.lastIndexOf("/"));
+    const org = orgUrl(account), tok = await token(account, io);
+    const [d, links] = await Promise.all([
+      rest(org, tok, io, `_apis/git/pullrequests/${n}`),
+      rest(org, tok, io, `${seg(project)}/_apis/git/repositories/${seg(repoId)}/pullRequests/${n}/workitems`).catch(() => ({ value: [] })),
+    ]);
+    const ids = (links.value ?? []).map((w) => Number(w.id)).filter((x) => x > 0).slice(0, MAX_PRS);
+    const items = ids.length
+      ? (await rest(org, tok, io, `_apis/wit/workitems?ids=${ids.join(",")}&fields=System.Title,Microsoft.VSTS.Common.AcceptanceCriteria`)).value ?? []
+      : [];
+    return mapReview(d, items);
   },
 
   // ref: a TicketSummary's ref from board().

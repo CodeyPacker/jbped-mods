@@ -2,6 +2,7 @@
 // It never branches on which Provider it's talking to.
 import { PROVIDERS } from "./providers/index.js";
 import { can, keepsRepo } from "./providers/contract.js";
+import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, parseScript } from "./launch.js";
 
 export function accountFor(profile, boardCfg) {
   return profile.accounts.find((a) => a.id === boardCfg.account) ?? null;
@@ -109,4 +110,36 @@ export async function boardStatuses(profile, boardCfg, io, registry = PROVIDERS)
 export async function renameProfileData(profile, to, io, registry = PROVIDERS) {
   const providers = new Set(profile.accounts.map((a) => providerFor(a, registry)).filter((p) => typeof p?.renameProfile === "function"));
   for (const p of providers) await p.renameProfile(profile.name, to, io);
+}
+
+// Launch and Review worktrees (D18), through the Profile's runner. Each rejects with a message fit to show.
+
+const script = async (io, text, name, args, timeout = 300000) => {
+  const r = await io.run("sh", ["-c", text, name, ...args], { timeout });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").slice(-3).join(" ") || `exit ${r.code}`);
+  return r.stdout;
+};
+
+// The repo names under ~/.herdr/worktrees/<folder> that already have a worktree.
+export async function existingWorktrees(folder, names, io) {
+  if (!names.length) return [];
+  return (await script(io, EXISTS_SH, "wayfinder-exists", [folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+// repos: [{ path, name }]. Returns { space, path, made, reused }.
+export async function makeLaunchWorktrees(folder, branch, repos, io) {
+  return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [folder, branch, ...repos.flatMap((r) => [r.path, r.name])]));
+}
+
+export async function makeReviewWorktree(folder, repo, branch, io) {
+  return parseScript(await script(io, REVIEW_SH, "wayfinder-review", [folder, repo.path, repo.name, branch]));
+}
+
+// What a Review needs from the Provider: the branch, its description and linked Tickets' criteria (D16).
+export async function loadReviewInfo(profile, accountId, pr, io, registry = PROVIDERS) {
+  const account = profile.accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error(`No account "${accountId}" in this profile`);
+  const provider = providerFor(account, registry);
+  if (!can(provider, "review")) throw new Error(`Reviews on ${account.provider} aren't supported yet`);
+  return provider.review(account, pr, io);
 }

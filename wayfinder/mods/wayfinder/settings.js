@@ -185,3 +185,32 @@ export const matchBoards = (list, query) => {
   const q = String(query ?? "").trim().toLowerCase();
   return q ? list.filter((d) => d.title.toLowerCase().includes(q)) : list;
 };
+
+// Adds a local clone to the Profile's repos (D17), or finds the one with that path. With a Board, the
+// Board lists it. With prRepo, it is the clone of that Pull Request repo. Returns { raw, id }.
+export function addRepo(raw, profileName, { path, prRepo = null, boardId = null }) {
+  let id = null;
+  const out = edit(raw, profileName, (p) => {
+    p.repos ??= [];
+    const clean = String(path ?? "").trim().replace(/[\\/]+$/, "");
+    if (!clean) throw new Error("Pick the repo's folder");
+    let r = p.repos.find((x) => x.path === clean);
+    if (!r) {
+      const base = clean.split(/[\\/]/).pop().toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
+      const taken = new Set(p.repos.map((x) => x.id));
+      id = base;
+      for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+      r = { id, path: clean };
+      p.repos.push(r);
+    }
+    id = r.id;
+    if (prRepo) r.prRepo = prRepo;
+    if (boardId) {
+      const b = (p.boards ?? []).find((x) => x.id === boardId);
+      if (!b) throw new Error(`No board "${boardId}"`);
+      b.repos ??= [];
+      if (!b.repos.includes(id)) b.repos.push(id);
+    }
+  });
+  return { raw: out, id };
+}
