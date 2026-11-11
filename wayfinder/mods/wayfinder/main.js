@@ -24,6 +24,8 @@ const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before ful
 const WANT_FULL_KEY = "wayfinder.wantFullscreen"; // the last fullscreen choice, kept across Close
 const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for the Board's "View in …" link
 const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
+// The Pull Request overlay's width as a fraction of Wayfinder's: 60% to start, dragged by its left edge.
+const PR_W_KEY = "wayfinder.prWidth", PR_W_DEFAULT = 0.6, PR_W_MIN = 0.3, PR_W_MAX = 0.95;
 const DIFF_LINES = 300; // a patch's lines shown before "Show N more lines"
 // A faint background of a theme color (#rrggbb), or none.
 const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
@@ -1533,13 +1535,37 @@ export default class Wayfinder extends View {
       ...lists.filter((l) => l.error && !signedOut(l.account)).map((l) => note(`${l.account}: couldn't load Pull Requests: ${l.error}`, t.blocked)),
     ];
     const body = entry.data ? [section("Mine", "mine"), section("Needs my review", "needsReview")] : (entry.status === "loading" ? [] : [note("No Pull Requests yet.")]);
-    // A click on the list outside a row closes the panel. Rows and buttons stop their own.
-    return h_flex().size_full().items_start()
-      .child(v_flex().id("wf-prs-area").flex_1().min_w(0).min_h(0).h_full()
+    // The list fills the view; the Pull Request overlay covers its right part. A click on the list
+    // outside a row closes the overlay. Rows and buttons stop their own.
+    return div().id("wf-prs-wrap").relative().size_full()
+      .child(v_flex().id("wf-prs-area").size_full().min_h(0)
         .on_click((_e, cx) => { if (this.selectedPr) { this.closePr(); cx.notify(); } })
         .child(bar)
         .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body])))
       .when(Boolean(this.selectedPr), (el) => el.child(this.prPanel(t)));
+  }
+
+  // The overlay's width: the live drag value, else the remembered one, else 60%.
+  get prFrac() {
+    if (this.prDrag) return this.prDrag.frac;
+    const v = Number(load(PR_W_KEY, PR_W_DEFAULT));
+    return Number.isFinite(v) && v >= PR_W_MIN && v <= PR_W_MAX ? v : PR_W_DEFAULT;
+  }
+
+  // The left-edge drag: the press records where it started and the width then; each move over
+  // Wayfinder turns the distance into a fraction of Wayfinder's width (the root's bounds); the
+  // release keeps it. A release outside Wayfinder isn't reported, so the next press clears a stale drag.
+  prDragMove(e, cx) {
+    if (!this.prDrag || !e.bounds?.width) return;
+    const frac = Math.min(PR_W_MAX, Math.max(PR_W_MIN, this.prDrag.from + (this.prDrag.x - e.position.x) / e.bounds.width));
+    if (frac !== this.prDrag.frac) { this.prDrag.frac = frac; cx.notify(); }
+  }
+
+  prDragEnd(cx) {
+    if (!this.prDrag) return;
+    save(PR_W_KEY, Math.round(this.prDrag.frac * 1000) / 1000);
+    this.prDrag = null;
+    cx.notify();
   }
 
   // One changed file: a header that folds its diff. The first DIFF_LINES lines show, then a row for the rest.
@@ -1627,8 +1653,13 @@ export default class Wayfinder extends View {
           .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${date(c.createdAt)}${c.path ? ` · ${c.path}${c.line != null ? `:${c.line}` : ""}` : ""}`))
           .child(md(`c${i}`, c.body ?? ""))));
     }
-    return v_flex().id("wf-pr-panel").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border)
-      .child(head).child(body);
+    // Over the list, against the right edge, 60% wide to start; the strip on its left edge resizes it.
+    const grip = div().id("wf-pr-grip").absolute().top(0).bottom(0).left(0).w(6).cursor_col_resize()
+      .hover((s) => s.bg(t.accent)).when(Boolean(this.prDrag), (el) => el.bg(t.accent))
+      .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.prDrag = { x: e.position.x, from: this.prFrac, frac: this.prFrac }; cx.notify(); });
+    return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0).w(`${Math.round(this.prFrac * 1000) / 10}%`)
+      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg()
+      .child(head).child(body).child(grip);
   }
 
   // Shown while fullscreen is wanted but off (Close, the tab bar, another panel left it): back to
@@ -1650,7 +1681,10 @@ export default class Wayfinder extends View {
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
       // A press anywhere in Wayfinder closes the Move dropdown; its trigger and list stop their own.
-      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.prDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      // The Pull Request overlay's edge drag: moves over Wayfinder resize it, the release keeps it.
+      .on_mouse_move((e, cx) => this.prDragMove(e, cx))
+      .on_mouse_up("left", (_e, cx) => this.prDragEnd(cx))
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
           // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
