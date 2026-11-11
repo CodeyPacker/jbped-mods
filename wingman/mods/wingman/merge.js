@@ -5,16 +5,19 @@ import { writeTextFile } from "herdr";
 import { git } from "./git.js";
 import { parseHunks, splitLines, wholeHunk, segmentHunks } from "./model.js";
 import { reviewDir } from "./journal.js";
+import { crumb } from "./crumbs.js";
 
 let seq = 0;
 async function withTemps(texts, run) {
   const dir = `${reviewDir()}/tmp`;
+  crumb(`withTemps: before mkdir ${dir}`, "changes");
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
+  crumb("withTemps: after mkdir", "changes");
   const id = `${Date.now()}-${seq++}`, paths = texts.map((_, i) => `${dir}/${id}-${i}`);
   try {
-    for (let i = 0; i < texts.length; i++) await writeTextFile(paths[i], texts[i], null);
+    for (let i = 0; i < texts.length; i++) { crumb(`withTemps: before writeTextFile ${paths[i]} len=${texts[i].length}`, "changes"); await writeTextFile(paths[i], texts[i], null); crumb(`withTemps: after writeTextFile ${paths[i]}`, "changes"); }
     return await run(paths);
-  } finally { for (const p of paths) await fs.unlink(p).catch(() => {}); }
+  } finally { crumb("withTemps: before unlink temps", "changes"); for (const p of paths) await fs.unlink(p).catch(() => {}); crumb("withTemps: after unlink temps", "changes"); }
 }
 
 /**
@@ -38,7 +41,9 @@ export async function diffHunks(Btext, Ctext) {
   if (!B.length || !C.length) return wholeHunk(B, C);
   if (Btext === Ctext) return [];
   return withTemps([Btext, Ctext], async ([b, c]) => {
+    crumb("diffHunks: before git diff --no-index", "changes");
     const d = await git(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--diff-algorithm=minimal", "--", b, c]);
+    crumb(`diffHunks: after git diff --no-index code=${d.code} out=${d.stdout?.length}`, "changes");
     if (d.code > 1) throw new Error(d.stderr.trim());
     return parseHunks(d.stdout);
   });

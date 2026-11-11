@@ -12,6 +12,7 @@ import { pathKind } from "./fsx.js";
 import { spaceRoots, isHome, pathFor } from "./workspace.js";
 import { REMOTE, rootId, idOf } from "./remote.js";
 import { Journal, drainOutbox, hookKnown } from "./journal.js";
+import { crumb, ALIVE_MS } from "./crumbs.js";
 
 // Agents count as working while they are in a turn, including while blocked on a question.
 export const ACTIVE = new Set(["working", "blocked"]);
@@ -305,14 +306,16 @@ export class CaptureLoop {
   async collect(c, cx, starting = false) {
     if (c.busy) return;
     c.busy = true;
+    crumb(`capture: before pass ${c.capture.store.root} starting=${starting}`, null, ALIVE_MS);
     try { await tryPass(c, starting, this.log, this.now); }
-    finally { c.busy = false; }
+    finally { c.busy = false; crumb(`capture: after pass ${c.capture.store.root}`, null, ALIVE_MS); }
   }
 
   /** A dropped record's last pass, failing or not (a failure is logged; the record is gone either way). */
   async end(c) {
     c.busy = true;
-    try { await capturePass(c, false, this.log); }
+    crumb(`capture: before last pass ${c.capture.store.root}`, null, ALIVE_MS);
+    try { await capturePass(c, false, this.log); crumb(`capture: after last pass ${c.capture.store.root}`, null, ALIVE_MS); }
     catch (e) { this.log(`${c.capture.store.root}: last pass failed: ${tailText(e?.message ?? e) || "unknown error"}`); }
     finally { c.busy = false; }
   }

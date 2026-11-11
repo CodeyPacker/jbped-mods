@@ -8,6 +8,7 @@ import { writeText, removeFile, makeDir, fingerprints, readOn } from "./fsx.js";
 import { sha256Hex } from "./sha256.js";
 import { REMOTE, mapLimit } from "./remote.js";
 import { parseBlobSize } from "./changelist.js";
+import { crumb } from "./crumbs.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 export const norm = (p) => { const s = p.replace(/\\/g, "/").replace(/^\/\/\?\//, ""); return isWindows(s) ? s.toLowerCase() : s; };
@@ -87,10 +88,17 @@ export class Store {
   }
 
   /** git in the repo, where it lives. */
-  git(args, opts = {}) { return git(args, { cwd: this.root, on: this.on, ...opts }); }
+  git(args, opts = {}) {
+    const what = `store git ${args.filter((a) => !a.startsWith("-")).slice(0, 3).join(" ")} in ${this.root}`;
+    crumb(`before ${what}`, "changes");
+    return git(args, { cwd: this.root, on: this.on, ...opts }).then((r) => { crumb(`after ${what} code=${r?.code}`, "changes"); return r; }, (e) => { crumb(`after ${what} threw`, "changes"); throw e; });
+  }
 
   /** A file's text (null when absent). On another machine with a time limit (fsx.readOn). */
-  read(path) { return this.on ? readOn(path, { on: this.on }) : readTextFile(path); }
+  read(path) {
+    crumb(`before store read ${path}`, "changes");
+    return Promise.resolve(this.on ? readOn(path, { on: this.on }) : readTextFile(path)).then((t) => { crumb(`after store read ${path} len=${t?.length ?? null}`, "changes"); return t; }, (e) => { crumb(`after store read ${path} threw`, "changes"); throw e; });
+  }
 
   /**
    * What a batch of watched paths means: "all" (the index changed or the batch

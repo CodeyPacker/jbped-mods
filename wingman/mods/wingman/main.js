@@ -46,6 +46,7 @@ import { capSteps } from "./undocap.js";
 import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighbours, toUnload, sizeError, binaryError, CHANGES_CHARS } from "./changelist.js";
 import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, spaceOfAgent } from "./captureloop.js";
+import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
 const base = (p) => p.split("/").pop();
@@ -198,18 +199,22 @@ export default class Review extends View {
     this.reset([]);
     this.queue = Promise.resolve(); this.writing = 0;
     cx.timer.every(1000, (cx) => this.follow(cx));
+    cx.timer.every(1000, () => crumb(`alive ${this.view ?? this.mode} leader=${!!this.loop.isLeader}`, null, ALIVE_MS)); // crash breadcrumbs: every copy, first 10 s after Changes shows
     cx.timer.every(250, (cx) => {
-      this.autosave(cx); this.publishDirty(); this.publishReview(); this.takeShared(cx);
+      crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
         const f = this.file();
-        this.loadRow(f, cx);
-        if (f && !f.loading && !f.lazy) for (const n of neighbours(this.files, f.key)) this.loadRow(n, cx);
+        crumb(`tick: loadRow selected ${f?.key ?? "none"}`, "changes", 2000); this.loadRow(f, cx);
+        if (f && !f.loading && !f.lazy) for (const n of neighbours(this.files, f.key)) { crumb(`tick: loadRow neighbour ${n.key}`, "changes", 2000); this.loadRow(n, cx); }
         // Shown again after being hidden (refreshChanges does nothing meanwhile): look now, not at the next poll.
         const shown = this.changesShown();
+        if (shown && this.changesHidden !== false) { this.crumbRendered = false; this.crumbListRendered = false; this.crumbSized = false; this.crumbRange = false; this.crumbBuilt = false; openCrumbs(); crumb(`hidden->shown detected (first=${this.changesHidden === undefined}, refresh=${!!this.changesHidden})`, "changes"); }
         if (shown && this.changesHidden) {
           log(`changes shown: ${this.files.length} uncommitted, ${this.committed?.length ?? 0} committed, ${this.changesChars()} chars loaded`);
+          crumb("before spawn refreshChanges (from 250ms timer)", "changes");
           cx.spawn(async (cx) => this.refreshChanges(cx));
+          crumb("after spawn refreshChanges (from 250ms timer)", "changes");
         }
         this.changesHidden = !shown;
       }
@@ -400,8 +405,12 @@ export default class Review extends View {
     // What's on disk for this state: edits change memory first, and a save writes the difference.
     f.diskC = f.Ctext; f.diskB = f.Btext;
     if (!f.error) {
+      crumb(`withTokens: before highlight old ${f.rel} len=${f.Btext?.length}`, "changes");
       f.oldTok = await this.tok(f.Btext, f.rel, cx);
+      crumb(`withTokens: after highlight old ${f.rel}`, "changes");
+      crumb(`withTokens: before highlight new ${f.rel} len=${f.Ctext?.length ?? 0}`, "changes");
       f.newTok = await this.tok(f.Ctext ?? "", f.rel, cx);
+      crumb(`withTokens: after highlight new ${f.rel}`, "changes");
     }
     return f;
   }
@@ -644,6 +653,7 @@ export default class Review extends View {
 
   /** Keeps the selection on a file that still has hunks, preferring the next one. */
   settle() {
+    crumb("settle enter", "changes", 8000);
     const vis = this.visible();
     if (!vis.some((f) => f.key === this.sel)) {
       const at = this.files.findIndex((f) => f.key === this.sel);
@@ -655,7 +665,9 @@ export default class Review extends View {
     this.current = f ? Math.max(0, Math.min(this.current, f.hunks.length - 1)) : 0;
     if (!f) this.cur = this.anchor = null;
     else if (this.cur) { this.cur = this.clampPos(f, this.cur); if (this.anchor) this.anchor = this.clampPos(f, this.anchor); }
+    crumb(`settle: showTab ${this.sel}`, "changes", 8000);
     if (this.sel) this.showTab(this.sel); // no-op when its tab is already on screen
+    crumb("settle exit", "changes", 8000);
   }
 
   rowsOf(f) {
@@ -1212,6 +1224,7 @@ export default class Review extends View {
 
   /** Panel split: what the other copy handed over (GOTO) and save requests from Review (SAVE). */
   takeShared(cx) {
+    crumb("takeShared enter", "changes", 2000);
     const g = this.view && shared(GOTO);
     // Changes loads its list only once shown: a hand-off to it waits for that load (at most 10 s).
     const waiting = !!g && this.view === "changes" && g.space === this.spaceId && (this.changeSig == null || this.loadingChanges) && Date.now() - g.stamp < 10000;
@@ -1239,17 +1252,19 @@ export default class Review extends View {
       this.saveSeen = r.stamp;
       if (this.settings.autosave) for (const f of this.files) if (r.keys.includes(f.key) && this.dirty(f) && !f.conflict) this.save(cx, f);
     }
+    crumb("takeShared exit", "changes", 2000);
   }
 
   /** Panel split: this copy's files with unsaved edits, for Review to check (renewed every 10 s while any). */
   publishDirty() {
+    crumb("publishDirty enter", "changes", 2000);
     const keys = this.files.filter((f) => this.dirty(f)).map((f) => f.key).sort(), sig = keys.join("\n"), now = Date.now();
     if (sig === this.dirtySig && (!keys.length || now - this.dirtyAt < 10000)) return;
     this.dirtySig = sig; this.dirtyAt = now;
     const all = { ...(shared(DIRTY) ?? {}) };
     for (const [id, v] of Object.entries(all)) if (now - (v?.at ?? 0) > DIRTY_FRESH) delete all[id];
     if (keys.length) all[this.id] = { keys, at: now }; else if (!(this.id in all)) return; else delete all[this.id];
-    setShared(DIRTY, all);
+    crumb("publishDirty setShared DIRTY", "changes", 2000); setShared(DIRTY, all);
   }
 
   /** Files among `keys` that another copy holds unsaved edits to. */
@@ -1283,7 +1298,11 @@ export default class Review extends View {
   }
 
   /** git in a store's repo, wherever the repo lives (git.js), on its machine. */
-  git(st, args, opts = {}) { return git(args, { cwd: st.root, on: st.on ?? null, ...opts }); }
+  git(st, args, opts = {}) {
+    const what = `git ${args.filter((a) => !a.startsWith("-") && !a.startsWith("core.") && !a.startsWith("diff.")).slice(0, 3).join(" ")} in ${st.root}`;
+    crumb(`before ${what}`, "changes");
+    return git(args, { cwd: st.root, on: st.on ?? null, ...opts }).then((r) => { crumb(`after ${what} code=${r?.code} out=${r?.stdout?.length}`, "changes"); return r; }, (e) => { crumb(`after ${what} threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); throw e; });
+  }
 
   /** A repo's `git status`, its HEAD and its files ({ out, head, list }). On another machine one call (STATUS_V2). */
   async statusOf(st) {
@@ -1335,36 +1354,49 @@ export default class Review extends View {
   async loadChanges(cx) {
     if (this.loadingChanges) return;
     this.loadingChanges = true;
+    crumb("loadChanges enter", "changes");
     const space = this.spaceId, stores = this.stores, stale = () => this.spaceId !== space || this.stores !== stores;
     try {
       const files = [], sig = [], heads = [];
       for (const st of this.repos()) {
+        crumb(`loadChanges: before changeSigOf ${st.root}`, "changes");
         const { head, list, counts, sig: s } = await this.changeSigOf(st);
+        crumb(`loadChanges: after changeSigOf ${st.root} files=${list.length}`, "changes");
         sig.push(...s);
+        crumb(`loadChanges: before aiMarks ${st.root}`, "changes");
         const { ai, done } = await this.aiMarks(st);
+        crumb(`loadChanges: after aiMarks ${st.root}`, "changes");
         // A repo inside this one (git lists it as "inner/") is its own root: its files aren't this one's (P1).
         const mine = list.filter(({ rel }) => !rel.endsWith("/") && this.own(st, rel)[0] === st);
         // An untracked file has no line counts in git's: it's read for them (a few at a time on
         // another machine, where each read is a call) and its text isn't kept.
+        crumb(`loadChanges: before changeRow x${mine.length} ${st.root}`, "changes");
         const rows = await mapLimit(mine, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeRow(st, rel, xy, !!head, counts.get(rel)));
+        crumb(`loadChanges: after changeRow x${mine.length} ${st.root}`, "changes");
         for (const f of rows) files.push({ ...f, ai: ai.has(f.rel) });
         heads.push({ st, head, done });
       }
       if (stale()) return;
       // The picked file loads before the list shows (as when every text was read here).
       const sel = files.find((f) => f.key === this.sel);
+      crumb(`loadChanges: before loadRowNow selected ${sel?.key ?? "none"}`, "changes");
       if (sel) { await this.loadRowNow(sel, cx); if (stale()) return; }
+      crumb("loadChanges: after loadRowNow selected", "changes");
       // The committed rows from the last load stay meanwhile (this space's: kept per space).
       this.files = files; this.changeSig = sig.join("\0"); this.status = null;
       if (this.discardKey && !files.some((f) => f.key === this.discardKey)) this.discardKey = null;
+      crumb(`loadChanges: list set (${files.length} files), before settle+notify`, "changes");
       this.settle(); cx.notify();
+      crumb("loadChanges: after settle+notify", "changes");
       const committed = [];
-      for (const { st, head, done } of heads) if (head) committed.push(...(await this.committedRows(st, head, done)));
+      for (const { st, head, done } of heads) if (head) { crumb(`loadChanges: before committedRows ${st.root}`, "changes"); committed.push(...(await this.committedRows(st, head, done))); crumb(`loadChanges: after committedRows ${st.root}`, "changes"); }
       if (stale()) return;
       this.committed = committed;
+      crumb(`loadChanges: committed set (${committed.length}), before settle+notify`, "changes");
       this.settle(); cx.notify();
-    } catch (e) { if (!stale()) { this.error = String(e.message ?? e); cx.notify(); } }
-    finally { this.loadingChanges = false; }
+      crumb("loadChanges: after committed settle+notify", "changes");
+    } catch (e) { crumb(`loadChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); if (!stale()) { this.error = String(e.message ?? e); cx.notify(); } }
+    finally { this.loadingChanges = false; crumb("loadChanges exit", "changes"); }
   }
 
   /**
@@ -1379,7 +1411,9 @@ export default class Review extends View {
     if (c) return { ...f, add: c.add, del: c.del };
     if (xy !== "??") return f;
     try {
+      crumb(`changeRow: before readTextFile ${path}`, "changes");
       const text = await readTextFile(path, { on: st.on ?? null });
+      crumb(`changeRow: after readTextFile ${path} len=${text?.length ?? null}`, "changes");
       if (text?.includes("\0")) return { ...f, lazy: false, error: "binary file" };
       return text == null ? f : { ...f, add: countLines(text), del: 0 };
     } catch (e) { return { ...f, lazy: false, error: String(e.message ?? e) }; }
@@ -1390,11 +1424,17 @@ export default class Review extends View {
     const path = `${st.root}/${rel}`, key = `${st.root}|${rel}`;
     const f = { rel, path, basePath: null, store: st, key, xy, letter: statusLetter(xy), plain: false, created: false, by: null, as: null, hunks: [] };
     try {
+      crumb(`changeTexts: before git show HEAD:${rel} in ${st.root}`, "changes");
       const show = hasHead ? await this.git(st, [...READ, "show", `HEAD:${rel}`]) : { code: 1, stdout: "" };
+      crumb(`changeTexts: after git show HEAD:${rel} len=${show.stdout?.length}`, "changes");
+      crumb(`changeTexts: before readTextFile ${path}`, "changes");
       const inHead = show.code === 0, Btext = inHead ? show.stdout : "", Ctext = await readTextFile(path, { on: st.on ?? null });
+      crumb(`changeTexts: after readTextFile ${path} len=${Ctext?.length ?? null}`, "changes");
       if (Btext.includes("\0") || Ctext?.includes("\0")) return { ...f, inHead, error: "binary file" };
       // The diff runs here, on temp copies (merge.js), wherever the texts came from.
+      crumb(`changeTexts: before diffHunks ${rel} B=${Btext.length} C=${Ctext?.length ?? 0}`, "changes");
       const hunks = await diffHunks(Btext, Ctext ?? "");
+      crumb(`changeTexts: after diffHunks ${rel} hunks=${hunks.length}`, "changes");
       return { ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks, toTok: true };
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
   }
@@ -1403,20 +1443,24 @@ export default class Review extends View {
   async tokened(t, cx) {
     if (!t.toTok) return t;
     const { toTok, ...f } = t;
-    try { return await this.withTokens(f, cx); }
+    try { crumb(`tokened: before withTokens ${f.rel}`, "changes"); const r = await this.withTokens(f, cx); crumb(`tokened: after withTokens ${f.rel}`, "changes"); return r; }
     catch (e) { return { rel: f.rel, path: f.path, basePath: null, store: f.store, key: f.key, xy: f.xy, letter: f.letter, plain: false, created: false, by: null, as: null, hunks: [], error: String(e.message ?? e) }; }
   }
 
   /** D3: line counts of a repo's uncommitted changes against HEAD (staged plus unstaged with no commits yet). */
   async lineCounts(st, head) {
     const runs = head ? [NUMSTAT] : NUMSTAT_NO_HEAD;
+    crumb(`lineCounts: before numstat ${st.root}`, "changes");
     const outs = (await Promise.all(runs.map((args) => this.git(st, args)))).map((r) => (r.code === 0 ? r.stdout : ""));
+    crumb(`lineCounts: after numstat ${st.root}`, "changes");
     return { map: parseNumstat(...outs), raw: outs.join("\0") };
   }
 
   /** Which files an agent of this space changed on this branch: `ai` (still in review), `done` (committed). */
   async aiMarks(st) {
+    crumb(`aiMarks: before read index.json + branch ${st.root}`, "changes");
     const [text, branch] = await Promise.all([st.read(`${st.dir}/index.json`), st.branch()]);
+    crumb(`aiMarks: after read index.json (len=${text?.length ?? null}) + branch=${branch}`, "changes");
     let index = {};
     try { index = text ? JSON.parse(text) : {}; } catch {}
     const mine = (e) => shows(e, branch, this.spaceId, spaceOfAgent), ai = new Set(), done = new Set();
@@ -1434,7 +1478,9 @@ export default class Review extends View {
     if (cached?.head === head && Date.now() - cached.at < 30000) return cached.base;
     let base = null;
     for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
+      crumb(`branchBase: before merge-base HEAD ${ref} in ${st.root}`, "changes");
       const r = await this.git(st, [...READ, "merge-base", "HEAD", ref]);
+      crumb(`branchBase: after merge-base HEAD ${ref} code=${r.code}`, "changes");
       if (r.code === 0 && r.stdout.trim() !== head) { base = r.stdout.trim(); break; }
       if (r.code === 0) break; // HEAD is that branch's tip: nothing committed on top of it
     }
@@ -1449,14 +1495,18 @@ export default class Review extends View {
    * COMMITTED_REPOS repos' lists are kept.
    */
   async committedRows(st, head, done) {
+    crumb(`committedRows: before branchBase ${st.root}`, "changes");
     const base = await this.branchBase(st, head);
+    crumb(`committedRows: after branchBase ${st.root} base=${base}`, "changes");
     if (!base) return [];
     const cache = (this.committedCache ??= new Map()), id = idOf(st);
     let entry = cache.get(id);
     if (entry?.base !== base || entry?.head !== head) {
       for (const f of entry?.rows ?? []) this.unloadRow(f);
+      crumb(`committedRows: before diff name-status + numstat ${st.root}`, "changes");
       const [r, n] = await Promise.all([this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, head]),
         this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, head])]);
+      crumb(`committedRows: after diff name-status + numstat ${st.root}`, "changes");
       if (r.code !== 0) return [];
       const counts = parseNumstat(n.code === 0 ? n.stdout : ""), parts = r.stdout.split("\0").filter(Boolean), rows = [];
       for (let i = 0; i + 1 < parts.length && rows.length < MAX_FILES; i += 2) {
@@ -1482,10 +1532,13 @@ export default class Review extends View {
    */
   loadRow(f, cx) {
     if (!f?.lazy || f.loading) return;
+    crumb(`loadRow: before spawn ${f.key}`, "changes");
     cx.spawn(async (cx) => {
       await this.loadRowNow(f, cx);
       if (this.gotoLine?.key === f.key) { if (this.sel === f.key) this.toLine(f, this.gotoLine.line); this.gotoLine = null; }
+      crumb(`loadRow: before settle+notify ${f.key}`, "changes");
       this.settle(); cx.notify();
+      crumb(`loadRow: after settle+notify ${f.key}`, "changes");
     });
   }
 
@@ -1498,29 +1551,42 @@ export default class Review extends View {
   async loadRowNow(f, cx) {
     if (!f?.lazy || f.loading) return;
     f.loading = true; f.usedAt ??= Date.now();
+    crumb(`loadRowNow enter ${f.key} committed=${!!f.committed}`, "changes");
     const st = f.store;
     let next;
     try {
       if (f.committed) {
         // Sizes first: a side over MAX_TEXT is never read (repos hold big binaries and PDFs).
+        crumb(`loadRowNow: before blobSize x2 ${f.key}`, "changes");
         const big = sizeError(await Promise.all([st.blobSize(f.base, f.rel), st.blobSize(f.head, f.rel)]), MAX_TEXT);
+        crumb(`loadRowNow: after blobSize x2 ${f.key} big=${big}`, "changes");
         if (big) next = { error: big, placeholder: big };
         else {
+          crumb(`loadRowNow: before blobAt x2 ${f.key}`, "changes");
           const [b, c] = await Promise.all([st.blobAt(f.base, f.rel), st.blobAt(f.head, f.rel)]);
+          crumb(`loadRowNow: after blobAt x2 ${f.key} B=${b?.length ?? null} C=${c?.length ?? null}`, "changes");
           if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) next = { error: "binary file", placeholder: "binary file" };
           else {
+            crumb(`loadRowNow: before diffHunks ${f.key}`, "changes");
             const hunks = await diffHunks(b ?? "", c ?? "");
+            crumb(`loadRowNow: after diffHunks ${f.key} hunks=${hunks.length}`, "changes");
             next = await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx);
+            crumb(`loadRowNow: after withTokens ${f.key}`, "changes");
           }
         }
       } else {
+        crumb(`loadRowNow: before changeTexts ${f.key}`, "changes");
         const t = await this.changeTexts(st, f.rel, f.xy, f.hasHead), { add, del, ai } = f;
+        crumb(`loadRowNow: after changeTexts ${f.key}; before tokened`, "changes");
         next = { ...(await this.tokened(t, cx)), add, del, ai };
+        crumb(`loadRowNow: after tokened ${f.key}`, "changes");
       }
     } catch (e) { next = { error: String(e.message ?? e) }; }
     if (!f.lazy) { f.loading = false; return; } // unloaded meanwhile
     Object.assign(f, next, { lazy: false, loading: false, evicted: false });
+    crumb(`loadRowNow: before capLoaded ${f.key}`, "changes");
     this.capLoaded(f);
+    crumb(`loadRowNow exit ${f.key}`, "changes");
   }
 
   /** Puts a Changes row back to unloaded (its texts and highlighting go; picked again, they load again). A placeholder stays. */
@@ -1595,16 +1661,18 @@ export default class Review extends View {
     const remote = this.repos().some((st) => st.on);
     if (remote && Date.now() - (this.changesAt ?? 0) < REMOTE.changesMs) return;
     this.refreshing = true;
+    crumb("refreshChanges enter", "changes");
     try {
       const sig = [];
-      for (const st of this.repos()) sig.push(...(await this.changeSigOf(st)).sig);
+      for (const st of this.repos()) { crumb(`refreshChanges: before changeSigOf ${st.root}`, "changes"); sig.push(...(await this.changeSigOf(st)).sig); crumb(`refreshChanges: after changeSigOf ${st.root}`, "changes"); }
       let stale = sig.join("\0") !== this.changeSig;
       // A file whose texts aren't loaded is covered by the status and line counts; a loaded one's
       // text is read again (another machine's are covered by stampOf's hashes).
-      for (const f of this.files) { if (stale) break; if (!f.error && !f.lazy && f.Ctext !== undefined && !f.store?.on && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
-      if (stale) await this.loadChanges(cx);
-    } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
-    finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); }
+      for (const f of this.files) { if (stale) break; if (!f.error && !f.lazy && f.Ctext !== undefined && !f.store?.on && (crumb(`refreshChanges: before readTextFile ${f.path}`, "changes"), (await readTextFile(f.path)) !== f.Ctext)) stale = true; }
+      crumb(`refreshChanges: stale=${stale}`, "changes");
+      if (stale) { crumb("refreshChanges: before loadChanges", "changes"); await this.loadChanges(cx); crumb("refreshChanges: after loadChanges", "changes"); }
+    } catch (e) { crumb(`refreshChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); this.error = String(e.message ?? e); cx.notify(); }
+    finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); crumb("refreshChanges exit", "changes"); }
   }
 
   /** Puts a file back as HEAD has it (asked first by the button). Unsaved edits in Edit block it. */
@@ -1715,6 +1783,7 @@ export default class Review extends View {
     const rows = this.changeRows();
     const adds = this.files.reduce((n, f) => n + (f.add ?? 0), 0), dels = this.files.reduce((n, f) => n + (f.del ?? 0), 0);
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
+    if (!this.crumbBuilt) { this.crumbBuilt = true; crumb(`renderChanges: built ${rows.length} rows, building tree`, "changes"); }
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
       .child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); cx.notify(); }).child(box(all)))
@@ -1724,11 +1793,11 @@ export default class Review extends View {
       // A virtual list (rows of known heights): its rows can't hold handlers, so the pointer's x is
       // kept from the area around it and a click (clickChange) tells the checkbox from the row by it.
       .child(div().id("chg-list").flex_1().min_h(0).pt(4).relative().overflow_hidden()
-        .on_size_change((size, cx) => { if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; cx.notify(); } })
+        .on_size_change((size, cx) => { if (!this.crumbSized) { this.crumbSized = true; crumb(`on_size_change: first Changes list size ${size.width}x${size.height}`, "changes"); } if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; cx.notify(); } })
         .on_mouse_move((ev) => { this.chgX = ev.local_position?.x ?? null; })
         .on_mouse_down("left", (ev) => { this.chgX = ev.local_position?.x ?? null; })
         .when(rows.length > 0, (e) => e
-          .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => rows.slice(range.start, range.end).map(row))
+          .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => { if (!this.crumbRange) { this.crumbRange = true; crumb(`virtual list: first range ${range.start}-${range.end} of ${rows.length}`, "changes"); } return rows.slice(range.start, range.end).map(row); })
             .w_full().h(Math.max(FILE_H, (this.chgH ?? 300) - 4)).track_scroll(this.chgScroll)
             .on_item_click((key, cx) => this.clickChange(key, cx)))
           .child(Scrollbar.vertical("chg-rows").viewport_from_layout().absolute().inset_0())))
@@ -4295,6 +4364,10 @@ export default class Review extends View {
     if (this.form?.form === "settings") return this.renderSettings();
     if (this.form?.form === "keys") return this.renderKeys();
     if (this.form) return this.renderForm();
+    if (this.view === "changes") { // crash breadcrumbs: the first render after shown, and the first after the list is set
+      if (!this.crumbRendered) { this.crumbRendered = true; crumb(`render: first Changes render after shown (list set=${this.changeSig != null})`, "changes"); }
+      if (!this.crumbListRendered && this.changeSig != null) { this.crumbListRendered = true; crumb(`render: first Changes render with list set (${this.files.length} files, ${this.committed?.length ?? 0} committed)`, "changes"); }
+    }
     const t = theme(), f = this.file(), vis = this.visible(), total = vis.reduce((n, x) => n + x.hunks.length, 0);
     const tag = (x) => x.created ? "new" : x.Ctext === null ? "deleted" : `${x.hunks.length}`;
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;

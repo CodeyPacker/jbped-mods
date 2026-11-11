@@ -72,4 +72,5 @@ export const panes = () => world.panes;
 export const layout = () => world.layout;
 export const shared = (k) => world.shared.get(k);
 export const setShared = (k, v) => { world.shared.set(k, v); return null; };
+export const props = () => world.props ?? null;
 export const hc = async (args) => { hcCalls.push(args); return { code: 0, stdout: "", stderr: "" }; };

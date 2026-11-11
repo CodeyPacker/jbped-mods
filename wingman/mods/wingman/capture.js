@@ -8,6 +8,7 @@ import { inRepo, ownerOf, knownDistro } from "./git.js";
 import { parkStale, sumOf, MAX_TEXT } from "./store.js";
 import { writeText, execOn } from "./fsx.js";
 import { mapLimit, REMOTE } from "./remote.js";
+import { crumb, ALIVE_MS } from "./crumbs.js";
 import { byteLength } from "./sha256.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
@@ -47,6 +48,7 @@ export class Capture {
   /** Tree id of the working tree right now (index copy + add -A + write-tree). */
   async snapshot() {
     const { gitDir, root, on } = this.store, dir = `${appHome()}/mods/wingman`;
+    crumb(`snapshot: before ${root}`, null, ALIVE_MS);
     let r;
     if (on) {
       // Another machine doesn't have the script: its text goes as sh's script, the folders as its arguments.
@@ -57,6 +59,7 @@ export class Capture {
       : isWindows(root)
       ? await exec("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", `${dir}/snapshot.ps1`, gitDir, root])
       : await exec("sh", [`${dir}/snapshot.sh`, gitDir, root]);
+    crumb(`snapshot: after ${root} code=${r.code}`, null, ALIVE_MS);
     const tree = r.stdout.trim().split(/\s+/).pop();
     if (r.code !== 0 || !/^[0-9a-f]{40,64}$/.test(tree ?? "")) throw new Error(`snapshot failed: ${tailText(r.stderr || r.stdout)}`);
     return tree;
@@ -96,7 +99,9 @@ export class Capture {
    * `by`: the terminal to credit (the one Claude working in the space), or null.
    */
   async adopt(base, now, by = null, space = null) {
+    crumb(`adopt: before ${this.store.root}`, null, ALIVE_MS);
     const changes = await this.changed(base, now);
+    crumb(`adopt: after changed ${this.store.root} n=${changes.length}`, null, ALIVE_MS);
     if (!changes.length) return 0;
     const indexPath = `${this.store.dir}/index.json`, before = await this.store.read(indexPath);
     const index = before ? JSON.parse(before) : { version: 1, files: {} };
@@ -135,6 +140,7 @@ export class Capture {
     let added = 0;
     for (const e of entries) if (e) { index.files[e[0]] = e[1]; added++; }
     if (added || parked) await writeText(indexPath, JSON.stringify(index, null, 2) + "\n", before, { on: this.store.on });
+    crumb(`adopt: after ${this.store.root} added=${added}`, null, ALIVE_MS);
     return added;
   }
 
