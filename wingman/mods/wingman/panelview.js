@@ -28,3 +28,20 @@ export function viewShown(tree, view) {
     return (n.active ?? n.children?.[0]?.id) === next.id;
   });
 }
+
+/** Whether the layout has any Wingman block (a panel copy, whatever its view). */
+export function layoutHasWingman(tree) {
+  const walk = (n) => !!n && typeof n === "object" && (n.content?.mod === "wingman" || (n.children ?? []).some(walk));
+  return walk(tree);
+}
+
+/**
+ * The spaces Wingman reviews. With a Wingman block in the layout every space is reviewed (the panel
+ * is shown beside whichever space is active, and its blocks are not in panes()). Without one, only
+ * the spaces holding a Wingman pane in one of their tabs.
+ */
+export function reviewedSpaces(spaces, panes, inLayout) {
+  if (inLayout) return spaces;
+  const tabs = new Set(panes.filter((p) => p.mod === "wingman").map((p) => p.tab));
+  return spaces.filter((s) => s.tabs.some((t) => tabs.has(t.id)));
+}

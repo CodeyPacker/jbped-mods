@@ -18,7 +18,7 @@ import { Capture, hostPath } from "./capture.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
-import { viewShown } from "./panelview.js";
+import { viewShown, layoutHasWingman, reviewedSpaces } from "./panelview.js";
 import { listDir, pathKind, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs } from "./fsx.js";
 import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
@@ -106,10 +106,14 @@ function termFolders(space) {
 /** The space of the agent in terminal `by`, while it's still there. */
 const spaceOfAgent = (by) => (by && agents().find((a) => a.address === by)?.space) || null;
 
-/** Spaces that hold a Wingman pane, on this computer or another machine. */
+/**
+ * Spaces Wingman reviews, on this computer or another machine: every space while the layout has a
+ * Wingman block (panel blocks are not in panes()), else the spaces holding a Wingman pane in a tab.
+ */
 function reviewSpaces() {
-  const tabs = new Set(panes().filter((p) => p.mod === "wingman").map((p) => p.tab));
-  return spaces().filter((s) => s.tabs.some((t) => tabs.has(t.id)));
+  let inLayout = false;
+  try { inLayout = layoutHasWingman(layout()); } catch {}
+  return reviewedSpaces(spaces(), panes(), inLayout);
 }
 
 /**
@@ -168,8 +172,8 @@ export default class Review extends View {
   // restarts together on reload), so copies don't depend on it:
   // - Display: a Wingman pane is only visible while its space is active, so every copy
   //   shows the active space's review, and keeps each space's state for when it returns.
-  // - Capture: one copy holds a lease (.leader.json) and captures for every space that
-  //   has a Wingman pane, so the work never runs twice.
+  // - Capture: one copy holds a lease (.leader.json) and captures for every reviewed space
+  //   (reviewSpaces), so the work never runs twice.
   init(_props, cx) {
     // Opened as a popup (reason or follow-up prompt): a small form, none of the pane's work.
     if (props()?.form) return this.initForm(cx);
@@ -436,6 +440,8 @@ export default class Review extends View {
         // Another machine: nothing is looked up there for a space that isn't shown and has no agent
         // working (every call there costs about 200 ms). Captures already made finish their last pass.
         if (sp.machine && !active && !g.active && !sp.active) continue;
+        // Any space: with no agent at all, nothing is looked up or opened unless it is shown.
+        if (!active && !g.active && !sp.active && !agents().some((a) => a.space === sp.id)) continue;
         if (!g.at || (active === g.active && Date.now() - g.at > 5000)) {
           g.at = Date.now();
           const { repos } = await this.folderRoots(sp);
@@ -511,7 +517,7 @@ export default class Review extends View {
   }
 
   /**
-   * Machines whose Claude hook events are due: those with a space that has a Wingman panel and an
+   * Machines whose Claude hook events are due: those with a reviewed space (reviewSpaces) that has an
    * agent, while such a space is shown or an agent there works, and once after. At most every
    * REMOTE.journalMs (REMOTE.journalIdleMs while the hook isn't installed there); an idle hidden
    * machine costs nothing.
