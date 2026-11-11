@@ -7,7 +7,7 @@ Mods and layouts for the Herdr desktop app. Each top-level folder is one share.
 ### Wayfinder
 
 **Wayfinder**:
-The mod that shows a Board and the user's open Pull Requests, and starts Herdr spaces from Tickets. It lives outside any space.
+The mod that shows a Board and the user's open Pull Requests, and starts Herdr spaces from Tickets and Pull Requests. It lives outside any space.
 
 **Profile**:
 A named, separate set of Accounts, such as Work or Personal. Wayfinder shows exactly one Profile at a time.
@@ -25,12 +25,16 @@ _Avoid_: integration, service, source
 A Provider's view of active work, shown as the Provider shows it today: a GitHub Projects board, an Azure DevOps team board or sprint board, or a ClickUp List. Backlogs are not Boards.
 _Avoid_: project, kanban, backlog
 
+**Followed Board**:
+A Board the Profile lists, so Wayfinder shows it. Settings ticks a Board to follow it and unticks it to stop.
+_Avoid_: active board, selected board, subscribed board
+
 **Column**:
 One stage of a Board. Its name and order come from the Provider's board, or from the Board's Tracked Statuses when it has them.
 _Avoid_: lane, status bucket
 
 **Tracked Statuses**:
-An ordered list of Provider states the user picks for a Board. Each state becomes one Column, left to right in the saved order. Azure DevOps only for now.
+An ordered list of Provider states the user picks for a Board. Each state becomes one Column, left to right in the saved order, on any Provider.
 _Avoid_: status filter, custom columns
 
 **Ticket**:
@@ -38,12 +42,24 @@ One work item on a Board, whatever the Provider calls it (issue, work item, task
 _Avoid_: item, card, task, issue, work item
 
 **Move**:
-Changing the Column a Ticket is in. It is the first write Wayfinder will support.
+Changing the Column a Ticket is in. It was the first write Wayfinder supported; title edits and comments followed.
 _Avoid_: transition, status change
 
 **Pull Request**:
-An open or draft pull request the user authored, in GitHub or Azure DevOps.
+An open or draft pull request the user authored or is asked to review, in GitHub or Azure DevOps.
 _Avoid_: PR list item, merge request
+
+**Repo Filter**:
+Which repos' Pull Requests an Account shows: All, Selected (only the listed repos) or Ignored (every repo but the listed ones).
+_Avoid_: whitelist, blacklist, allow list, block list
+
+**Repo**:
+A local clone the Profile lists, with its folder and, once known, the Pull Request repo it clones. A Board names the Repos a Launch makes worktrees from, and a Review uses the Repo whose Pull Request repo matches.
+_Avoid_: repository, checkout, project
+
+**Template**:
+The agent, model, extra arguments and opening prompt a Launch or Review starts with. A Launch Template is the file's default, then the Board's; a Review Template is the default, then the Repo's.
+_Avoid_: preset, agent profile
 
 **Review**:
 Starting a new Herdr space on a Pull Request's branch, in its own worktree, where an agent checks it against acceptance criteria, security, and code quality.
