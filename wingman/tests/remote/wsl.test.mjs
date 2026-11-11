@@ -245,4 +245,61 @@ try {
   await exec("rm", ["-rf", "--", root], { on });
   assert.equal(await pathKind(root, { on }), null);
 }
+
+// ---- the Claude hook on the machine --------------------------------------------------------
+// In /tmp/wingman-hook-* there, with a throwaway home: the settings path and data folder are passed
+// explicitly, so the machine's real ~/.claude and data folder are never read or written.
+{
+  const { installHook, uninstallHook, hookStatus, hookState, parseSettings } = await import("../../mods/wingman/hooksetup.js");
+  const { Journal, queueFeedback } = await import("../../mods/wingman/journal.js");
+  const { readFileSync } = await import("node:fs");
+  const hookText = readFileSync(new URL("../../mods/wingman/hooks/wingman-hook.sh", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const top = (await sh("mktemp -d /tmp/wingman-hook-XXXXXX")).trim();
+  assert.match(top, /^\/tmp\/wingman-hook-/);
+  const home = `${top}/home`, data = `${home}/.config/herdr-app/data/wingman`, settings = `${home}/.claude/settings.json`, repo = `${top}/repo`;
+  const opts = { dataDir: data, settingsPath: settings };
+  const original = JSON.stringify({ model: "x", hooks: { Stop: [{ hooks: [{ type: "command", command: "true" }] }] } }, null, 2) + "\n";
+  try {
+    await sh(`mkdir -p "$1/.claude" && printf %s "$2" > "$1/.claude/settings.json"`, home, original);
+    await sh(`mkdir -p "$1" && cd "$1" && git init -q -b main && git config user.email t@t && git config user.name t && printf 'one\\ntwo\\n' > a.txt && git add -A && git commit -qm c1`, repo);
+    assert.equal((await hookStatus(on, opts)).state, "none");
+    console.log(await timed("hook install", () => installHook(on, hookText, opts)));
+    const s = await timed("hook status", () => hookStatus(on, { ...opts, hookText }));
+    assert.equal(s.state, "installed"); assert.equal(s.dataThere, true); assert.equal(s.current, true);
+    const installed = await readTextFile(settings, { on });
+    assert.equal(await readTextFile(`${settings}.bak-herdr-wingman`, { on }), original);
+    assert.match(await installHook(on, hookText, opts), /^Already installed/);
+    assert.equal(await readTextFile(settings, { on }), installed);
+
+    // Claude edits a.txt: the hook runs as the settings entry says, in a terminal-like environment
+    // (HC_TERMINAL_ID set, the throwaway home, nothing from Windows), its input piped by the script.
+    const cmd = (event) => parseSettings(installed).hooks[event].at(-1).hooks[0].command;
+    const runHook = (command, input) => sh(`printf %s "$1" | env -u WSLENV -u HC_TERMINAL_SOCKET -u HERDR_WINGMAN_DIR HOME="$2" HC_TERMINAL_ID=t9 sh -c "$3"`, input, home, command);
+    await sh(`printf 'one\\nTWO\\n' > "$1/a.txt"`, repo);
+    const event = JSON.stringify({ cwd: repo, hook_event_name: "PostToolUse", tool_name: "Edit", tool_input: { file_path: `${repo}/a.txt` }, tool_response: { originalFile: "one\ntwo\n", type: "update" } });
+    assert.equal(await runHook(cmd("PostToolUse"), event), "");
+    assert.match(await sh(`ls "$1/events"`, data), /^\d+-t9-\d+\.json\n$/);
+    const j = new Journal(() => {});
+    const r = await timed("hook drain", () => j.drainOn(on, { dataDir: data }));
+    assert.deepEqual(r, { installed: true, adopted: 1, events: 1 });
+    assert.equal(await sh(`ls -A "$1/events"`, data), "");
+    const index = JSON.parse(await readTextFile(`${repo}/.git/wingman/index.json`, { on }));
+    assert.equal(index.files["a.txt"].by, `${on}/t9`);
+    assert.equal(await readTextFile(`${repo}/.git/wingman/baselines/${index.files["a.txt"].baseline}`, { on }), "one\ntwo\n");
+
+    // A note for that terminal: the hook hands it to Claude on its next prompt.
+    await timed("hook feedback", () => queueFeedback(`${on}/t9`, "Code review: the user rejected line 2", { on, dataDir: data }));
+    const out = JSON.parse(await runHook(cmd("UserPromptSubmit"), "{}"));
+    assert.deepEqual(out, { hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: "Code review: the user rejected line 2" } });
+
+    console.log(await timed("hook remove", () => uninstallHook(on, opts)));
+    assert.equal(await readTextFile(settings, { on }), original);
+    assert.equal(hookState(parseSettings(await readTextFile(settings, { on })), s.hook).state, "none");
+    // Left in the home: the settings file and its backup, nothing else.
+    assert.equal(await sh(`cd "$1" && find . | sort`, home), "./.claude\n./.claude/settings.json\n./.claude/settings.json.bak-herdr-wingman\n.\n".split("\n").filter(Boolean).sort().join("\n") + "\n");
+  } finally {
+    await exec("rm", ["-rf", "--", top], { on });
+    assert.equal(await pathKind(top, { on }), null);
+  }
+}
 console.log(`remote/wsl ok on ${on}`);

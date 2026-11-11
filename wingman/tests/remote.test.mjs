@@ -88,7 +88,7 @@ try {
 
   // ---- workspaces of a space on another machine ------------------------------------------
   // Its folder holds a workspace file there, read and edited through the machine. spaces.json (the
-  // Claude hook's) doesn't apply.
+  // Claude hook's record of repos it edited, there too once it's installed) comes after the file's folders.
   const t1 = `${dir}/t1`;
   mkdirSync(`${t1}/api`, { recursive: true }); mkdirSync(`${t1}/web`);
   const wsText = '{ "folders": [ { "path": "api" }, { "path": "web", "name": "Web" } ] }\n';
@@ -101,10 +101,11 @@ try {
   assert.equal(pathFor(sp)("/home/me/x/"), "/home/me/x");
   remoteCalls.length = 0;
   let r = await spaceRoots(sp, [`${t1}/api`]);
-  assert.deepEqual(r.roots, [`${t1}/api`, `${t1}/web`]);
+  assert.deepEqual(r.roots, [`${t1}/api`, `${t1}/web`, `${dir}/agent-found`]);
   assert.equal(r.names.get(`${t1}/web`), "Web");
   assert.deepEqual(remoteCalls.map((c) => c.cmd ?? "read"), ["sh", "read"]); // one listing, one read, there
   assert.ok(remoteCalls.every((c) => c.on === "vps"));
+  writeFileSync(`${data}/spaces.json`, "{}");
   // Read again within 30 s: from the cache, no calls.
   remoteCalls.length = 0;
   await spaceRoots(sp, [`${t1}/api`]);

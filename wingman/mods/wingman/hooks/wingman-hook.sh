@@ -1,6 +1,7 @@
 #!/bin/sh
-# Claude Code hook for the Herdr Wingman mod. Installed by install.sh; does nothing
-# outside a Herdr terminal or when the mod's data folder is missing.
+# Claude Code hook for the Herdr Wingman mod. Installed by install.sh (this computer) or by
+# Wingman's Settings (another machine); does nothing outside a Herdr terminal or when the
+# mod's data folder is missing.
 #
 #   post   (PostToolUse on Edit|Write|MultiEdit|NotebookEdit): saves the hook input as
 #          one event file for the mod: {"terminal": "<HC_TERMINAL_ID>", "event": <input>}.
@@ -9,8 +10,17 @@
 # Both pass pending review feedback for this terminal (rejected hunks) to Claude as
 # additionalContext. The mod writes it as a ready JSON string in feedback/<terminal>.ctx.
 # POSIX sh only: no jq, Python or Node.
+#
+# The folder is $HERDR_WINGMAN_DIR, else ~/.config/herdr-app/data/wingman. One exception: in a
+# terminal of a Herdr core running in WSL (a Herdr machine; it sets HC_TERMINAL_SOCKET), a
+# HERDR_WINGMAN_DIR passed in from Windows through WSLENV names the Windows folder, which belongs
+# to this PC's own terminals (their ids would clash), so the machine's own folder is used.
 event="${1:-}"
-dir="${HERDR_WINGMAN_DIR:-$HOME/.config/herdr-app/data/wingman}"
+dir="${HERDR_WINGMAN_DIR:-}"
+if [ -n "$dir" ] && [ -n "${HC_TERMINAL_SOCKET:-}" ]; then
+  case ":${WSLENV:-}:" in *:HERDR_WINGMAN_DIR:*|*:HERDR_WINGMAN_DIR/*) dir="" ;; esac
+fi
+[ -n "$dir" ] || dir="$HOME/.config/herdr-app/data/wingman"
 if [ -z "${HC_TERMINAL_ID:-}" ] || [ ! -d "$dir" ]; then cat >/dev/null; exit 0; fi
 
 if [ "$event" = post ]; then

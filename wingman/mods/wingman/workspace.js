@@ -308,11 +308,12 @@ async function setHidden(spaceId, root, on) {
 
 /**
  * Folders whose repos the space reviews, in order: `start` (where its agents started), the
- * workspace file's folders, then the repos agents edited. Removed ones are left out, except
+ * workspace file's folders, then the repos agents edited (the Claude hook's record; on another
+ * machine, the paths it saw there, keyed by that space's own id). Removed ones are left out, except
  * folders the workspace file still lists.
  */
 export async function spaceRoots(sp, start = []) {
-  const ws = await workspaceFolders(sp), found = sp.machine ? [] : (await spaceRepos())[sp.id] ?? [], gone = (await hidden()).map[sp.id] ?? [];
+  const ws = await workspaceFolders(sp), found = (await spaceRepos())[sp.id] ?? [], gone = (await hidden()).map[sp.id] ?? [];
   const out = [], names = new Map();
   const add = (p, keep = false) => { if (p && !out.some((x) => same(x, p)) && (keep || !gone.some((g) => same(g, p)))) out.push(p); };
   for (const p of start) add(p);

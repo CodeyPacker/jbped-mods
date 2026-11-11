@@ -53,16 +53,16 @@ WSL git on a Windows drive is slow (about 1.5 s per `git status` on a large repo
 A space on another machine (Herdr's `machine`, reached over ssh) works in every tab, with every git and file call running on that machine:
 
 - **Edit**: the tree of the space's repos and plain folders (from its terminals' folders, as that machine names them), with git status letters and dimmed ignored files. Files open, edit and save as they do here: typing, line operations, Find and Replace, save and autosave, the merge of an agent's write into unsaved edits, and the conflict banner.
-- **Review**: any agent's changes there are captured (a snapshot of each repo when it starts working, then new changes adopted at most every 5 s while it works and once after), with Accept, Reject and undo. The review store is `<git-dir>/wingman/` on that machine, as here. Claude's edits there are captured like any agent's.
+- **Review**: any agent's changes there are captured (a snapshot of each repo when it starts working, then new changes adopted at most every 5 s while it works and once after), with Accept, Reject and undo. The review store is `<git-dir>/wingman/` on that machine, as here. Claude's edits there are captured like any agent's, and, with the Claude hook installed there (see Install), reported by the hook as they are here: each edit's baseline is Claude's own `originalFile`, the review covers every repo Claude edits there, and rejection notes, edit notes and **Comment last rejection** reach that Claude.
 - **Changes**: the uncommitted list with letters, line counts and AI marks, each file's diff, "Committed on this branch", **Commit** and **Discard file**. The diffs are computed here from texts read there.
 - **Quick Open**, **Search** and **Replace All** over its repos' files.
 - **Workspaces**: a `*.code-workspace` in the space's folder there is read and edited there, and made there when adding a repo makes two (unless that folder is inside a repo or is a home folder). Otherwise repos you add by hand (**+ Add repo…** takes a path on that machine) go to `data/wingman/workspaces/<space>.code-workspace` here, holding that machine's paths. Worktrees are made and deleted there as here.
 
 Every save there is compare-and-swap: the content goes to a temp file beside the file (`.wingman-<id>.tmp`), the file's SHA-256 is checked against what Wingman last read, and the temp file is renamed over it, keeping its mode and following a link. A file that changed meanwhile isn't overwritten. A file that isn't plain UTF-8 text isn't saved there.
 
-Not there: the Claude hook. Notes to Claude about rejections and your edits aren't sent there, and **Comment last rejection** says so; **Comment** still types into the agent's terminal. Neovim and the external editor don't open files there. A Windows machine (one without `sh`) can be browsed but not saved to: it says "Saving on a Windows machine isn't supported yet".
+Without the Claude hook installed there, notes to Claude about rejections and your edits aren't sent, and **Comment last rejection** says so; **Comment** still types into the agent's terminal. Neovim and the external editor don't open files there. A Windows machine (one without `sh`) can be browsed but not saved to: it says "Saving on a Windows machine isn't supported yet".
 
-Each call there takes about 150 to 200 ms, so an idle space is polled less often than a local one: its folders every 5 s (its workspace file at most every 30 s), Changes every 5 s (one `git status` and one `git hash-object` per repo), the tree every 10 s (two git calls per repo), and Review's index and the open files every 5 s (one call for all of them, which is how an outside change to an open file is noticed). Review's branch parking and committed changes are checked every 15 s, only while the space is shown or an agent there works. A save is one call up to about 27 KB, and larger files go in pieces of that size, about 0.2 s each (a 200 KB file took 1.5 s), unless the machine takes 1 MB per call, which Wingman checks once.
+Each call there takes about 150 to 200 ms, so an idle space is polled less often than a local one: its folders every 5 s (its workspace file at most every 30 s), Changes every 5 s (one `git status` and one `git hash-object` per repo), the tree every 10 s (two git calls per repo), and Review's index and the open files every 5 s (one call for all of them, which is how an outside change to an open file is noticed). Review's branch parking and committed changes are checked every 15 s, only while the space is shown or an agent there works. The Claude hook's events folder there is listed every 5 s (every 30 s while the hook isn't installed), only while a space there with a Wingman panel and an agent is shown or that agent works, and once after: one call, plus a few calls per event (reading it, the review store's writes, and one call removing the events read). A save is one call up to about 27 KB, and larger files go in pieces of that size, about 0.2 s each (a 200 KB file took 1.5 s), unless the machine takes 1 MB per call, which Wingman checks once.
 
 The machine needs `git`, `sh`, and `sha256sum` (or `shasum` or `openssl`). Only a Linux machine (WSL through Herdr) has been tried.
 
@@ -94,9 +94,24 @@ This adds the hooks to `~/.claude/settings.json` and creates `~/.config/herdr-ap
 
 The installer keeps your other hooks and writes `settings.json.bak-herdr-wingman` first. Running it again changes nothing. It needs `python3` to edit the JSON. The hook itself is plain `sh`.
 
+**Another machine** (a space on a Herdr machine reached over ssh, or a WSL machine of this PC): open a space there, then **⚙ Settings** › **Claude hook on <machine>** › **Install**. Nothing is needed on the machine but `sh`. It makes, on that machine:
+
+1. The folder `~/.config/herdr-app/data/wingman/` (or `$HERDR_WINGMAN_DIR` when that's set there), with `events/` and `feedback/`. The hook does nothing on a machine without this folder.
+2. `wingman-hook.sh` in that folder, a copy of this mod's hook. Claude runs it as `sh '<path>'`, so it needs no execute bit.
+3. Two entries in `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` there, the same ones `install.sh` adds here: a `PostToolUse` hook on `Edit|Write|MultiEdit|NotebookEdit` running `sh '<folder>/wingman-hook.sh' post # herdr-wingman-hook`, and a `UserPromptSubmit` hook running it with `prompt`, each with a 10 s timeout. Other keys and hooks are kept, `settings.json.bak-herdr-wingman` is written first, and a file that isn't valid JSON is left alone with an error. Wingman edits the JSON itself, so the machine needs no `python3`.
+4. `wingman-install.json` in that folder, recording which folders it made.
+
+Restart Claude there afterwards. Install again changes nothing (or updates the hook copy when this Wingman's is newer). The section's status line says what's there: installed, not installed, or installed by this PC's WSL setup.
+
+A WSL machine of this PC may already have the hook from `install.ps1` (its entries run the Windows copy through `/mnt/c/...`). Install then adds no second entry and only makes the folder. In that machine's terminals the hook uses the machine's own folder, not the Windows one `WSLENV` hands in, because their terminal ids belong to that machine's Herdr core.
+
+Inside a terminal there, `HC_TERMINAL_ID` is that machine's own id (`t3`). The hook writes that id; Wingman reads it as Herdr's address for the terminal (`wsl/t3`), and names its notes for that Claude by the bare id, as the hook reads them.
+
 ## Uninstall
 
 Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/`.
+
+On another machine: **⚙ Settings** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
 
 ## Use
 
@@ -189,7 +204,7 @@ The diff is also an editor. Click in the text to place the cursor and type. Your
 | Go to line | `ctrl-g`, then a line or `line:column` |
 | Bracket matching | with the cursor next to `(` `)` `[` `]` `{` `}`, both brackets of the pair get a box. Brackets in strings and comments don't count. None while text is selected. |
 | Save | `ctrl-s` |
-| Undo / redo | `ctrl-z` / `ctrl-shift-y` (one history with accept and reject; redo is for edits) |
+| Undo / redo | `ctrl-z` / `ctrl-shift-y` (one history with accept and reject; redo is for edits). Each space keeps the newest 200 steps, fewer when they hold over about 24 MB of file text; older steps are dropped. |
 | Scroll sideways | Shift+wheel |
 
 Line operations act on the cursor's line or every line a text selection covers, and each is one undo step. Herdr's global keys reach Herdr before Wingman, so `alt-up`, `alt-down` and `ctrl-shift-k` need a `mod:wingman` section in `keys.json` to send them to Wingman while it has focus:
@@ -243,6 +258,7 @@ The header's **⚙ Settings** opens:
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Autosave**: save when Wingman loses focus (another pane, or another window), and when you switch files or spaces. On by default. Herdr has no blur event for mods, so focus is checked 4 times a second.
 - **Also save after typing stops for**: Focus change (no timer, save on focus change only), 1, 2, 3, 5 or 10 seconds. Focus change by default.
+- **Claude hook on <machine>** (a space on another machine only): its status, and Install and Remove (see Install).
 
 Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 
@@ -254,3 +270,4 @@ Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 | `~/.config/herdr-app/data/wingman/` | `events/` (from the hook, removed once read), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
 | the space's folder | `<folder>.code-workspace`, when you add a second repo and the folder isn't inside a repo |
 | `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which pane copy runs capture, and its log |
+| another machine's `~/.config/herdr-app/data/wingman/` | with the Claude hook installed there: `wingman-hook.sh`, `wingman-install.json`, `events/` (removed once read), `feedback/` |

@@ -37,7 +37,9 @@ import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
 import { spans as spansOf } from "./spans.js";
-import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys } from "./journal.js";
+import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
+import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup.js";
+import { capSteps } from "./undocap.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
 // Agents count as working while they are in a turn, including while blocked on a question.
@@ -204,6 +206,8 @@ export default class Review extends View {
           openInVSCode: () => this.toVSCode(cx),
           // The settings popup saved a change.
           settings: async () => { this.settings = await loadSettings(); this.setKeymap(await loadKeys()); },
+          // The settings popup installed or removed the Claude hook on a machine: look again now.
+          hook: () => { forgetHook(); for (const j of this.journals?.values() ?? []) j.at = 0; },
         })[c]?.() ?? (BY_ID.has(c) ? this.runAction(c, cx) : undefined);
         cx.notify();
       }
@@ -432,7 +436,22 @@ export default class Review extends View {
     const now = Date.now();
     // On another machine: a pass only while an agent works and once after, at most every REMOTE.captureMs.
     const due = (c) => !c.capture.store.on || ((c.active || c.after) && now - (c.at ?? 0) >= REMOTE.captureMs);
-    await Promise.all([...this.captures.values()].filter(due).map((c) => { c.at = now; return this.collect(c, cx); }));
+    // Grouped by machine: a machine's hook events are applied before its captures' passes, so the
+    // two never write a review index at once (the journal adds `by` to what capture already took).
+    const byOn = new Map([[null, []]]);
+    for (const c of this.captures.values()) {
+      if (!due(c)) continue;
+      c.at = now;
+      const on = c.capture.store.on ?? null;
+      if (!byOn.has(on)) byOn.set(on, []);
+      byOn.get(on).push(c);
+    }
+    const journals = this.journalsDue(now);
+    for (const on of journals) if (!byOn.has(on)) byOn.set(on, []);
+    await Promise.all([...byOn].map(async ([on, caps]) => {
+      if (on && journals.has(on)) await this.drainMachine(on, cx);
+      await Promise.all(caps.map((c) => this.collect(c, cx)));
+    }));
     // Each repo's index once: branch parking and committed changes (store.reconcile). On another
     // machine every REMOTE.reconcileMs, and only for a space that's shown or has an agent working.
     const seen = new Set();
@@ -446,6 +465,48 @@ export default class Review extends View {
       }
       await st.reconcile(spaceOfAgent).catch((e) => log(`reconcile ${st.root}: ${e.message ?? e}`));
     }
+  }
+
+  /**
+   * Machines whose Claude hook events are due: those with a space that has a Wingman panel and an
+   * agent, while such a space is shown or an agent there works, and once after. At most every
+   * REMOTE.journalMs (REMOTE.journalIdleMs while the hook isn't installed there); an idle hidden
+   * machine costs nothing.
+   */
+  journalsDue(now) {
+    const out = new Set(), want = new Map();
+    for (const sp of reviewSpaces()) {
+      if (!sp.machine) continue;
+      const here = agents().filter((a) => a.space === sp.id);
+      if (!here.length) continue;
+      want.set(sp.machine, want.get(sp.machine) || sp.active || here.some((a) => ACTIVE.has(a.status)));
+    }
+    this.journals ??= new Map();
+    for (const [on, live] of want) {
+      const j = this.journals.get(on) ?? { at: 0, after: false, busy: false };
+      this.journals.set(on, j);
+      if (live) j.after = true;
+      else if (!j.after) continue;
+      if (j.busy || now - j.at < (hookKnown(on) === false ? REMOTE.journalIdleMs : REMOTE.journalMs)) continue;
+      if (!live) j.after = false; // the pass after the space was left or its agents stopped
+      j.at = now;
+      out.add(on);
+    }
+    for (const on of [...this.journals.keys()]) if (!want.has(on)) this.journals.delete(on);
+    return out;
+  }
+
+  /** One pass over machine `on`'s hook events (journal.drainOn). */
+  async drainMachine(on, cx) {
+    const j = this.journals.get(on);
+    if (!j || j.busy) return;
+    j.busy = true;
+    try {
+      this.journal ??= new Journal(log);
+      const r = await this.journal.drainOn(on);
+      if (r.events) log(`hook events on ${on}: ${r.events} read, ${r.adopted} files added`);
+    } catch (e) { log(`hook events on ${on}: ${e.message ?? e}`); }
+    finally { j.busy = false; }
   }
 
   /**
@@ -2335,11 +2396,11 @@ export default class Review extends View {
       this.files[this.files.indexOf(f)] = state;
       jobs.push([state, writes]);
     }
-    this.history.push(entry); this.redo = [];
+    this.history.push(entry); this.redo = []; capSteps(this.history);
     this.error = null; this.settle(); this.reveal(); cx.notify();
     this.enqueue(async () => {
       for (const [f, ws] of jobs) for (const w of ws) entry.writes.push(await f.store.apply(f, w));
-      for (const m of feedback) await queueFeedback(m.terminal, m.text);
+      for (const m of feedback) await this.noteToClaude(m, () => queueFeedback(m.terminal, m.text, { on: m.on }));
       await this.sendEditNotes(notes);
     }, cx);
   }
@@ -2356,15 +2417,25 @@ export default class Review extends View {
     this.sel = entry.snaps[0].key; this.error = null; this.settle(); this.reveal(); cx.notify();
     this.enqueue(async () => {
       await entry.snaps[0].store.undo(entry.writes);
-      for (const m of entry.feedback) await withdrawFeedback(m.terminal, m.text);
+      for (const m of entry.feedback) await this.noteToClaude(m, () => withdrawFeedback(m.terminal, m.text, { on: m.on }));
     }, cx);
+  }
+
+  /**
+   * Sends (or withdraws) a note for Claude. On this computer a failure fails the job, as it always
+   * did; on another machine it only shows in the status line, since the review's own writes are done.
+   */
+  async noteToClaude(m, send) {
+    if (!m.on) return send();
+    try { return await send(); }
+    catch (e) { this.status = hookKnown(m.on) === false ? NOTES_NOTE(m.on) : `Note to Claude on ${m.on} not sent: ${e.message ?? e}`; return false; }
   }
 
   /** Undo or redo of an edit: memory only. What's on disk stays, so the file shows as unsaved. */
   swapEdit(entry, other, cx) {
     const now = this.files.find((x) => x.key === entry.key);
     if (!now) return;
-    other.push({ edit: true, key: entry.key, state: bare(now), cur: this.cur, at: 0 });
+    other.push({ edit: true, key: entry.key, state: bare(now), cur: this.cur, at: 0 }); capSteps(other);
     this.replace(now, { ...entry.state, diskC: now.diskC, diskB: now.diskB, conflict: now.conflict, edited: true });
     this.sel = entry.key; this.cur = entry.cur; this.anchor = null;
     this.settle(); this.showCursor(); this.retokenize(cx); cx.notify();
@@ -2401,9 +2472,10 @@ export default class Review extends View {
    */
   rejected(f, what) {
     if (!f.by || !this.settings.autoNote) return [];
-    // These notes reach Claude through its hook, which reads this computer's files only.
-    if (f.store?.on) { this.status = NOTES_NOTE(f.store.on); return []; }
-    return [{ terminal: f.by, text: `Code review: the user rejected ${what} in ${f.as ?? agentPath(f.path, f.by)}. The original lines are back on disk.` }];
+    // These notes reach Claude through its hook; on another machine, through the hook installed there.
+    const on = f.store?.on ?? null;
+    if (on && hookKnown(on) === false) { this.status = NOTES_NOTE(on); return []; }
+    return [{ terminal: f.by, text: `Code review: the user rejected ${what} in ${f.as ?? agentPath(f.path, f.by)}. The original lines are back on disk.`, on }];
   }
 
   /** The agent to ask about a file: the one that made the change, else the space's only agent. */
@@ -2422,7 +2494,7 @@ export default class Review extends View {
     const r = this.lastReject;
     if (!r) { this.error = "Nothing rejected yet to comment on"; cx.notify(); return; }
     if (r.remote) { this.status = REASON_NOTE(r.remote); cx.notify(); return; }
-    this.openForm({ form: "reason", terminal: r.terminal, file: r.file, where: r.where, quote: r.quote });
+    this.openForm({ form: "reason", terminal: r.terminal, file: r.file, where: r.where, quote: r.quote, on: r.on ?? null });
   }
 
   /**
@@ -2540,7 +2612,9 @@ export default class Review extends View {
   }
 
   openSettings() {
-    openOverlay({ mod: "wingman", props: { form: "settings" }, kind: "dialog", width: 460, height: 690 });
+    // A space on another machine adds the "Claude hook on <machine>" section.
+    const machine = this.machine();
+    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 690 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -2573,10 +2647,11 @@ export default class Review extends View {
 
   /** Remembers the rejection a reason (ctrl-r) would explain. */
   noteReject(f, where, rows) {
-    // A comment on a rejection goes through the Claude hook, which is this computer's only.
-    if (f.store?.on) { this.lastReject = { remote: f.store.on }; return; }
+    // A comment on a rejection goes through the Claude hook: on another machine, the one installed there.
+    const on = f.store?.on ?? null;
+    if (on && hookKnown(on) === false) { this.lastReject = { remote: on }; return; }
     const terminal = this.target(f);
-    this.lastReject = terminal ? { terminal, file: f.as ?? agentPath(f.path, terminal), where, quote: this.quoteRows(f, rows).quote } : null;
+    this.lastReject = terminal ? { terminal, file: f.as ?? agentPath(f.path, terminal), where, quote: this.quoteRows(f, rows).quote, on } : null;
   }
 
   wholeFile(how, cx) {
@@ -2706,7 +2781,7 @@ export default class Review extends View {
     const { state, cursor } = edit(f, a, b, text, (ls) => highlightLines(ls, lang));
     const last = this.history[this.history.length - 1], now = Date.now();
     if (group && last?.edit && last.group && last.key === f.key && now - last.at < 1000) last.at = now;
-    else this.history.push({ edit: true, key: f.key, state: bare(f), cur: this.cur, at: now, group });
+    else { this.history.push({ edit: true, key: f.key, state: bare(f), cur: this.cur, at: now, group }); capSteps(this.history); }
     this.redo = [];
     state.edited = true;
     this.replace(f, state);
@@ -3456,21 +3531,22 @@ export default class Review extends View {
   /** Q45: a passive note to the agent that changed a file, naming the lines a save changed. */
   editNote(f, w) {
     if (!f.by || !this.settings.editNote || w.target !== "current" || w.before === null || w.after === null) return null;
-    if (f.store?.on) return null; // delivered by the Claude hook, this computer's only
+    const on = f.store?.on ?? null;
+    if (on && hookKnown(on) === false) return null; // delivered by the Claude hook, not installed there
     const r = changedRanges(w.before, w.after);
     if (!r.length) return null;
     const at = r.slice(0, 6).map((h) => (!h.nc ? `lines removed at ${h.n + 1}` : h.nc === 1 ? `line ${h.n + 1}` : `lines ${h.n + 1}-${h.n + h.nc}`));
     if (r.length > 6) at.push(`${r.length - 6} more places`);
-    return { key: f.key, terminal: f.by, path: f.as ?? agentPath(f.path, f.by), at: at.join(", ") };
+    return { key: f.key, terminal: f.by, path: f.as ?? agentPath(f.path, f.by), at: at.join(", "), on };
   }
 
   /** Queues edit notes. A file's earlier note the agent hasn't read yet is replaced, not repeated. */
   async sendEditNotes(notes) {
     for (const n of notes) {
-      const prev = this.editNotes.get(n.key), earlier = !!prev && await withdrawFeedback(prev.terminal, prev.text);
+      const prev = this.editNotes.get(n.key), earlier = !!prev && await this.noteToClaude(prev, () => withdrawFeedback(prev.terminal, prev.text, { on: prev.on }));
       const text = `Code review: the user edited ${n.path} (${n.at}${earlier ? ", plus earlier edits" : ""}). Read the file again before you change it.`;
-      await queueFeedback(n.terminal, text);
-      this.editNotes.set(n.key, { terminal: n.terminal, text });
+      if ((await this.noteToClaude(n, () => queueFeedback(n.terminal, text, { on: n.on }))) === false) continue;
+      this.editNotes.set(n.key, { terminal: n.terminal, text, on: n.on });
     }
   }
 
@@ -3602,6 +3678,7 @@ export default class Review extends View {
         cx.timer.after(500, (cx) => { if (this.extTyped === v && v !== (this.st?.externalCommand ?? "")) this.setSetting({ externalCommand: v }, cx); });
       });
       cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); cx.notify(); });
+      if (this.form.machine) this.hookAction(null, cx);
       return;
     }
     this.text = "";
@@ -3624,7 +3701,7 @@ export default class Review extends View {
     // A reason is context for the agent's next step; a prompt is a message from the user.
     cx.spawn(async () => {
       try {
-        if (form === "reason") await queueFeedback(terminal, `Code review: the user's comment on rejecting ${where} in ${file}: ${text}`);
+        if (form === "reason") await queueFeedback(terminal, `Code review: the user's comment on rejecting ${where} in ${file}: ${text}`, { on: this.form.on ?? null });
         else if (this.form.quote) await queuePrompt(terminal, `${text}\n\nRe: ${file}, ${where}:\n\`\`\`\n${this.form.quote}\n\`\`\``);
         else await queuePrompt(terminal, `${text} (re: ${file}, ${where})`);
       } catch (e) { log(`${form} for ${terminal} failed: ${e.message ?? e}`); }
@@ -3712,6 +3789,32 @@ export default class Review extends View {
     cx.notify();
     cx.spawn(async () => {
       try { await saveSettings(next); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
+    });
+  }
+
+  /**
+   * The settings popup's Claude hook on the space's machine: `how` "install" or "remove" (null:
+   * only the status). The result line says what was done; the pane copy is told to look again.
+   */
+  hookAction(how, cx) {
+    const on = this.form.machine;
+    if (this.hook?.busy) return;
+    this.hook = { ...this.hook, busy: how ? (how === "install" ? "Installing…" : "Removing…") : "Checking…", ...(how ? { result: null, failed: false } : {}) };
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let result = this.hook.result, failed = this.hook.failed;
+      try {
+        const text = (await readTextFile(`${appHome()}/mods/wingman/hooks/wingman-hook.sh`))?.replace(/\r\n/g, "\n") ?? null;
+        if (how === "install") {
+          if (!text) throw new Error("hooks/wingman-hook.sh is missing from the mod folder");
+          result = await installHook(on, text);
+        } else if (how === "remove") result = await uninstallHook(on);
+        if (how) { failed = false; run("wingman.hook"); }
+        this.hook = { status: hookSummary(await hookStatus(on, { hookText: text }), on), result, failed };
+      } catch (e) {
+        this.hook = { status: this.hook?.status ?? null, result: String(e.message ?? e), failed: true };
+      }
+      cx.notify();
     });
   }
 
@@ -3826,7 +3929,22 @@ export default class Review extends View {
             .on_click((_e, cx) => this.setSetting({ externalEditor: v }, cx)).child(ed.name))))
           .when(st.externalEditor === "custom", (e) => e
             .child(Input.new(this.extInput))
-            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}')))));
+            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))))
+        .when(!!this.form.machine, (e) => e.child(this.hookSection(t))));
+  }
+
+  /** Settings: the Claude hook on the space's machine, with Install and Remove. */
+  hookSection(t) {
+    const h = this.hook ?? {}, on = this.form.machine;
+    return v_flex().gap(6).pt(4)
+      .child(div().text_size(12).text_color(t.muted).child(`Claude hook on ${on}`))
+      .child(div().text_size(11.5).child(h.busy && !h.status ? h.busy : h.status ?? ""))
+      .child(h_flex().gap(6).items_center()
+        .child(this.button("hook-install", "Install", t.accent + "55", (cx) => this.hookAction("install", cx)))
+        .child(this.button("hook-remove", "Remove", t.raised, (cx) => this.hookAction("remove", cx)))
+        .when(!!h.busy, (e) => e.child(div().text_size(11).text_color(t.dim).child(h.busy))))
+      .when(!!h.result, (e) => e.child(div().text_size(11).text_color(h.failed ? t.ansi1 : t.dim).child(h.result)))
+      .child(div().text_size(11).text_color(t.dim).child("Install copies the hook to the machine and adds it to Claude's settings there. Restart Claude there to load it."));
   }
 
   renderMenu() {
