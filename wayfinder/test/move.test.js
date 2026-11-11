@@ -25,6 +25,9 @@ test("Azure Move patches the state, and the board's Column field for a Provider 
   ]);
   assert.deepEqual(moveOps(ref, { status: "Blocked", column: null }, "Bug"), [{ op: "add", path: "/fields/System.State", value: "Blocked" }]);
   assert.throws(() => moveOps(ref, { status: null, column: azData.columns[1] }, "Epic"), /no state for a Epic/);
+  // A Tracked Status wins over the same-named Column's mapping, and the Column field isn't written.
+  const col = { id: "Active", name: "Active", states: { Task: "In Progress" } };
+  assert.deepEqual(moveOps(ref, { status: "Active", column: col }, "Task"), [{ op: "add", path: "/fields/System.State", value: "Active" }]);
 });
 
 test("Azure Move sends one JSON Patch with a fresh token", async () => {

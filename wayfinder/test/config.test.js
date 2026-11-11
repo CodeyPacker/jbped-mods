@@ -57,6 +57,15 @@ test("secret fields are rejected anywhere", () => {
   assert.ok(!r.errors.some((e) => /\.path/.test(e)));
 });
 
+test("a secret under a near-miss key is rejected, the variable-name keys are not (security F8)", () => {
+  const o = structuredClone(good);
+  Object.assign(o.profiles.work.accounts[0], { clickupToken: "pk_1_X", azurePat: "x", api_key: "x", "my-secret": "x" });
+  const e = parse(o).errors.join("\n");
+  for (const k of ["clickupToken", "azurePat", "api_key", "my-secret"]) assert.match(e, new RegExp(`\\.${k}: Wayfinder doesn't store secrets.*patEnv.*tokenEnv`));
+  const ok = parse({ profiles: { p: { accounts: [{ id: "a", provider: "azure", org: "https://dev.azure.com/o", patEnv: "ADO_PAT" }, { id: "c", provider: "clickup", tokenEnv: "CU_TOKEN" }] } } });
+  assert.deepEqual(ok.errors, []);
+});
+
 test("boards must reference known accounts and repos", () => {
   const o = structuredClone(good);
   o.profiles.work.boards[0].account = "zzz";

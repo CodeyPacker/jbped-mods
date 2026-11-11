@@ -2,11 +2,13 @@
 // Auth: ClickUp has no CLI, so this reopens D3 the same way the Azure PAT fallback (#19) does: the
 // Account names an environment variable (default CLICKUP_API_TOKEN) that the runner's login shell sets.
 // The token is read on each refresh and only ever goes in a header. Wayfinder never stores it (ADR 0002).
+import { ENV_NAME, tokenFromOutput } from "./azure.js";
+import { safeMarkdown } from "./contract.js";
 const API = "https://api.clickup.com/api/v2";
 const DEFAULT_ENV = "CLICKUP_API_TOKEN";
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MAX_PAGES = 20; // 100 tasks a page
-const DONE_DAYS = 30; // closed tasks show only if they closed this recently
+const DONE_DAYS = 30; // closed and done tasks show only if they closed this recently
+const COMMENT_PAGE = 25; // ClickUp sends the newest 25
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b);
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -14,11 +16,11 @@ export const tokenEnv = (account) => account.tokenEnv ?? DEFAULT_ENV;
 
 async function token(account, io) {
   const name = tokenEnv(account);
-  if (!ENV_NAME.test(name)) throw new Error(`tokenEnv "${name}" isn't an environment variable name`);
+  if (!ENV_NAME.test(String(name))) throw new Error("tokenEnv must be an environment variable name in upper case, e.g. CLICKUP_API_TOKEN");
   const r = await io.run("bash", ["-lc", 'printenv "$1"', "wayfinder-env", name], { timeout: 15000 });
-  const t = r.stdout.trim();
   if (r.code === 127) throw new Error(`The runner can't start bash: ${(r.stderr || r.stdout).trim().split("\n")[0]}`);
-  if (r.code !== 0 || !t) throw new Error(`${name} isn't set in the runner's login shell. Make a token in ClickUp (Settings, Apps) and export it in ~/.profile.`);
+  const t = r.code === 0 ? tokenFromOutput(r.stdout, name) : "";
+  if (!t) throw new Error(`${name} isn't set in the runner's login shell. Make a token in ClickUp (Settings, Apps) and export it in ~/.profile (or ~/.bash_profile if you have one).`);
   return t;
 }
 
@@ -28,11 +30,16 @@ const seg = (id) => {
 };
 
 async function call(tok, io, path, { method = "GET", body } = {}) {
-  const res = await io.fetch(`${API}/${path}`, {
-    method,
-    headers: { Authorization: tok, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
+  let res;
+  try {
+    res = await io.fetch(`${API}/${path}`, {
+      method,
+      headers: { Authorization: tok, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  } catch { // its text may hold the header, so none of it is shown
+    throw new Error("The request to ClickUp failed before it was answered");
+  }
   const text = await res.text();
   let data = null;
   try { data = JSON.parse(text); } catch { /* not JSON */ }
@@ -54,7 +61,8 @@ export function mapColumns(list) {
 
 export function mapTasks(tasks, now = Date.now()) {
   const cutoff = now - DONE_DAYS * 86400000;
-  return (tasks ?? []).filter((t) => !(t.status?.type === "closed" && Number(t.date_closed ?? t.date_updated ?? 0) < cutoff))
+  const closed = (t) => t.status?.type === "closed" || t.status?.type === "done";
+  return (tasks ?? []).filter((t) => !(closed(t) && Number(t.date_closed ?? t.date_updated ?? 0) < cutoff))
     .map((t) => ({
       ref: { id: t.id },
       key: t.id, id: t.custom_id || t.id, title: t.name ?? "", type: t.parent ? "Subtask" : "Task", url: t.url ?? null,
@@ -70,10 +78,11 @@ export function mapTicket(t, comments, ref) {
     column: t.status?.status ?? null, assignees: people(t.assignees), priority: prio(t.priority),
     tags: (t.tags ?? []).map((x) => x.name).filter(Boolean),
     parent: t.parent ? { id: t.parent, title: "", url: null } : null,
-    description: t.markdown_description || t.text_content || t.description || "", descriptionLabel: "Description",
+    description: safeMarkdown(t.markdown_description || t.text_content || t.description || ""), descriptionLabel: "Description",
     acceptanceCriteria: null,
-    comments: list.map((c) => ({ author: c.user?.username ?? "", createdAt: c.date ? new Date(Number(c.date)).toISOString() : null, url: t.url ?? null, body: c.comment_text ?? "" })),
-    moreComments: 0, pullRequests: [], images: [],
+    comments: list.map((c) => ({ author: c.user?.username ?? "", createdAt: c.date ? new Date(Number(c.date)).toISOString() : null, url: t.url ?? null, body: safeMarkdown(c.comment_text ?? "") })),
+    // A full page means there may be older ones. ClickUp doesn't say how many.
+    moreComments: list.length >= COMMENT_PAGE ? 1 : 0, pullRequests: [], images: [],
   };
 }
 

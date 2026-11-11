@@ -139,3 +139,78 @@ export function trackColumns(board, statuses) {
   }
   return { ...board, columns, tickets };
 }
+
+// Raw markdown from a service, with every link and image destination whose scheme isn't http, https or
+// mailto turned into plain text (the label stays). Relative destinations stay. Covers [x](dest),
+// ![x](dest), [x](<dest>), reference definitions and <scheme:...> autolinks. Code spans aren't skipped:
+// stripping a link shown as code is safer than missing one. Pure.
+const SAFE_SCHEME = /^(https?|mailto):/i;
+function keepDest(dest) {
+  const d = dest.startsWith("<") ? dest.slice(1, -1) : dest;
+  if (SAFE_SCHEME.test(d)) return true;
+  // Relative: no scheme, no host, and nothing an escape or entity could turn into either.
+  const path = d.split(/[?#]/)[0];
+  return !/[\s\u0000-\u001f\u007f]/.test(d) && !/[&\\]/.test(path) && !path.split("/")[0].includes(":") && !d.startsWith("//");
+}
+
+// Parses an inline link's "(dest "title")" at i (just past "]"). Returns { dest, end } or null.
+function inlineDest(s, i) {
+  if (s[i] !== "(") return null;
+  let j = i + 1;
+  while (/[ \t\n]/.test(s[j] ?? "")) j++;
+  let dest;
+  if (s[j] === "<") {
+    const k = s.slice(j + 1).search(/[<>\n]/);
+    if (k < 0 || s[j + 1 + k] !== ">") return null;
+    dest = s.slice(j, j + k + 2); j += k + 2;
+  } else {
+    const start = j;
+    for (let depth = 0; j < s.length; j++) {
+      const c = s[j];
+      if (c === "\\" && j + 1 < s.length) { j++; continue; }
+      if (/[\s\u0000-\u001f\u007f]/.test(c)) break;
+      if (c === "(") depth++;
+      else if (c === ")") { if (depth === 0) break; depth--; }
+    }
+    dest = s.slice(start, j);
+  }
+  while (/[ \t\n]/.test(s[j] ?? "")) j++;
+  const close = { '"': '"', "'": "'", "(": ")" }[s[j]];
+  if (close) {
+    const k = s.indexOf(close, j + 1);
+    if (k < 0) return null;
+    j = k + 1;
+    while (/[ \t\n]/.test(s[j] ?? "")) j++;
+  }
+  return s[j] === ")" ? { dest, end: j + 1 } : null;
+}
+
+export function safeMarkdown(text) {
+  let s = String(text ?? "");
+  // Inline links and images, one unsafe one at a time, so nested ones are seen after the outer is gone.
+  for (let changed = true; changed;) {
+    changed = false;
+    const open = [];
+    for (let i = 0; i < s.length; i++) {
+      if (s[i] === "\\") { i++; continue; }
+      if (s[i] === "[") open.push(i);
+      else if (s[i] === "]" && open.length) {
+        const start = open.pop(), link = inlineDest(s, i + 1);
+        if (!link && s[i + 1] === "(") { // not a link to CommonMark: escaped, so no looser parser makes one either
+          s = `${s.slice(0, start)}\\${s.slice(start)}`;
+          changed = true;
+          break;
+        }
+        if (!link || keepDest(link.dest)) continue;
+        const from = s[start - 1] === "!" && s[start - 2] !== "\\" ? start - 1 : start;
+        s = s.slice(0, from) + s.slice(start + 1, i) + s.slice(link.end);
+        changed = true;
+        break;
+      }
+    }
+  }
+  // Reference definitions: "[label]: dest". Without a destination the line is plain text.
+  s = s.replace(/^( {0,3}\[(?:[^\[\]\\]|\\.)+\]:)[ \t]*\n?[ \t]*(<[^<>\n]*>|\S+)/gm, (m, label, dest) => (keepDest(dest) ? m : label));
+  // Autolinks: <scheme:...> becomes its text.
+  return s.replace(/<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>\u0000-\u001f]*)>/g, (m, url) => (SAFE_SCHEME.test(url) ? m : url));
+}

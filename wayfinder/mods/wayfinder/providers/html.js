@@ -12,7 +12,8 @@ const decode = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+\d*);/gi, (m, e) => {
 });
 // "!" too, so text before a link can never turn it into an image.
 const escape = (s) => s.replace(/([\\`*_[\]<>#|~!])/g, "\\$1");
-const safeUrl = (u) => (/^(https?:|mailto:)/i.test(u ?? "") ? u.replace(/[()\s]/g, encodeURIComponent) : null);
+// Encoded: anything that could end the <url> destination or start another link inside it.
+const safeUrl = (u) => (/^(https?:|mailto:)/i.test(u ?? "") ? u.replace(/[()<>"\\\s\u0000-\u001f\u007f]/g, encodeURIComponent) : null);
 const attr = (tag, name) => {
   const m = new RegExp(`\\s${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, "i").exec(tag);
   return m ? decode(m[2] ?? m[3] ?? m[4] ?? "") : null;

@@ -143,6 +143,20 @@ test("a refused login tells how to sign in", async () => {
 
 import { linkedPrs, mapPr, mapComments, mapTicket } from "../mods/wayfinder/providers/azure.js";
 
+test("a GitHub PR relation is anchored and rebuilt, so it can't carry a second link (security F4)", () => {
+  const l = linkedPrs([
+    { rel: "Hyperlink", url: "https://github.com/a/b/pull/1>)[Open](file:///C:/x.exe)" },
+    { rel: "Hyperlink", url: "https://github.com/a/b/pull/2 [Open](file:///C:/x.exe)" },
+    { rel: "Hyperlink", url: "https://github.com/a/b/pull/3/files?w=1#x" },
+  ]);
+  assert.deepEqual(l.github.map((p) => p.url), ["https://github.com/a/b/pull/3"]);
+});
+
+test("markdown comments lose non-http links", () => {
+  const c = mapComments({ comments: [{ createdDate: "1", format: "markdown", text: "[x](file:///C:/x.exe) [y](https://y)" }] }, "u");
+  assert.equal(c.comments[0].body, "x [y](https://y)");
+});
+
 test("linked PRs: Azure ones by id, GitHub ones by URL only, commits ignored", () => {
   const l = linkedPrs([
     { rel: "ArtifactLink", url: "vstfs:///Git/PullRequestId/p%2Fr%2F8084" },

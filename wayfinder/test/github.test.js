@@ -91,3 +91,11 @@ test("the flow picks the Provider by the account and checks capabilities", async
   await assert.rejects(loadBoard(profile, { id: "x", account: "zz", ref: 1 }, {}, { fake }), /isn't in this profile/);
   assert.ok(can(github, "board"));
 });
+
+test("issue bodies and comments lose non-http links (security F3)", async () => {
+  const { mapTicket } = await import("../mods/wayfinder/providers/github.js");
+  const t = mapTicket({ content: { __typename: "Issue", number: 1, title: "t", body: "[docs](ms-msdt:/id x) [ok](https://ok)",
+    repository: { name: "r" }, comments: { totalCount: 1, nodes: [{ author: { login: "a" }, body: "<file:///C:/x.exe>" }] } } }, { itemId: "I" });
+  assert.equal(t.description, "\\[docs](ms-msdt:/id x) [ok](https://ok)"); // not a link: its "[" is escaped
+  assert.equal(t.comments[0].body, "file:///C:/x.exe");
+});

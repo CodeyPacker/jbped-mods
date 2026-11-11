@@ -1,7 +1,7 @@
 // GitHub Provider: GitHub Projects (v2) boards. Translation only (ADR 0001).
 // Auth: `gh auth token --user <login>` through the Profile's runner, then GraphQL over fetch, so
 // the token never appears on a command line and `gh auth switch` is never used (ADR 0002).
-import { NO_COLUMN } from "./contract.js";
+import { NO_COLUMN, safeMarkdown } from "./contract.js";
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const API = "https://api.github.com/graphql";
@@ -162,9 +162,9 @@ export function mapTicket(data, ref) {
     tags: (c.labels?.nodes ?? []).map((l) => l.name),
     priority: data.item?.priority?.name ?? null,
     parent: c.parent ? { id: numbered(c.parent), title: c.parent.title, url: c.parent.url } : null,
-    description: c.body ?? "",
+    description: safeMarkdown(c.body ?? ""),
     acceptanceCriteria: null,
-    comments: comments.map((m) => ({ author: m.author?.login ?? "ghost", body: m.body ?? "", createdAt: m.createdAt, url: m.url })),
+    comments: comments.map((m) => ({ author: m.author?.login ?? "ghost", body: safeMarkdown(m.body ?? ""), createdAt: m.createdAt, url: m.url })),
     moreComments: Math.max(0, (c.comments?.totalCount ?? 0) - comments.length),
     pullRequests: kind === "Issue" ? linkedPullRequests(c) : [],
   };
@@ -257,6 +257,14 @@ async function graphql(account, io, query, variables) {
   return body.data;
 }
 
+// A write's missing scope, said with the scope it needs (the query-side message names read:project).
+async function needsScope(write, scope, what) {
+  try { await write; } catch (e) {
+    if (/scope|permission|not accessible|INSUFFICIENT/i.test(String(e.message))) throw new Error(`gh needs the ${scope} scope to ${what}. Run: gh auth refresh -h github.com -s ${scope}`);
+    throw e;
+  }
+}
+
 export const github = {
   id: "github",
   capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "review", "repos", "signInState"],
@@ -311,7 +319,8 @@ export const github = {
     const title = String(fields.title ?? "").trim(), m = TITLE_MUTATIONS[ref.kind];
     if (!m || !ref.contentId) throw new Error("This card can't be edited here");
     if (!title) throw new Error("A title can't be empty");
-    await graphql(account, io, m, { id: ref.contentId, title });
+    // A draft lives in the project, so editing it needs "project". Issues and PRs need "repo".
+    await needsScope(graphql(account, io, m, { id: ref.contentId, title }), ref.kind === "DraftIssue" ? "project" : "repo", "edit titles");
   },
 
   async comment(account, ref, text, io) {
@@ -319,7 +328,7 @@ export const github = {
     if (ref.kind === "DraftIssue") throw new Error("Draft issues can't take comments. Convert it to an issue first.");
     if (!ref.contentId) throw new Error("This card can't take comments");
     if (!body) throw new Error("Write a comment first");
-    await graphql(account, io, COMMENT_MUTATION, { id: ref.contentId, body });
+    await needsScope(graphql(account, io, COMMENT_MUTATION, { id: ref.contentId, body }), "repo", "post comments");
   },
 
   // Sets the item's Status option (#15). Writing needs the "project" scope.
@@ -327,12 +336,7 @@ export const github = {
     const option = target.column?.id;
     if (!option || option === NO_COLUMN) throw new Error(`"${target.status ?? target.column?.name}" isn't an option of this project's Status field`);
     if (!ref.projectId || !ref.fieldId || !ref.itemId) throw new Error("Refresh the Board, then move the card again");
-    try {
-      await graphql(account, io, MOVE_MUTATION, { project: ref.projectId, item: ref.itemId, field: ref.fieldId, option });
-    } catch (e) {
-      if (/scope|permission|not accessible|INSUFFICIENT/i.test(String(e.message))) throw new Error(`gh needs the project scope to move cards. Run: gh auth refresh -h github.com -s project`);
-      throw e;
-    }
+    await needsScope(graphql(account, io, MOVE_MUTATION, { project: ref.projectId, item: ref.itemId, field: ref.fieldId, option }), "project", "move cards");
   },
 
   async review(account, pr, io) {

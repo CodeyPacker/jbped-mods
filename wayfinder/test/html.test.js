@@ -38,3 +38,24 @@ test("text can't turn into markdown or HTML", () => {
 test("a ! in text never turns a link into an image", () => {
   assert.equal(md('Wow!<a href="https://x.test">x</a>'), "Wow\\![x](<https://x.test>)");
 });
+
+test("a URL can't close its <url> destination and start another link (security F2)", () => {
+  const a = md('<a href="https://a/&gt;&lt;file:///C:/x.exe">t</a>');
+  assert.equal(a, "[t](<https://a/%3E%3Cfile:///C:/x.exe>)");
+  const i = md('<img src="https://a/&gt;&lt;javascript:alert%281%29&gt;">');
+  assert.equal(i, "![image](<https://a/%3E%3Cjavascript:alert%281%29%3E>)");
+  assert.equal(md('<a href="https://a/b&quot;c\\d&#1;e">t</a>'), "[t](<https://a/b%22c%5Cd%01e>)");
+});
+
+test("safeMarkdown keeps only http, https, mailto and relative destinations (security F3)", async () => {
+  const { safeMarkdown: sm } = await import("../mods/wayfinder/providers/contract.js");
+  assert.equal(sm("[a](file:///C:/x.exe) [b](https://x) <javascript:1> ![i](<javascript:alert(1)>)"), "a [b](https://x) javascript:1 i");
+  assert.equal(sm("[docs](ms-msdt:/id x) [m](mailto:a@b.c) [r](docs/a.md?x=1&y=2#h)"), "\\[docs](ms-msdt:/id x) [m](mailto:a@b.c) [r](docs/a.md?x=1&y=2#h)");
+  assert.equal(sm('[x](javascript:a((1)) "t") [y]( <vbscript:1> )'), "x y");
+  assert.equal(sm("[![img](https://a)](file:///x)"), "![img](https://a)");
+  assert.equal(sm("[e](java&#115;cript:1) [b](javascript\\:1) [p](//evil/x) [s](/\\/evil)"), "e b p s");
+  assert.equal(sm("[r]: file:///x\n\n[go][r]"), "[r]:\n\n[go][r]");
+  assert.equal(sm("[ok]: https://x\n<https://y> <a@b.c>"), "[ok]: https://x\n<https://y> <a@b.c>");
+  assert.equal(sm("\\[not a link](javascript:1)"), "\\[not a link](javascript:1)");
+  assert.equal(sm(null), "");
+});

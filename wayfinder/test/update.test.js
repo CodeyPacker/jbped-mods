@@ -39,3 +39,12 @@ test("GitHub: titles by content type, comments on issues and PRs only", async ()
   assert.deepEqual(r.sent[1].json.variables, { id: "I1", body: "hi" });
   await assert.rejects(github.comment({ login: "me" }, { kind: "DraftIssue", contentId: "D" }, "hi", r.io), /Draft issues/);
 });
+
+test("GitHub: a missing scope on a title or comment names the scope that write needs (verify-move-update F9)", async () => {
+  const r = recorder(JSON.stringify({ errors: [{ type: "INSUFFICIENT_SCOPES", message: "Your token has not been granted the required scopes" }] }));
+  await assert.rejects(github.update({ login: "me" }, { kind: "DraftIssue", contentId: "D" }, { title: "T" }, r.io), /needs the project scope to edit titles\. Run: gh auth refresh -h github\.com -s project$/);
+  await assert.rejects(github.update({ login: "me" }, { kind: "Issue", contentId: "I" }, { title: "T" }, r.io), /needs the repo scope.*-s repo$/);
+  await assert.rejects(github.comment({ login: "me" }, { kind: "Issue", contentId: "I" }, "hi", r.io), /needs the repo scope to post comments/);
+  const other = recorder(JSON.stringify({ errors: [{ message: "Could not resolve to a node" }] }));
+  await assert.rejects(github.update({ login: "me" }, { kind: "Issue", contentId: "I" }, { title: "T" }, other.io), /^Error: Could not resolve to a node$/);
+});

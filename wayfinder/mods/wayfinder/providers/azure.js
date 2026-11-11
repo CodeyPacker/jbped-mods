@@ -11,7 +11,7 @@
 // Ticket detail converts the HTML fields to markdown. Bugs show their repro steps as the description.
 // Linked Azure PRs are fetched. GitHub PR links show by URL only (R5).
 import { htmlToMarkdown } from "./html.js";
-import { repoFilter } from "./contract.js";
+import { repoFilter, safeMarkdown } from "./contract.js";
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
@@ -59,7 +59,16 @@ const firstLine = (r) => (r.stderr || r.stdout).trim().split("\n")[0];
 
 // A PAT fallback (#19) for organizations az can't sign in to: the name of an environment variable the
 // runner's login shell sets. The PAT is read each time and only ever goes in a header (ADR 0002).
-export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+// Upper case and short, so a pasted token (lower case, or a pk_ prefix, or long) is never taken as a name.
+export const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,39}$/;
+
+// The token in a login shell's printenv output: its last non-empty line, since a profile may print
+// first. A value with spaces or control characters is refused without showing it.
+export function tokenFromOutput(stdout, name) {
+  const t = String(stdout ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).at(-1) ?? "";
+  if (/[\s\u0000-\u001f\u007f]/.test(t)) throw new Error(`${name} holds spaces or control characters, so it isn't a token`);
+  return t;
+}
 const PRINTENV_SH = 'printenv "$1"';
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 export function base64(text) {
@@ -80,18 +89,28 @@ export function base64(text) {
 }
 
 async function patFrom(account, io) {
-  if (!ENV_NAME.test(account.patEnv)) throw new Error(`patEnv "${account.patEnv}" isn't an environment variable name`);
+  if (!ENV_NAME.test(String(account.patEnv))) throw new Error("patEnv must be an environment variable name in upper case, e.g. AZURE_DEVOPS_PAT");
   const r = await io.run("bash", ["-lc", PRINTENV_SH, "wayfinder-env", account.patEnv], { timeout: 15000 });
-  const pat = r.stdout.trim();
   if (r.code === 127) throw new Error(`The runner can't start bash: ${firstLine(r)}`);
-  if (r.code !== 0 || !pat) throw new Error(`${account.patEnv} isn't set in the runner's login shell. Export it in ~/.profile.`);
+  const pat = r.code === 0 ? tokenFromOutput(r.stdout, account.patEnv) : "";
+  if (!pat) throw new Error(`${account.patEnv} isn't set in the runner's login shell. Export it in ~/.profile (or ~/.bash_profile if you have one).`);
   return pat;
 }
 
 // The Authorization header: the PAT when the Account names one, else a fresh az token (R3).
+// patEnv rides along so a refusal names the right fix.
 async function token(account, io) {
-  if (account.patEnv) return `Basic ${base64(`:${await patFrom(account, io)}`)}`;
-  return `Bearer ${await azToken(account, io)}`;
+  if (account.patEnv) return { header: `Basic ${base64(`:${await patFrom(account, io)}`)}`, patEnv: account.patEnv };
+  return { header: `Bearer ${await azToken(account, io)}`, patEnv: null };
+}
+
+const refused = (status, tok, io) => (tok.patEnv
+  ? `Azure DevOps refused the PAT in ${tok.patEnv}. Make a new one and export it again.`
+  : `Azure DevOps refused the login (${status}). Run: ${loginCommand(io.profile)}`);
+
+// A fetch that throws (not an HTTP status) is reported without its text, which may hold the header.
+async function send(io, url, opts) {
+  try { return await io.fetch(url, opts); } catch { throw new Error("The request to Azure DevOps failed before it was answered"); }
 }
 
 async function azToken(account, io) {
@@ -105,13 +124,13 @@ async function azToken(account, io) {
 // GET (or POST with a body) a path under the organization. Rejects with a message fit to show.
 async function rest(org, tok, io, path, body, version = API_VERSION) {
   const url = `${org}/${path}${path.includes("?") ? "&" : "?"}api-version=${version}`;
-  const res = await io.fetch(url, {
+  const res = await send(io, url, {
     method: body ? "POST" : "GET",
-    headers: { Authorization: tok, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { Authorization: tok.header, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
-  if (res.status === 401 || res.status === 203) throw new Error(`Azure DevOps refused the login (${res.status}). Run: ${loginCommand(io.profile)}`);
+  if (res.status === 401 || res.status === 203) throw new Error(refused(res.status, tok, io));
   let data;
   try { data = JSON.parse(text); } catch { throw new Error(`Azure DevOps answered ${res.status}: ${text.slice(0, 200)}`); }
   if (!res.ok) throw new Error(data?.message ?? `Azure DevOps answered ${res.status}`);
@@ -120,13 +139,13 @@ async function rest(org, tok, io, path, body, version = API_VERSION) {
 
 // A JSON Patch to a work item (#15, #16). Azure answers with the item, or an error message.
 async function patchItem(org, tok, io, id, ops) {
-  const res = await io.fetch(`${org}/_apis/wit/workitems/${id}?api-version=${API_VERSION}`, {
+  const res = await send(io, `${org}/_apis/wit/workitems/${id}?api-version=${API_VERSION}`, {
     method: "PATCH",
-    headers: { Authorization: tok, Accept: "application/json", "Content-Type": "application/json-patch+json" },
+    headers: { Authorization: tok.header, Accept: "application/json", "Content-Type": "application/json-patch+json" },
     body: JSON.stringify(ops),
   });
   const text = await res.text();
-  if (res.status === 401 || res.status === 203) throw new Error(`Azure DevOps refused the login (${res.status}). Run: ${loginCommand(io.profile)}`);
+  if (res.status === 401 || res.status === 203) throw new Error(refused(res.status, tok, io));
   let data = null;
   try { data = JSON.parse(text); } catch { /* not JSON */ }
   if (!res.ok) throw new Error(data?.message ?? `Azure DevOps answered ${res.status}`);
@@ -134,9 +153,10 @@ async function patchItem(org, tok, io, id, ops) {
 }
 
 // The patch for a Move. A Provider Column sets the state its type maps to, plus the board's own Column
-// field (R7: that field is undocumented, so the state comes with it). A Tracked Status sets the state.
+// field (R7: that field is undocumented, so the state comes with it). A Tracked Status sets the state,
+// even when a Provider Column has the same name.
 export function moveOps(ref, target, type) {
-  const state = target.column?.states?.[type] ?? target.status;
+  const state = target.status ?? target.column?.states?.[type];
   if (!state) throw new Error(`The Column "${target.column?.name}" has no state for a ${type || "work item"}`);
   const ops = [{ op: "add", path: "/fields/System.State", value: state }];
   if (target.column && !target.status && ref.columnField) ops.push({ op: "add", path: `/fields/${ref.columnField}`, value: target.column.name });
@@ -196,8 +216,9 @@ export function linkedPrs(relations) {
     const url = String(r.url ?? "");
     let m;
     if ((m = /^vstfs:\/\/\/Git\/PullRequestId\/[^/]+%2F[^/]+%2F(\d+)$/i.exec(url))) azure.push(Number(m[1]));
-    else if ((m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)/i.exec(url))) {
-      github.push({ id: `${m[2]}#${m[3]}`, title: "GitHub pull request", url, state: null, draft: false });
+    else if ((m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:[/?#][^\s<>]*)?$/i.exec(url))) {
+      // Rebuilt from the parts, so nothing else in the relation's URL reaches a link.
+      github.push({ id: `${m[2]}#${m[3]}`, title: "GitHub pull request", url: `https://github.com/${m[1]}/${m[2]}/pull/${m[3]}`, state: null, draft: false });
     } else if ((m = /^vstfs:\/\/\/GitHub\/PullRequest\/[^/]+%2F(\d+)$/i.exec(url))) {
       github.push({ id: `GitHub #${m[1]}`, title: "GitHub pull request", url: null, state: null, draft: false });
     }
@@ -233,7 +254,7 @@ export function mapComments(page, url) {
   return {
     comments: list.map((c) => ({
       author: c.createdBy?.displayName ?? "", createdAt: c.createdDate ?? null, url,
-      body: c.format === "markdown" ? String(c.text ?? "") : htmlToMarkdown(c.text),
+      body: c.format === "markdown" ? safeMarkdown(String(c.text ?? "")) : htmlToMarkdown(c.text),
     })),
     moreComments: Math.max(0, (page?.totalCount ?? list.length) - list.length),
   };
@@ -245,12 +266,21 @@ export function attachedImages(relations) {
     .map((r) => ({ url: `${r.url}?fileName=${encodeURIComponent(r.attributes.name)}`, name: r.attributes.name }));
 }
 
-// The local file name for an attachment URL in this organization, or null for any other URL.
+// The local file name for an attachment URL in this organization, or null for any other URL. A PAT
+// Account gets null too: az signs the download, so its images show as links.
 export function imageName(account, url) {
+  if (account.patEnv) return null;
   const org = String(account.org ?? "").replace(/\/$/, "");
-  if (!validOrg(org) || !String(url).startsWith(`${org}/`)) return null;
-  const [path, query = ""] = String(url).split("#")[0].split("?");
-  const m = /\/_apis\/wit\/attachments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(path);
+  const raw = String(url);
+  if (!validOrg(org) || !raw.startsWith(`${org}/`)) return null;
+  const [path, query = ""] = raw.split("#")[0].split("?");
+  // No dot segments, plain or encoded, and after parsing it must still be under the org.
+  if (/%2e/i.test(path) || path.split("/").some((s) => s === "." || s === "..")) return null;
+  let u;
+  try { u = new URL(raw); } catch { return null; }
+  const base = new URL(`${org}/`);
+  if (u.origin !== base.origin || !u.pathname.startsWith(base.pathname)) return null;
+  const m = /\/_apis\/wit\/attachments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(u.pathname);
   let file = "";
   try { file = decodeURIComponent(/(?:^|&)fileName=([^&]*)/i.exec(query)?.[1] ?? ""); } catch { /* bad escape: no name */ }
   const ext = IMAGE_EXT.exec(file);
@@ -315,8 +345,7 @@ export const azure = {
 
   // Saves an attachment image (an imageName URL) to `path`. A file already there is kept.
   async downloadImage(account, url, path, io) {
-    if (!imageName(account, url)) throw new Error("Not an attachment of this organization");
-    if (account.patEnv) throw new Error("Images need an az login: a PAT Account shows them as links");
+    if (!imageName(account, url)) throw new Error("Not an attachment of this organization"); // also refuses a PAT Account
     const full = `${url}${url.includes("?") ? "&" : "?"}api-version=${API_VERSION}`;
     // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
     const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
@@ -396,8 +425,8 @@ export const azure = {
   },
 
   async signInState(account, io) {
-    if (account.patEnv) {
-      try { await patFrom(account, io); return { ok: true }; } catch (e) { return { ok: false, reason: String(e.message ?? e), command: null }; }
+    if (account.patEnv) { // a cheap call, so a refused PAT shows here and not as a Board error
+      try { await rest(orgUrl(account), await token(account, io), io, "_apis/connectionData", null, PREVIEW); return { ok: true }; } catch (e) { return { ok: false, reason: String(e.message ?? e), command: null }; }
     }
     const r = await az(io, ["account", "get-access-token", "--resource", RESOURCE, "--query", "expiresOn", "-o", "tsv"]);
     if (r.code === 0) return { ok: true };

@@ -3,8 +3,10 @@ import { validOrg, ENV_NAME } from "./providers/azure.js";
 import { templateErrors } from "./launch.js";
 
 export const PROVIDERS = ["github", "azure", "clickup"];
-// Wayfinder never stores secrets (ADR 0002). A field with one of these names is an error.
-const SECRET_KEY = /^(token|pat|password|secret|access_?token|api_?key)$/i;
+// Wayfinder never stores secrets (ADR 0002). A field whose name ends in one of these is an error,
+// except the two that hold a variable's name.
+const SECRET_KEY = /(^|_|-)?(token|pat|password|secret|access_?token|api_?key)$/i;
+const ENV_KEYS = new Set(["patEnv", "tokenEnv"]);
 
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStr = (v) => typeof v === "string" && v.length > 0;
@@ -13,7 +15,7 @@ function findSecrets(value, path, out) {
   if (Array.isArray(value)) value.forEach((v, i) => findSecrets(v, `${path}[${i}]`, out));
   else if (isObj(value)) {
     for (const [k, v] of Object.entries(value)) {
-      if (SECRET_KEY.test(k)) out.push(`${path}.${k}: Wayfinder doesn't store secrets. Sign in with the gh or az CLI instead.`);
+      if (SECRET_KEY.test(k) && !ENV_KEYS.has(k)) out.push(`${path}.${k}: Wayfinder doesn't store secrets. Sign in with the gh or az CLI, or name an environment variable in patEnv (Azure) or tokenEnv (ClickUp).`);
       findSecrets(v, `${path}.${k}`, out);
     }
   }
@@ -60,10 +62,10 @@ function checkProfile(name, p, platform, errors) {
     if (a.provider === "azure") {
       if (!validOrg(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
       if (a.projects != null && (!Array.isArray(a.projects) || !a.projects.every(isStr))) errors.push(`${where}.projects: a list of project names`);
-      if (a.patEnv != null && !(isStr(a.patEnv) && ENV_NAME.test(a.patEnv))) errors.push(`${where}.patEnv: the name of an environment variable holding a PAT, e.g. "AZURE_DEVOPS_PAT"`);
+      if (a.patEnv != null && !(isStr(a.patEnv) && ENV_NAME.test(a.patEnv))) errors.push(`${where}.patEnv: must be an environment variable name in upper case, e.g. AZURE_DEVOPS_PAT`);
     }
     if (a.provider === "clickup" && a.tokenEnv != null && !(isStr(a.tokenEnv) && ENV_NAME.test(a.tokenEnv))) {
-      errors.push(`${where}.tokenEnv: the name of an environment variable holding a ClickUp token (default CLICKUP_API_TOKEN)`);
+      errors.push(`${where}.tokenEnv: must be an environment variable name in upper case, e.g. CLICKUP_API_TOKEN`);
     }
     if (a.prRepos != null) {
       const f = a.prRepos, names = (v) => v == null || (Array.isArray(v) && v.every((r) => isStr(r) && r.includes("/")));
