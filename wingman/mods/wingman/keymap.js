@@ -2,7 +2,7 @@
 // (data/wingman/keys.json: { "<action>": ["key", ...] }) and conflicts. Pure.
 // Scope "edit" acts while the text cursor is in a file, before basic editing; "pane" acts after
 // basic editing, so a pane key that text editing also uses only works outside the cursor;
-// "find" acts while the find bar has the keyboard.
+// "find" acts while the find bar has the keyboard; "tree" while the file tree has it (a row was clicked).
 
 export const ACTIONS = [
   // Review
@@ -23,6 +23,8 @@ export const ACTIONS = [
   { id: "openInVSCode", label: "Open in external editor", group: "Files and views", scope: "pane", keys: ["ctrl-e"] },
   { id: "toggleWrap", label: "Toggle line wrap", group: "Files and views", scope: "pane", keys: ["alt-z"] },
   { id: "openInNvim", label: "Open in Neovim", group: "Files and views", scope: "pane", keys: ["ctrl-o"] },
+  { id: "renameItem", label: "Rename the selected file or folder (file tree)", group: "Files and views", scope: "tree", keys: ["f2"] },
+  { id: "deleteItem", label: "Delete the selected file or folder (file tree)", group: "Files and views", scope: "tree", keys: ["delete"] },
   // Editing
   { id: "save", label: "Save", group: "Editing", scope: "pane", keys: ["ctrl-s"] },
   { id: "undo", label: "Undo", group: "Editing", scope: "pane", keys: ["ctrl-z"] },

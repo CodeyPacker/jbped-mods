@@ -8,7 +8,7 @@
 // after, in order, on a queue. Every write is compare-and-swap, so a failure
 // never overwrites someone else's edit: the view reports it and reloads.
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
 import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
 import { Store, PlainRoot, norm, shows } from "./store.js";
@@ -17,13 +17,14 @@ import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, vi
 import { Capture, hostPath } from "./capture.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER } from "./filetree.js";
-import { listDir, pathKind, join as pjoin, fingerprints } from "./fsx.js";
+import { listDir, pathKind, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath } from "./fsx.js";
+import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
 import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
-import { git } from "./git.js";
+import { git, onWindows } from "./git.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -116,6 +117,9 @@ async function syncHerdrKeys(keymap) {
 const GOTO = "wingman.goto", DIRTY = "wingman.dirty", SAVE = "wingman.saveReq";
 const REVIEW = "wingman.review"; // Review's open change count per file key, for the Changes view
 const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's gone
+// The Explorer's file operations: TREE_MENU names the copy whose tree the right-click menu is for
+// (every shown copy gets the menu's command); FILEOP tells the other copies what was renamed or deleted.
+const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
 
 /** Whether the layout has a Wingman panel copy for `view`. */
 function hasView(view) {
@@ -157,7 +161,7 @@ export default class Review extends View {
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
-    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now();
+    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
     this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
@@ -169,7 +173,8 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wingman\./, "");
-        if (c === "focus") this.handle.focus();
+        if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
+        else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
         else await ({
           prompt: () => this.askPrompt(this.current, cx),
           reject: () => this.decide("reject", cx),
@@ -194,7 +199,7 @@ export default class Review extends View {
         cx.notify();
       }
     });
-    this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.searchScroll = VirtualListScrollHandle.new();
+    this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.searchScroll = VirtualListScrollHandle.new(); this.treeScroll = ScrollHandle.new();
     this.initFind();
     this.views = new Map(); this.captures = new Map(); this.tokens = new Map();
     this.reset([]);
@@ -218,6 +223,7 @@ export default class Review extends View {
     this.deferred = new Set(); this.indexTexts = {}; this.error = null;
     this.cur = null; this.anchor = null; this.redo = []; this.hx = 0; this.opened = [];
     this.search = newSearch(); this.searchFocus = false;
+    this.treeCur = this.treeEdit = this.treeDel = null; this.treeFocus = false;
     this.status = stores.length ? "Loading…" : "Waiting for an agent in a git repo in this space, or open a folder.";
   }
 
@@ -324,7 +330,8 @@ export default class Review extends View {
 
   snapshotView() {
     const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search } = this;
-    return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set() };
+    return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
+      treeCur: null, treeEdit: null, treeDel: null, treeFocus: false };
   }
 
   // ---- capture (leader only) -----------------------------------------------
@@ -445,7 +452,7 @@ export default class Review extends View {
     finally { c.busy = false; }
   }
 
-  close() { this.scroll?.release(); this.searchScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, ...(this.searchInputs ?? [])]) i?.release(); }
+  close() { this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release(); }
 
   // ---- loading -------------------------------------------------------------
 
@@ -790,7 +797,7 @@ export default class Review extends View {
 
   tab(x, t) {
     return h_flex().id(`file-${x.key}`).flex_none().w(this.tabWidth(x)).h_full().pr(4).items_center()
-      .on_click((_e, cx) => this.pick(x.key, cx))
+      .on_click((_e, cx) => { this.treeFocus = false; this.pick(x.key, cx); })
       .child(h_flex().w_full().h(26).px(10).gap(6).items_center().rounded(6).overflow_hidden().cursor_pointer()
         .when(x.key === this.sel, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
         .when(this.stores.length > 1, (e) => e.child(div().text_size(10).text_color(t.dim).whitespace_nowrap().child(base(x.store.root))))
@@ -1209,6 +1216,9 @@ export default class Review extends View {
         cx.notify();
       }
     }
+    // Another copy renamed or deleted something: its tabs and tree follow here too.
+    const fo = shared(FILEOP);
+    if (fo && fo.stamp > this.fileopSeen) { this.fileopSeen = fo.stamp; if (fo.copy !== this.id) this.applyFileOp(fo, cx, false); }
     const r = shared(SAVE);
     if (r && r.stamp > this.saveSeen) {
       this.saveSeen = r.stamp;
@@ -1242,7 +1252,7 @@ export default class Review extends View {
     this.commitInput = TextareaState.new({ placeholder: "Commit message (Ctrl+Enter commits the checked files)", rows: 3 });
     this.commitInput.on("submit", (e, cx) => { if (e?.secondary) this.commit(cx); });
     this.commitInput.on("change", (_e, cx) => cx.notify());
-    this.commitInput.on("focus", () => { this.inBar = this.commitInput; });
+    this.commitInput.on("focus", () => { this.inBar = this.commitInput; this.treeFocus = false; });
     this.commitInput.on("blur", () => { if (this.inBar === this.commitInput) this.inBar = null; });
     cx.timer.every(2000, (cx) => this.refreshChanges(cx));
   }
@@ -1545,7 +1555,7 @@ export default class Review extends View {
   loadFolder(st, R, rel, cx, refresh = false) {
     if (!st.plain) {
       if (!R.index) return; // the index fills it when it arrives
-      if (!this.onDisk(R, rel)) { setFolder(R.tree, rel, R.index.get(rel) ?? []); R.ver++; return; }
+      if (!this.onDisk(R, rel)) { this.fillIndexed(R, rel); return; }
     }
     if (refresh || !R.tree.entries.has(rel)) this.queueList(st, rel, cx);
   }
@@ -1612,8 +1622,10 @@ export default class Review extends View {
    * output changed, and the view redraws only then. Plain roots: the root's first listing, then
    * their stalest open folder every 30 s at most, one per pass.
    */
-  refreshTrees(cx) {
-    if (this.treeBusy) return;
+  refreshTrees(cx, force = false) {
+    // force: right after a file operation, remote roots too, and again after a pass already running.
+    if (force) for (const st of this.stores) this.rootTree(st).passAt = 0;
+    if (this.treeBusy) { if (force) this.treeAgain = true; return; }
     this.treeBusy = true;
     cx.spawn(async (cx) => {
       let changed = false;
@@ -1651,14 +1663,19 @@ export default class Review extends View {
           const tr = this.trees.get(idOf(st));
           if (R.indexFor === tr && R.indexIgnored === R.ignored) continue;
           R.indexFor = tr; R.indexIgnored = R.ignored; R.index = folderIndex(tr.paths, R.ignored); changed = true;
+          for (const m of R.made ?? []) if (R.index.has(m)) R.made.delete(m); // git lists files in it now
           for (const rel of ["", ...R.tree.open]) {
-            if (!this.onDisk(R, rel)) setFolder(R.tree, rel, R.index.get(rel) ?? []);
+            if (!this.onDisk(R, rel)) this.fillIndexed(R, rel);
             else if (!R.tree.entries.has(rel)) this.queueList(st, rel, cx);
           }
           R.ver++;
         }
       } catch (e) { log(`tree: ${e.message ?? e}`); }
-      finally { this.treeBusy = false; if (changed) { if (this.qo) this.rankQuick(); cx.notify(); } }
+      finally {
+        this.treeBusy = false;
+        if (changed) { if (this.qo) this.rankQuick(); cx.notify(); }
+        if (this.treeAgain) { this.treeAgain = false; this.refreshTrees(cx, true); }
+      }
     });
   }
 
@@ -1692,13 +1709,25 @@ export default class Review extends View {
     const letterColor = { A: t.ansi2, M: t.ansi4, D: t.ansi1, U: t.ansi1 };
     if (full && this.error) out.push(note("tree-error", this.error, t.ansi1));
     if (!this.stores.length) out.push(note("tree-none", "No repo in this space yet"));
+    let scrollAt = null; // the row a file operation asked to bring into view (treeScrollTo)
     for (const st of this.stores) {
-      const R = this.rootTree(st), shut = this.rootShut(st);
+      const R = this.rootTree(st), shut = this.rootShut(st), id = idOf(st);
+      const ed = this.treeEdit?.id === id ? this.treeEdit : null, del = this.treeDel?.id === id ? this.treeDel : null;
+      const editRows = (depth) => {
+        if (this.treeScrollTo === "edit") scrollAt = out.length;
+        out.push(h_flex().id(`tree-edit-${id}`).min_h(24).flex_none().pl(8 + depth * 12).pr(8).gap(4).items_center()
+          .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+          .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(ed.isDir ? "▸" : ""))
+          .child(div().flex_1().min_w(0).child(Input.new(this.treeInput))));
+        if (ed.error) out.push(note(`tree-edit-err-${id}`, ed.error, t.ansi1, depth));
+        else if (ed.busy) out.push(note(`tree-edit-busy-${id}`, "Working…", t.dim, depth));
+      };
       // A plain root always has a header, for its refresh button.
       if (multi || st.plain) {
         const n = st.plain ? 0 : this.files.filter((f) => f.store === st && !f.plain).reduce((k, f) => k + f.hunks.length, 0);
         out.push(h_flex().id(`tree-repo-${st.root}`).pl(8).pr(6).pt(8).pb(2).gap(4).items_center().text_size(11).cursor_pointer()
           .on_click((_e, cx) => this.toggleRepo(st, cx))
+          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openTreeMenu(st, "", true, cx); })
           .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(shut ? "▸" : "▾"))
           .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.muted).child(this.repoName(st)))
           .when(n > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(n))))
@@ -1712,13 +1741,18 @@ export default class Review extends View {
       if (tr?.error) { out.push(note(`tree-err-${st.root}`, tr.error, t.ansi1)); continue; }
       if (R.errors.get("")) { out.push(note(`tree-err-${st.root}`, R.errors.get(""), t.ansi1)); continue; }
       if (st.plain ? !R.tree.entries.has("") : !R.index) { out.push(note(`tree-load-${st.root}`, "Loading…")); continue; }
+      if (ed && ed.kind !== "rename" && ed.dir === "") editRows(0);
       for (const row of this.rootRows(st, R)) {
         const k = `${st.root}|${row.rel}`;
         if (row.more) { out.push(note(`tree-more-${k}`, "… more files not shown", t.dim, row.depth)); continue; }
-        const gone = !row.dir && (row.deleted || row.mark === "D");
+        if (ed?.kind === "rename" && row.rel === ed.rel) { editRows(row.depth); continue; }
+        const gone = !row.dir && (row.deleted || row.mark === "D"), cur = this.treeFocus && this.treeCur?.id === id && this.treeCur.rel === row.rel;
+        if (this.treeScrollTo === k) scrollAt = out.length;
         out.push(h_flex().id(`tree-${k}`).h(22).flex_none().pl(8 + row.depth * 12).pr(8).gap(4).items_center().cursor_pointer()
           .when(!row.dir && k === picked, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => (row.dir ? this.toggleDir(st, row.rel, cx) : cx.spawn(async (cx) => this.openFile(st, row.rel, cx))))
+          .when(cur, (e) => e.bg(t.selected).rounded(3).border_1().border_color(t.accent + "aa"))
+          .on_click((_e, cx) => { this.selectTreeRow(st, row, cx); if (row.dir) this.toggleDir(st, row.rel, cx); else cx.spawn(async (cx) => this.openFile(st, row.rel, cx)); })
+          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openTreeMenu(st, row.rel, row.dir, cx); })
           .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(row.dir ? (row.open ? "▾" : "▸") : ""))
           .child(div().flex_1().min_w(0).truncate().text_size(12)
             .text_color(row.ignored || gone ? t.dim : row.dir ? t.muted : t.foreground)
@@ -1726,16 +1760,354 @@ export default class Review extends View {
           .when(!!row.dirty, (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child("●")))
           .when(!!row.n, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(row.n))))
           .when(!!row.mark, (e) => e.child(div().w(10).flex_none().text_size(10).font_semibold().text_color(letterColor[row.mark] ?? t.muted).child(row.mark))));
+        if (del && row.rel === del.rel) out.push(this.deleteBox(del, row.depth, t));
+        if (ed && ed.kind !== "rename" && row.dir && row.rel === ed.dir) editRows(row.depth + 1);
         if (row.dir && row.open && R.errors.get(row.rel)) out.push(note(`tree-err-${k}`, R.errors.get(row.rel), t.ansi1, row.depth + 1));
         else if (row.dir && row.loading) out.push(note(`tree-load-${k}`, "Loading…", t.dim, row.depth + 1));
       }
     }
+    // A request is consumed after layout; a failed one only leaves the tree where it was.
+    if (scrollAt != null) { try { this.treeScroll.scroll_to_item(scrollAt); } catch {} this.treeScrollTo = null; }
     out.push(div().id("tree-open-folder").mx(8).mt(6).px(6).h(22).flex().items_center().rounded(4).text_size(11).text_color(t.dim).cursor_pointer()
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => this.openFolder(cx)).child("+ Add repo…"));
     const panel = this.workspacePanel(t);
     if (panel) out.push(panel);
     // Its width and border come from the left column around it (renderLeft).
-    return v_flex().id("file-tree").flex_1().min_h(0).py(4).overflow_y_scrollbar().children(out);
+    // A right-click on the tree's empty space, with one root: that root's menu (New File… at its top).
+    return v_flex().id("file-tree").flex_1().min_h(0).py(4).overflow_y_scrollbar().track_scroll(this.treeScroll)
+      .on_mouse_down("right", (_e, cx) => { if (this.stores.length === 1) this.openTreeMenu(this.stores[0], "", true, cx); })
+      .children(out);
+  }
+
+  // ---- Explorer file operations (fileops.js names and targets, fsx.js file-system calls) --------
+  // A right-click on a tree row or root header opens the menu. A click on a row selects it and gives
+  // the tree the keyboard (treeFocus), where F2 renames and Delete deletes; a click in the editor, a
+  // tab or any input takes the keyboard back, so Delete in a file still deletes text. New File…, New
+  // Folder… and Rename… show a name box in the tree (treeEdit), Delete a confirm under the row
+  // (treeDel). Afterwards the folders and the repo's file list are read again at once, open folders
+  // stay open, tabs of renamed or deleted files follow, and the other copies are told (FILEOP).
+
+  /** A tree item: a row, or a root header (rel ""). `id` names its root across spaces (idOf). */
+  treeItem(st, rel, dir) { return { id: idOf(st), rel, dir: !!dir, root: !rel }; }
+
+  /** The root of a tree item, while it's still one of this space's. */
+  itemStore(it) { return (it && this.stores.find((s) => idOf(s) === it.id)) ?? null; }
+
+  /** A left click on a row: it's selected, and the tree has the keyboard. Open name boxes and confirms close. */
+  selectTreeRow(st, row, cx) {
+    this.treeCur = this.treeItem(st, row.rel, row.dir); this.treeFocus = true; this.searchFocus = false;
+    this.treeDel = null;
+    if (this.treeEdit && !this.treeEdit.busy) this.endTreeEdit(cx, false);
+    this.handle.focus(); cx.notify();
+  }
+
+  /** The right-click menu for a row or root header (the popup copy sends its command back: treeMenuCmd). */
+  openTreeMenu(st, rel, dir, cx) {
+    if (this.treeEdit?.busy) return;
+    const it = this.treeItem(st, rel, dir), local = !st.on;
+    if (!it.root) this.treeCur = it;
+    this.treeFocus = true; this.searchFocus = false; this.treeDel = null; this.menuItem = it;
+    if (this.treeEdit) this.endTreeEdit(cx, false);
+    this.handle.focus();
+    setShared(TREE_MENU, { copy: this.id, stamp: Date.now() });
+    const items = [
+      { cmd: "treeNewFile", label: "New File…", key: "" },
+      { cmd: "treeNewFolder", label: "New Folder…", key: "" },
+      ...(local ? [{ cmd: "treeReveal", label: onWindows() ? "Reveal in File Explorer" : "Reveal in file manager", key: "" }] : []),
+      ...(local && !dir ? [{ cmd: "treeExternal", label: `Open in ${editorName(this.settings.externalEditor)}`, key: "" }] : []),
+      { cmd: "treeCopyPath", label: "Copy Path", key: "" },
+      { cmd: "treeCopyRel", label: "Copy Relative Path", key: "" },
+      ...(it.root ? [{ cmd: "treeRefresh", label: "Refresh", key: "" }]
+        : [{ cmd: "treeRename", label: "Rename…", key: this.kl("renameItem") }, { cmd: "treeDelete", label: "Delete", key: this.kl("deleteItem") }]),
+    ];
+    openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
+    cx.notify();
+  }
+
+  /** A tree menu command. Every shown copy gets it; only the copy that opened the menu acts. */
+  treeMenuCmd(c, cx) {
+    const it = this.menuItem;
+    if (shared(TREE_MENU)?.copy !== this.id || !it) return;
+    this.menuItem = null;
+    const st = this.itemStore(it);
+    if (!st) return;
+    const copied = (text) => cx.write_to_clipboard(text);
+    ({
+      treeNewFile: () => this.startTreeEdit("newFile", it, cx),
+      treeNewFolder: () => this.startTreeEdit("newFolder", it, cx),
+      treeRename: () => this.startTreeEdit("rename", it, cx),
+      treeDelete: () => this.askTreeDelete(it, cx),
+      treeCopyPath: () => copied(copyPaths(st.root, it.rel, windowsRoot(st.root, st.on ?? null)).path),
+      treeCopyRel: () => copied(copyPaths(st.root, it.rel, windowsRoot(st.root, st.on ?? null)).relative),
+      treeReveal: () => this.revealItem(st, it, cx),
+      treeExternal: () => this.externalItem(st, it, cx),
+      treeRefresh: () => this.refreshRoot(st, cx),
+    })[c]?.();
+    cx.notify();
+  }
+
+  /** Shows the error line (the tree's own in the Neovim layout). */
+  treeNote(msg, cx) { this.error = msg; cx.notify(); }
+
+  /** Files at `rel` or under it with unsaved edits, in this copy or another: why it can't be renamed or deleted, or null. */
+  unsavedUnder(st, rel) {
+    const top = `${st.root}|${rel}`, hit = (k) => k === top || k.startsWith(`${top}/`), keys = new Set();
+    for (const f of this.files) if (f.store === st && hit(f.key) && (this.dirty(f) || f.conflict)) keys.add(f.key);
+    const now = Date.now();
+    for (const [id, v] of Object.entries(shared(DIRTY) ?? {}))
+      if (id !== this.id && now - (v?.at ?? 0) <= DIRTY_FRESH) for (const k of v.keys ?? []) if (hit(k)) keys.add(k);
+    if (!keys.size) return null;
+    const names = [...keys].map((k) => k.slice(k.indexOf("|") + 1));
+    return `Unsaved edits in ${names.slice(0, 5).join(", ")}${names.length > 5 ? ` and ${names.length - 5} more` : ""}: save or discard them first`;
+  }
+
+  /** Opens a root and a folder in it (and the folders above), so a name box inside it shows. */
+  openTreeFolder(st, dir, cx) {
+    if (this.rootShut(st)) this.toggleRepo(st, cx);
+    if (!dir) return;
+    const R = this.rootTree(st), need = reveal(R.tree, `${dir}/x`);
+    R.ver++;
+    for (const d of need) this.loadFolder(st, R, d, cx);
+  }
+
+  /** New File…, New Folder… (in the item's folder, or beside a file) or Rename… of the item: the name box. */
+  startTreeEdit(kind, it, cx) {
+    const st = this.itemStore(it);
+    if (!st || this.treeEdit?.busy || this.mode !== "edit") return;
+    this.treeDel = null;
+    if (kind === "rename") {
+      const why = checkRel(it.rel) ?? this.unsavedUnder(st, it.rel);
+      if (why) return this.treeNote(why, cx);
+    } else this.openTreeFolder(st, it.dir ? it.rel : parentOf(it.rel), cx);
+    const name = kind === "rename" ? nameOf(it.rel) : "", isDir = kind === "newFolder" || (kind === "rename" && it.dir);
+    this.treeEdit = { kind, id: it.id, dir: kind === "rename" ? null : it.dir ? it.rel : parentOf(it.rel), rel: kind === "rename" ? it.rel : null,
+      isDir, name, sel: kind === "rename" ? stemEnd(name, it.dir) : 0, error: null, busy: false };
+    this.treeCur = kind === "rename" ? it : this.treeCur;
+    this.treeFocus = true; this.treeScrollTo = "edit"; this.error = null;
+    this.treeInput.set_value(name);
+    this.focusTreeInput(true);
+    cx.notify();
+  }
+
+  /** Puts the keyboard in the name box; `select`: Rename's name before its extension is selected (while untouched). */
+  focusTreeInput(select = false) {
+    const e = this.treeEdit;
+    if (!e) return;
+    this.treeInput.focus();
+    if (select && e.sel && this.treeInput.value() === e.name) this.treeInput.set_selected_range({ start: 0, end: e.sel });
+  }
+
+  /** Closes the name box; the tree keeps the keyboard unless `keep` is false. */
+  endTreeEdit(cx, keep = true) {
+    this.treeEdit = null;
+    if (this.inBar === this.treeInput) this.inBar = null;
+    if (keep) { this.treeFocus = true; this.handle.focus(); }
+    cx.notify();
+  }
+
+  /** Enter in the name box: checks the name (shown under the box, which stays), then creates or renames. */
+  commitTreeEdit(cx) {
+    const e = this.treeEdit, st = this.itemStore(e);
+    if (!e || e.busy) return;
+    if (!st) return this.endTreeEdit(cx);
+    const name = this.treeInput.value(), windows = windowsRoot(st.root, st.on ?? null), on = st.on ?? null;
+    let t;
+    if (e.kind === "rename") {
+      t = renameTarget({ root: st.root, rel: e.rel, name, isDir: e.isDir, windows });
+      if (!t.error && t.same) return this.endTreeEdit(cx);
+      if (!t.error) { const why = this.unsavedUnder(st, e.rel); if (why) t = { error: why }; }
+    } else t = newTarget({ root: st.root, dir: e.dir, name, kind: e.kind === "newFolder" ? "dir" : "file", windows });
+    if (t.error) { e.error = t.error; cx.notify(); return; }
+    e.busy = true; e.error = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        if (e.kind === "newFile") await createFile(t.path, st.root, { on });
+        else if (e.kind === "newFolder") await createDir(t.path, st.root, { on });
+        else await movePath(t.fromPath, t.path, st.root, { on });
+      } catch (err) {
+        e.busy = false; e.error = String(err.message ?? err);
+        if (this.treeEdit === e) this.treeInput.focus();
+        cx.notify(); return;
+      }
+      if (this.treeEdit === e) this.endTreeEdit(cx);
+      this.treeCur = this.treeItem(st, t.rel, e.isDir);
+      if (e.kind === "rename") {
+        const made = [];
+        for (let p = parentOf(t.rel); p && !within(parentOf(e.rel), p) ; p = parentOf(p)) made.unshift(p);
+        this.afterFileOp(st, { from: e.rel, to: t.rel, isDir: e.isDir, made: e.isDir ? [...made, t.rel] : made }, cx);
+      } else this.afterFileOp(st, { added: t.rel, isDir: e.kind === "newFolder", made: t.made }, cx);
+      // A new file opens with the cursor in it, as VS Code does: the editor has the keyboard.
+      if (e.kind === "newFile") { await this.openFile(st, t.rel, cx, { line: 0, col: 0 }); if (this.sel === `${st.root}|${t.rel}`) this.treeFocus = false; }
+      cx.notify();
+    });
+  }
+
+  /** Delete (menu or key): the confirm under the row, naming the item and, for a folder, its file count when the repo's file list knows it. */
+  askTreeDelete(it, cx) {
+    const st = this.itemStore(it);
+    if (!st || this.treeEdit?.busy || this.mode !== "edit") return;
+    const why = checkRel(it.rel) ?? this.unsavedUnder(st, it.rel);
+    if (why) return this.treeNote(why, cx);
+    let count = null;
+    if (it.dir && !st.plain) {
+      const R = this.rootTree(st), tr = this.trees.get(idOf(st)), p = `${it.rel}/`;
+      // Ignored files aren't in the list: a folder holding any says "everything in it".
+      const hidden = !R.index?.has(it.rel) || R.match?.(it.rel) || (R.ignored ?? []).some((x) => x.startsWith(p));
+      if (tr?.paths && !hidden) count = countUnder(tr.paths, it.rel) - [...(R.marks ?? [])].filter(([x, l]) => l === "D" && x.startsWith(p)).length;
+    }
+    if (this.treeEdit) this.endTreeEdit(cx, false);
+    this.treeDel = { ...it, count, busy: false, error: null };
+    this.treeCur = it; this.treeFocus = true; this.treeScrollTo = `${st.root}|${it.rel}`; this.error = null;
+    this.handle.focus(); cx.notify();
+  }
+
+  /** The delete confirm, under the row it names. */
+  deleteBox(d, depth, t) {
+    return v_flex().id("tree-del").ml(8 + depth * 12).mr(8).my(4).p(8).gap(6).rounded(6).bg(t.raised).text_size(11)
+      .on_mouse_down("right", (_e, cx) => cx.stop_propagation())
+      .child(div().text_color(t.foreground).child(deleteQuestion({ rel: d.rel, isDir: d.dir, count: d.count })))
+      .when(!!d.error, (e) => e.child(div().text_color(t.ansi1).child(d.error)))
+      .child(h_flex().gap(6)
+        .child(this.button("tree-del-yes", d.busy ? "Deleting…" : "Delete", t.ansi1 + "88", (cx) => this.confirmTreeDelete(cx)))
+        .child(this.button("tree-del-no", "Cancel", t.background, (cx) => { this.treeDel = null; cx.notify(); })));
+  }
+
+  /** The confirm's Delete (or Enter): deletes permanently, then the tree and tabs follow. */
+  confirmTreeDelete(cx) {
+    const d = this.treeDel, st = this.itemStore(d);
+    if (!st || d.busy) return;
+    const why = this.unsavedUnder(st, d.rel); // edits made since the confirm opened
+    if (why) { d.error = why; cx.notify(); return; }
+    d.busy = true; d.error = null; cx.notify();
+    const path = under(st.root, d.rel), on = st.on ?? null;
+    cx.spawn(async (cx) => {
+      try { if (d.dir) await deleteTree(path, st.root, { on }); else await deleteFile(path, st.root, { on }); }
+      catch (e) { if (e.code !== "missing") { d.busy = false; d.error = String(e.message ?? e); cx.notify(); return; } }
+      if (this.treeDel === d) this.treeDel = null;
+      this.treeCur = null;
+      this.afterFileOp(st, { removed: d.rel, isDir: d.dir }, cx);
+      cx.notify();
+    });
+  }
+
+  /** Keys while the tree has the keyboard. True: handled. A key that isn't the tree's or a pane action gives the keyboard back. */
+  treeKey(e, cx) {
+    const k = e.keystroke;
+    if (!(this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search.left !== "search")) { this.treeFocus = false; return false; }
+    if (!keystrokeOf(e)) return false; // a modifier alone
+    const id = this.kIdx.tree.get(k);
+    if (id) { this.runAction(id, cx); return true; }
+    if (k === "enter" && this.treeDel) { this.confirmTreeDelete(cx); return true; }
+    if (k === "escape") { if (this.treeDel) this.treeDel = null; else this.treeFocus = false; cx.notify(); return true; }
+    if (!this.kIdx.pane.has(k)) { this.treeFocus = false; cx.notify(); }
+    return false;
+  }
+
+  /** Reveal in File Explorer / Finder / the file manager (this computer's roots only). */
+  revealItem(st, it, cx) {
+    if (st.on) return;
+    cx.spawn(async (cx) => {
+      try { await revealPath(under(st.root, it.rel), it.dir); }
+      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+    });
+  }
+
+  /** Open in the external editor from the tree (this computer's files); unsaved edits are saved first. */
+  externalItem(st, it, cx) {
+    if (st.on || it.dir) return;
+    const f = this.files.find((x) => x.key === `${st.root}|${it.rel}`);
+    if (f && this.dirty(f) && !f.conflict) this.save(cx, f);
+    cx.spawn(async (cx) => {
+      try { await openInEditor(this.settings.externalEditor, under(st.root, it.rel), 0, 0, this.settings.externalCommand); }
+      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+    });
+  }
+
+  /** A root header's Refresh: its file list and status, and every folder listed from disk, again now. */
+  refreshRoot(st, cx) {
+    if (st.plain) return this.refreshPlain(st, cx);
+    const R = this.rootTree(st);
+    for (const rel of loaded(R.tree)) if (this.onDisk(R, rel)) this.queueList(st, rel, cx);
+    this.refreshTrees(cx, true);
+  }
+
+  /** A repo folder's listing from git's file list, plus folders made here that git can't list yet (empty ones). */
+  fillIndexed(R, rel) {
+    let list = R.index?.get(rel) ?? [];
+    if (R.made?.size) {
+      const have = new Set(list.map((e) => e.name)), extra = [];
+      for (const m of R.made) if (parentOf(m) === rel && m !== rel && !have.has(nameOf(m))) extra.push({ name: nameOf(m), dir: true });
+      if (extra.length) list = [...list, ...extra];
+    }
+    setFolder(R.tree, rel, list); R.ver++;
+  }
+
+  /** After this copy's file operation: here (applyFileOp), then the other copies (FILEOP). */
+  afterFileOp(st, op, cx) {
+    const full = { ...op, root: st.root, on: st.on ?? null };
+    this.applyFileOp(full, cx, true);
+    setShared(FILEOP, { ...full, copy: this.id, stamp: Date.now() });
+  }
+
+  /**
+   * What a file operation means for this copy. op: { root, on, added | removed | from+to, isDir, made }.
+   * The tree: open folders follow a renamed folder, a deleted one's listings go, the affected folders
+   * and the repo's file list are read again now, and (mine) the new or renamed item is revealed.
+   * Tabs: an opened file that was renamed reopens at its new path, one that was deleted closes, and
+   * undo steps for them are dropped. A file under review is left to Review, as git sees it: the old
+   * path deleted, the new one added.
+   */
+  applyFileOp(op, cx, mine) {
+    const st = this.stores.find((s) => s.root === op.root && (s.on ?? null) === (op.on ?? null));
+    if (!st) return;
+    const R = this.rootTree(st), gone = op.removed ?? op.from ?? null, to = op.to ?? null, now = op.added ?? to;
+    const follow = (set) => { for (const k of [...set]) if (within(k, gone)) { set.delete(k); const n = to != null ? remap(k, gone, to) : null; if (n) set.add(n); } };
+    if (gone != null) {
+      follow(R.tree.open);
+      for (const k of [...R.tree.entries.keys()]) if (k && within(k, gone)) R.tree.entries.delete(k);
+      if (R.made) follow(R.made);
+      R.ver++;
+    }
+    if (!st.plain && op.made?.length) { R.made ??= new Set(); for (const m of op.made) R.made.add(m); }
+    // The folders that changed: listed again from disk, or refilled from the index (with made folders).
+    const dirs = new Set([gone != null ? parentOf(gone) : null, now != null ? parentOf(now) : null, ...(op.made ?? []).map(parentOf)].filter((d) => d != null));
+    for (const d of dirs) {
+      if (d && !R.tree.open.has(d)) continue;
+      if (st.plain || this.onDisk(R, d)) this.queueList(st, d, cx);
+      else if (R.index) this.fillIndexed(R, d);
+    }
+    if (this.mode === "edit") this.refreshTrees(cx, true);
+    if (mine && now != null) { const k = `${st.root}|${now}`; this.revealInTree(k, cx); this.treeScrollTo = k; }
+    if (gone != null) this.followTabs(st, gone, to, cx);
+    cx.notify();
+  }
+
+  /** Tabs after `gone` (a file or folder) was deleted, or renamed to `to`. */
+  followTabs(st, gone, to, cx) {
+    const rid = `${idOf(st)}|`;
+    this.recent = (this.recent ?? []).filter((k) => !(k.startsWith(rid) && within(k.slice(rid.length), gone)));
+    const hit = this.files.filter((f) => f.store === st && within(f.rel, gone));
+    if (!hit.length) return;
+    const keys = new Set(hit.map((f) => f.key)), plain = hit.filter((f) => f.plain), reopen = [];
+    for (const f of hit) if (to != null && (this.opened.includes(f.key) || this.sel === f.key)) reopen.push({ rel: remap(f.rel, gone, to), sel: this.sel === f.key });
+    this.files = this.files.filter((f) => !plain.includes(f));
+    this.opened = this.opened.filter((k) => !plain.some((f) => f.key === k));
+    const touches = (h) => (h.key && keys.has(h.key)) || h.snaps?.some((s) => keys.has(s.key));
+    this.history = this.history.filter((h) => !touches(h)); this.redo = this.redo.filter((h) => !touches(h));
+    if (keys.has(this.sel)) { this.cur = this.anchor = null; this.hx = 0; this.selA = this.selB = null; }
+    // Review's files reread from disk: a deleted or renamed file under review shows as deleted there.
+    if (hit.some((f) => !f.plain)) { this.deferred.add("*"); if (!this.writing) cx.spawn(async (cx) => this.drain(cx)); }
+    this.error = null; this.settle();
+    if (this.mode !== "edit" || !reopen.length) return;
+    cx.spawn(async (cx) => {
+      for (const r of reopen) {
+        const key = `${st.root}|${r.rel}`;
+        if (!this.files.some((f) => f.key === key)) { const g = await this.loadPlain(st, r.rel, cx); if (!this.files.some((f) => f.key === key)) this.files.push(g); }
+        if (!this.opened.includes(key)) this.opened.push(key);
+        if (r.sel) this.pick(key, cx);
+      }
+      this.settle(); cx.notify();
+    });
   }
 
   // ---- scrolling -------------------------------------------------------------
@@ -1798,7 +2170,10 @@ export default class Review extends View {
   // ---- pointer: click, Shift+click, drag, right-click ------------------------
 
   pointerDown(ev, cx) {
-    this.handle.focus(); this.searchFocus = false;
+    this.handle.focus(); this.searchFocus = false; this.treeFocus = false;
+    // A click in the editor closes the tree's name box or delete confirm (nothing is done).
+    if (this.treeEdit && !this.treeEdit.busy) this.treeEdit = null;
+    if (this.treeDel && !this.treeDel.busy) this.treeDel = null;
     const f = this.file(), x = ev.local_position?.x ?? -1, y = ev.local_position?.y ?? -1, i = this.rowAt(y);
     if (!f || i < 0) return;
     const r = this.rowsOf(f)[i];
@@ -2486,9 +2861,15 @@ export default class Review extends View {
     this.quickInput.on("change", (_e, cx) => { this.rankQuick(); cx.notify(); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
     for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) {
-      i.on("focus", () => { this.inBar = i; this.searchFocus = false; });
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
     }
+    // The tree's name box for New File…, New Folder… and Rename…: Enter does it, Esc cancels.
+    this.treeInput = InputState.new({ placeholder: "" });
+    this.treeInput.on("submit", (_e, cx) => this.commitTreeEdit(cx));
+    this.treeInput.on("change", (_e, cx) => { if (this.treeEdit?.error) { this.treeEdit.error = null; cx.notify(); } });
+    this.treeInput.on("focus", () => { this.inBar = this.treeInput; this.searchFocus = false; });
+    this.treeInput.on("blur", () => { if (this.inBar === this.treeInput) this.inBar = null; });
     // Typing a query jumps to the first match from where the search started (VS Code's incremental find).
     this.findInput.on("change", (_e, cx) => { this.findFrom ??= this.cur; this.findStep(0, cx); });
     this.findInput.on("submit", (e, cx) => this.findStep(e?.shift ? -1 : 1, cx));
@@ -2622,7 +3003,7 @@ export default class Review extends View {
     this.searchInputs = [this.searchInput, this.sReplaceInput, this.includeInput, this.excludeInput];
     const fields = [["query", this.searchInput], ["replace", this.sReplaceInput], ["include", this.includeInput], ["exclude", this.excludeInput]];
     for (const [k, i] of fields) {
-      i.on("focus", () => { this.inBar = i; this.searchFocus = false; });
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
       i.on("change", (_e, cx) => {
         const s = this.search, v = i.value();
@@ -3065,7 +3446,7 @@ export default class Review extends View {
   /** Each scope's key -> action lookup, rebuilt when the user's shortcuts change. */
   setKeymap(overrides) {
     this.keymap = resolve(overrides);
-    this.kIdx = { edit: index(this.keymap, "edit"), pane: index(this.keymap, "pane"), find: index(this.keymap, "find") };
+    this.kIdx = { edit: index(this.keymap, "edit"), pane: index(this.keymap, "pane"), find: index(this.keymap, "find"), tree: index(this.keymap, "tree") };
   }
 
   /** The first key bound to an action, for buttons and menus ("" when it has none). */
@@ -3092,6 +3473,9 @@ export default class Review extends View {
       findNext: () => this.findStep(1, cx), findPrev: () => this.findStep(-1, cx),
       findCase: () => this.findFlag("cased", cx), findWord: () => this.findFlag("word", cx), findRegex: () => this.findFlag("regex", cx),
       replaceAll: () => this.replaceAll(cx), searchFiles: () => this.openSearch(cx),
+      // Only while the tree has the keyboard: Delete in the editor deletes text.
+      renameItem: () => { if (this.treeFocus && this.treeCur) this.startTreeEdit("rename", this.treeCur, cx); },
+      deleteItem: () => { if (this.treeFocus && this.treeCur) this.askTreeDelete(this.treeCur, cx); },
     }[id];
     go?.();
   }
@@ -3122,6 +3506,8 @@ export default class Review extends View {
     }
     if (this.commitInput && this.inBar === this.commitInput) return; // the commit message box types its own keys
     if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); cx.notify(); done(); } return; }
+    // The tree's name box: Esc cancels; Enter (submit) does it; every other key types.
+    if (this.treeInput && this.inBar === this.treeInput) { if (k === "escape") { this.endTreeEdit(cx); done(); } return; }
     // A Search box has the keyboard (searchKey); then the results, after Down or a click (resultsKey).
     if (this.inBar && this.searchInputs?.includes(this.inBar)) return this.searchKey(k, cx, done);
     // The find bar has the keyboard: Esc, the bar's own actions, and switching between find, replace and line.
@@ -3132,6 +3518,7 @@ export default class Review extends View {
       return;
     }
     if (this.searchFocus && this.resultsKey(k, cx)) return done();
+    if (this.treeFocus && this.treeKey(e, cx)) return done();
     if (this.cur && this.editable(f)) {
       const id = this.kIdx.edit.get(k);
       if (id) { this.runAction(id, cx); return done(); }
@@ -3468,7 +3855,7 @@ export default class Review extends View {
           ? div().absolute().top(0).h(ROW).left(ind * cw).w((visualCol(text, seg.to) - v0) * cw).overflow_hidden()
             .child(h_flex().absolute().top(0).h(ROW).left(-v0 * cw).children(spans.map((s) => div().text_color(color(s.type, t)).child(s.text))))
           : h_flex().absolute().top(0).h(ROW).left(-hx).children(spans.map((s) => div().text_color(color(s.type, t)).child(s.text))))
-        .when(caret, (e) => e.child(div().absolute().top(3).h(ROW - 6).w(2).left(x(this.cur.col)).bg(this.handle.is_focused() ? t.accent : t.dim))));
+        .when(caret, (e) => e.child(div().absolute().top(3).h(ROW - 6).w(2).left(x(this.cur.col)).bg(this.handle.is_focused() && !this.treeFocus ? t.accent : t.dim))));
   }
 
   render() {

@@ -6,7 +6,8 @@
 // - Windows drive paths here: PowerShell. Folders in WSL's own files: sh through wsl.exe.
 // Paths are always arguments, never pasted into a shell line (PowerShell's -Command can't take
 // arguments, so there the path is a single-quoted literal with its quotes doubled).
-import { exec, readTextFile, writeTextFile } from "herdr";
+import { exec, readTextFile, writeTextFile, appHome } from "herdr";
+import { inside } from "./fileops.js";
 import { onWindows, toWsl, distroOf } from "./git.js";
 import { byteLength, chunkBytes, sha256Hex } from "./sha256.js";
 
@@ -365,6 +366,198 @@ export async function makeDir(path, { on = null } = {}) {
   try { r = await exec("mkdir", ["-p", "--", path], { on }); }
   catch (e) { throw /cannot start mkdir/i.test(String(e?.message ?? e)) ? new Error(WINDOWS_NOTE) : e; }
   if (r.code !== 0) throw new Error(`mkdir ${path}: ${(r.stderr || r.stdout).trim()}`);
+}
+
+// ---- the Explorer's file operations -----------------------------------------------
+// Create, rename or move, delete, each confined to a root folder (`root`): every path must be
+// strictly inside it (fileops.inside: no "..", nothing in .git, never the root itself), checked here
+// and, for a recursive delete, again by the script. Where they run:
+// - Linux, macOS and another machine: OPS_SH with the paths as arguments.
+// - Windows drive and share paths here: PowerShell with each path as a quoted literal (OPS_PS).
+// - WSL's own files from Windows: OPS_SH through wsl.exe, with WSL paths.
+// - A Windows machine elsewhere (no sh): refused with WINDOWS_NOTE.
+// The answer is one line: "ok", "exists", "missing", or "error <why>".
+
+// $1 the step, then its paths. A create is "only if absent" (noclobber's exclusive create); a move
+// refuses an existing target (checked just before mv: a target appearing in between is the one
+// window) and goes through a temp name when only letter case changes on a case-insensitive file
+// system (`$4` = 1 and both names are the same file); rmtree also takes the root and refuses
+// anything not under it, "/" and a home folder or one above it.
+export const OPS_SH = `op=$1; shift
+ex() { [ -e "$1" ] || [ -L "$1" ]; }
+say() { printf '%s\\n' "$*"; exit 0; }
+mkparent() { d=\${1%/*}; [ -z "$d" ] || [ -d "$d" ] || e=$(mkdir -p -- "$d" 2>&1) || say "error $e"; }
+case $op in
+  file)
+    ex "$1" && say exists
+    mkparent "$1"
+    if (set -C; : > "$1") 2>/dev/null; then say ok; fi
+    ex "$1" && say exists
+    say "error cannot create $1" ;;
+  dir)
+    ex "$1" && say exists
+    e=$(mkdir -p -- "$1" 2>&1) || say "error $e"
+    say ok ;;
+  mv)
+    ex "$1" || say missing
+    if ex "$2"; then
+      [ "$3" = 1 ] && [ "$1" -ef "$2" ] || say exists
+      t=\${1%/*}/.wingman-rename-$$
+      ex "$t" && say "error $t is in the way"
+      e=$(mv -- "$1" "$t" 2>&1) || say "error $e"
+      if e=$(mv -- "$t" "$2" 2>&1); then say ok; fi
+      mv -- "$t" "$1"; say "error $e"
+    fi
+    mkparent "$2"
+    e=$(mv -- "$1" "$2" 2>&1) || say "error $e"
+    say ok ;;
+  rm)
+    [ -d "$1" ] && [ ! -L "$1" ] && say "error $1 is a folder"
+    ex "$1" || say missing
+    e=$(rm -f -- "$1" 2>&1) || say "error $e"
+    say ok ;;
+  rmtree)
+    case $1 in "$2"/?*) ;; *) say "error $1 isn't inside $2" ;; esac
+    case $1 in /|'') say "error refusing to delete $1" ;; esac
+    h=\${HOME%/}
+    [ -n "$h" ] && case $h/ in "\${1%/}"/*) say "error refusing to delete a home folder or one above it" ;; esac
+    ex "$1" || say missing
+    if [ -L "$1" ]; then e=$(rm -f -- "$1" 2>&1) || say "error $e"; say ok; fi
+    [ -d "$1" ] || say "error $1 isn't a folder"
+    e=$(rm -rf -- "$1" 2>&1) || say "error $e"
+    ex "$1" && say "error $1 is still there"
+    say ok ;;
+  *) say "error unknown step $op" ;;
+esac`;
+
+// The same steps in PowerShell, each a block taking param($p, $q, $c): plain .NET. File.Move and
+// Directory.Move never replace a target; a case-only rename goes through a temp name (and back if the
+// second step fails). A recursive delete walks the folder itself, clearing read-only attributes (git's
+// objects have them), and removes a junction or folder link as a link, never walking into it
+// (Windows PowerShell's Directory.Delete(path, true) refuses a junction inside: access denied).
+// Helper names start with wm: a plain name can be a built-in alias (del is Remove-Item), and aliases win.
+const PS_FN = `function wmEx($x) { [IO.File]::Exists($x) -or [IO.Directory]::Exists($x) }; function wmWhy($e) { $i = $e.Exception; while ($i.InnerException) { $i = $i.InnerException }; 'error ' + $i.Message }`;
+const OPS_PS = {
+  file: `if (wmEx $p) { 'exists'; return }; try { [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($p)); $s = [IO.File]::Open($p, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write); $s.Close(); 'ok' } catch { if (wmEx $p) { 'exists' } else { wmWhy $_ } }`,
+  dir: `if (wmEx $p) { 'exists'; return }; try { [void][IO.Directory]::CreateDirectory($p); 'ok' } catch { wmWhy $_ }`,
+  mv: `$d = [IO.Directory]::Exists($p); if (-not ($d -or [IO.File]::Exists($p))) { 'missing'; return }
+if ($c -ne '1' -and (wmEx $q)) { 'exists'; return }
+$t = $null
+try {
+  [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($q))
+  if ($c -eq '1') { $t = [IO.Path]::Combine([IO.Path]::GetDirectoryName($p), '.wingman-rename-' + [Guid]::NewGuid().ToString('N')); if ($d) { [IO.Directory]::Move($p, $t); [IO.Directory]::Move($t, $q) } else { [IO.File]::Move($p, $t); [IO.File]::Move($t, $q) }; 'ok' }
+  elseif ($d) { [IO.Directory]::Move($p, $q); 'ok' } else { [IO.File]::Move($p, $q); 'ok' }
+} catch {
+  $r = wmWhy $_
+  if ($t -and (wmEx $t)) { try { if ($d) { [IO.Directory]::Move($t, $p) } else { [IO.File]::Move($t, $p) } } catch {} }
+  if ($c -ne '1' -and (wmEx $q) -and (wmEx $p)) { 'exists' } else { $r }
+}`,
+  rm: `if ([IO.Directory]::Exists($p)) { "error $p is a folder"; return }; if (-not [IO.File]::Exists($p)) { 'missing'; return }
+try { $i = [IO.FileInfo]::new($p); if ($i.Attributes -band 1) { $a = [int]$i.Attributes -band -2; if (-not $a) { $a = 128 }; $i.Attributes = [IO.FileAttributes]$a }; [IO.File]::Delete($p); 'ok' } catch { wmWhy $_ }`,
+  rmtree: `$f = [IO.Path]::GetFullPath($p).TrimEnd('\\'); $r = [IO.Path]::GetFullPath($q).TrimEnd('\\')
+if (-not $f.StartsWith($r + '\\', [StringComparison]::OrdinalIgnoreCase)) { "error $f isn't inside $r"; return }
+if ($f -ieq [IO.Path]::GetPathRoot($f).TrimEnd('\\')) { "error refusing to delete a drive's root"; return }
+$h = [Environment]::GetFolderPath('UserProfile').TrimEnd('\\')
+if ($h -and ($h -ieq $f -or $h.StartsWith($f + '\\', [StringComparison]::OrdinalIgnoreCase))) { 'error refusing to delete a home folder or one above it'; return }
+$d = [IO.DirectoryInfo]::new($f)
+if (-not $d.Exists) { if ([IO.File]::Exists($f)) { "error $f isn't a folder" } else { 'missing' }; return }
+function wmRw($i) { if ($i.Attributes -band 1) { $a = [int]$i.Attributes -band -2; if (-not $a) { $a = 128 }; $i.Attributes = [IO.FileAttributes]$a } }
+function wmDel($x) { foreach ($i in $x.EnumerateFileSystemInfos()) { wmRw $i; if (($i.Attributes -band 16) -and -not ($i.Attributes -band 1024)) { wmDel $i } else { $i.Delete() } }; wmRw $x; $x.Delete() }
+try { if ($d.Attributes -band 1024) { $d.Delete() } else { wmDel $d }; 'ok' } catch { wmWhy $_ }`,
+};
+
+/** A PowerShell block with params ($p, $q, $c) given as single-quoted literals (see ps). */
+function psWith(block, args, on) {
+  const lit = (s) => "'" + String(s).replace(/\//g, "\\").replace(/['‘’‚‛]/g, "$&$&") + "'";
+  return exec("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+    `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); ${PS_FN}; & { param($p, $q, $c) ${block} } ${args.map(lit).join(" ")}`], { on, timeout: OPS_MS });
+}
+
+const OPS_MS = 300000; // a large folder's delete can take minutes on a Windows drive
+
+/** Runs one step where `root` lives; resolves with the answer line. */
+async function runOp(op, root, paths, extra, on) {
+  for (const p of paths) if (!inside(p, root)) throw new Error(`${p} isn't inside ${root}`);
+  const args = [...paths, ...extra];
+  let r;
+  if (on) {
+    if (noSh.has(on)) throw new Error(WINDOWS_NOTE);
+    try { r = await exec("sh", ["-c", OPS_SH, "wingman", op, ...args], { on, timeout: OPS_MS }); }
+    catch (e) {
+      if (!/cannot start sh/i.test(String(e?.message ?? e))) throw e;
+      noSh.add(on);
+      throw new Error(WINDOWS_NOTE);
+    }
+  } else if (!onWindows()) r = await exec("sh", ["-c", OPS_SH, "wingman", op, ...args], { timeout: OPS_MS });
+  else if (WSL_FILES.test(root)) {
+    const d = distroOf(root), wsl = (a) => (WSL_FILES.test(a) ? toWsl(a) : a);
+    r = await exec("wsl.exe", [...(d ? ["-d", d] : []), "-e", "sh", "-c", OPS_SH, "wingman", op, ...args.map(wsl)], { timeout: OPS_MS });
+  } else {
+    const [p, q = "", c = ""] = op === "rmtree" ? [paths[0], extra[0]] : op === "mv" ? [paths[0], paths[1], extra[0]] : [paths[0]];
+    r = await psWith(OPS_PS[op], [p, q, c], null);
+  }
+  const line = firstLine(r.stdout);
+  if (!line) throw new Error((r.stderr || "").trim() || `exit ${r.code}`);
+  return line;
+}
+
+/** "ok" passes; the rest become errors naming `path` ("already exists", "no longer exists", the reason). */
+function answer(line, path) {
+  if (line === "ok") return;
+  const name = basename(path) || path;
+  const e = new Error(line === "exists" ? `${name} already exists` : line === "missing" ? `${name} no longer exists` : line.replace(/^error /, ""));
+  e.code = line === "exists" || line === "missing" ? line : "error";
+  throw e;
+}
+
+/** Creates an empty file only if nothing is at `path` (its folders as needed). */
+export async function createFile(path, root, { on = null } = {}) { answer(await runOp("file", root, [path], [], on), path); }
+
+/** Creates a folder (and its parents) only if nothing is at `path`. */
+export async function createDir(path, root, { on = null } = {}) { answer(await runOp("dir", root, [path], [], on), path); }
+
+/**
+ * Renames or moves `from` to `to` (a file or a folder), refusing when something is already at `to`.
+ * A rename that only changes letter case works on case-insensitive file systems (Windows, macOS).
+ */
+export async function movePath(from, to, root, { on = null } = {}) {
+  const caseOnly = from !== to && from.toLowerCase() === to.toLowerCase();
+  answer(await runOp("mv", root, [from, to], [caseOnly ? "1" : "0"], on), to);
+}
+
+/** Deletes a file (or a link), never a folder. */
+export async function deleteFile(path, root, { on = null } = {}) { answer(await runOp("rm", root, [path], [], on), path); }
+
+const HOMEISH = /^(?:\/home|\/Users|\/root|[A-Za-z]:\/Users|\/home\/[^/]+|\/Users\/[^/]+|[A-Za-z]:\/Users\/[^/]+)$/i;
+
+/**
+ * Deletes a folder and everything in it, permanently. Refused unless `path` is strictly inside
+ * `root`, and for "/", a drive's root, a home folder or a folder above one. A link to a folder is
+ * removed as a link.
+ */
+export async function deleteTree(path, root, { on = null } = {}) {
+  const p = String(path ?? "").replace(/\\/g, "/").replace(/\/+$/, ""), s = p.replace(/^\/\/(?:wsl\.localhost|wsl\$)\/[^/]+/i, "");
+  if (!p || s === "" || /^[A-Za-z]:$/.test(p) || HOMEISH.test(s)) throw new Error(`refusing to delete ${path || "an empty path"}`);
+  if (!on) {
+    let home = "";
+    try { home = appHome().replace(/\\/g, "/").replace(/\/\.config\/herdr-app\/?$/, ""); } catch {}
+    const ci = /^[A-Za-z]:/.test(p), a = ci ? p.toLowerCase() : p, h = ci ? home.toLowerCase() : home;
+    if (h && (h === a || h.startsWith(`${a}/`))) throw new Error("refusing to delete a home folder or one above it");
+  }
+  answer(await runOp("rmtree", root, [p], [String(root).replace(/\\/g, "/").replace(/\/+$/, "")], on), p);
+}
+
+// ---- revealing in the system's file manager (this computer) ---------------------------
+
+/** Shows `path` in Explorer (selected), Finder (`open -R`), or the file manager (xdg-open of its folder). */
+export async function revealPath(path, isDir = false) {
+  if (onWindows()) {
+    await exec("explorer.exe", [isDir ? path.replace(/\//g, "\\") : "/select,", ...(isDir ? [] : [path.replace(/\//g, "\\")])]); // explorer answers 1 even when it worked
+    return;
+  }
+  const mac = (await exec("uname", ["-s"]).catch(() => ({ stdout: "" }))).stdout.trim() === "Darwin";
+  const r = mac ? await exec("open", ["-R", path]) : await exec("xdg-open", [isDir ? path : dirname(path)]);
+  if (r.code !== 0) throw new Error(`${mac ? "open" : "xdg-open"}: ${(r.stderr || r.stdout).trim() || `exit ${r.code}`}`);
 }
 
 // One line per path: its SHA-256, or "-" when it isn't a file (absent, a folder).

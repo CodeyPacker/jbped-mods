@@ -132,6 +132,7 @@ Wingman finds a space's repos from its terminals' folders and from the files the
 | Next view: Review → Edit → Changes (side panel), Review ↔ Edit (pane) | `ctrl-shift-r` |
 | Open the file in your external editor | `ctrl-e` (or the editor's button at the far right), at the cursor or the current change; unsaved edits are saved first. Pick the editor in Settings. |
 | File tree (Edit view) | `ctrl-b` |
+| Rename / delete the selected file or folder (file tree) | `f2` / `delete`, while the tree has the keyboard (see File operations) |
 | Select lines | click a line, or click and drag; Shift+click or `shift-up` / `shift-down` to extend; click inside the selection or `escape` to clear. |
 | Menu for a line or change | right-click: Comment, Reject, Reject with comment, Accept (on the selected lines when there are any). Right-click never changes the selection. |
 | Comment on the selected lines, else the current change | `ctrl-m` (or the change's Comment button) |
@@ -145,6 +146,25 @@ The header switches between two views (`ctrl-shift-r`):
 
 - **Review**: the tabs are the files with changes to review.
 - **Edit**: a file tree of the space's repos and plain folders on the left, like VS Code's Explorer (`ctrl-b` shows or hides it, and opens the Edit view from Review). Folders load when you open them. In a repo, the tree comes from git's file list, so empty folders don't show. Ignored files and folders are dimmed, and an ignored folder's content is read from disk when you open it. Each file shows its git status letter (A added or untracked, M modified, D deleted, U conflict), its change count to review and a dot for unsaved edits. Folders show the strongest letter under them and their total count. Deleted files are struck through and still open their diff while under review. A folder lists at most 500 entries and the tree 5000, then "… more files not shown". Click any file to open it in the same editor, with its diff when it has changes. Binary files show "binary file" instead of their content. The tabs are the changed files plus the files you opened. Opened files close with their ×, which saves them when autosave is on. Changed files stay until they're reviewed.
+
+### File operations
+
+Right-click a file, a folder or a root's header (with one root and no header, the tree's empty space) for VS Code's Explorer menu. It works in repos and plain folders, on this computer and on another machine. Entries that don't apply are left out.
+
+- **New File…** and **New Folder…**: a name box opens in the tree, inside the folder (or the root) you clicked, or beside the file. Enter creates, Esc cancels. A name with `/` makes the folders on the way (`a/b/c.ts`). A new file opens in the editor. A new empty folder in a repo shows in the tree though git doesn't list it.
+- **Rename…** (`f2`): the name box holds the name, with the part before the extension selected. A name with `/` moves the item, relative to its folder. Changing only letter case (`readme.md` to `README.md`) works on Windows and macOS too.
+- **Delete** (`delete`): a confirm under the row names the item, and a repo folder's file count when the repo's file list knows it ("Delete folder src/old and its 12 files?", else "and everything in it?"). Enter or **Delete** deletes, Esc or **Cancel** doesn't. Deleting is permanent, here as on another machine: nothing goes to the trash or Recycle Bin.
+- **Copy Path** and **Copy Relative Path**: as the machine names it, with backslashes for a Windows drive.
+- **Reveal in File Explorer** (Windows), or **Reveal in file manager** (Finder on macOS, the folder through `xdg-open` on Linux), and **Open in** the external editor: this computer's files only.
+- **Refresh** (root header): reads the root's file list and folders again now.
+
+A click on a row selects it and gives the tree the keyboard: `f2` and `delete` act on that row then, and only then. A click in the editor, a tab or any box gives the keyboard back, so `delete` in a file still deletes text. Both keys can be changed in Settings → Keyboard shortcuts.
+
+Names that are refused, with the reason shown under the box (the box stays open): empty, `.` or `..`, `.git`, a backslash, a NUL, a leading `/`, a file name ending in `/`, anything already there. Folders on a Windows drive also refuse `< > : " | ? *`, a name ending in a dot or a space, and names Windows reserves (`CON`, `NUL`, `COM1`…). Every operation stays inside its root: never the root itself, never `.git` or anything in it, never a path with `..`.
+
+Files with unsaved edits, in this tab or another Wingman tab, block renaming or deleting them and any folder holding them, naming the files. A renamed file that was open reopens at its new path; a deleted one's tab closes. Review sees a rename as git does, the old path deleted and the new one added: a renamed file under review shows there as deleted. Afterwards the tree reads the changed folders and the repo's file list again at once, open folders stay open, and the new or renamed item is shown.
+
+How it runs: on Linux, macOS and another machine, one `sh` script with the paths as arguments (`mv` for rename, `rm -rf` for a folder, which refuses anything outside its root, `/`, and a home folder or a folder above one). On a Windows drive, PowerShell with each path as a quoted literal and .NET calls (`File.Move` and `Directory.Move`, which never replace a target; a folder's delete walks it, clears read-only attributes and removes junctions as links). In WSL's own files, the `sh` script through `wsl.exe`. A Windows machine elsewhere says "Saving on a Windows machine isn't supported yet". Each operation is one call: about 0.8 s on a Windows drive, 0.3 s in WSL's files, 0.15 s on another machine.
 
 ## Editing
 

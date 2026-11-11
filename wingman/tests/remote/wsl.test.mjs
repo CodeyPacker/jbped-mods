@@ -26,7 +26,8 @@ const { exec, readTextFile, remoteCalls } = await import("herdr");
 const { Store } = await import("../../mods/wingman/store.js");
 const { STATUS_V2, parseStatusV2, onDisk, NUMSTAT, parseNumstat, discardCommands, commitCommands, READ, statusLetter } = await import("../../mods/wingman/changes.js");
 const { STATUS_TREE, parseStatus: parseTree } = await import("../../mods/wingman/filetree.js");
-const { listDir, pathKind, writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, STALE } = await import("../../mods/wingman/fsx.js");
+const { listDir, pathKind, writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, STALE, createFile, createDir, movePath, deleteFile, deleteTree } = await import("../../mods/wingman/fsx.js");
+const { newTarget, renameTarget } = await import("../../mods/wingman/fileops.js");
 const { Capture } = await import("../../mods/wingman/capture.js");
 const { acceptAt, rejectAt, rejectAll } = await import("../../mods/wingman/model.js");
 const { createHash } = await import("node:crypto");
@@ -164,6 +165,52 @@ try {
   const fp = await timed("fingerprints (3 paths)", () => fingerprints([`${w}/crlf.txt`, `${w}/gone`, `${w}/sub`], { on }));
   assert.deepEqual(fp, { [`${w}/crlf.txt`]: sha("one\r\ntwo\r\n+"), [`${w}/gone`]: null, [`${w}/sub`]: null });
   await sh('rm -rf "$1"', w);
+
+  // ---- the Explorer's file operations there (create, rename, move, delete, confinement) ------------
+  // Everything happens inside the test's own folder; the confinement checks refuse before anything runs.
+  const x = `${root}/ops`, xo = { on };
+  const odd = ["with space.txt", "it's.txt", '"q".txt', "$HOME.txt", "`id`.txt", "中文.md", "-n"];
+  await timed("createFile", () => createFile(`${x}/a.txt`, root, xo));
+  assert.equal(await readTextFile(`${x}/a.txt`, { on }), "");
+  await sh('printf keep > "$1"', `${x}/a.txt`);
+  await assert.rejects(createFile(`${x}/a.txt`, root, xo), (e) => e.code === "exists");
+  assert.equal(await readTextFile(`${x}/a.txt`, { on }), "keep");
+  const nt = newTarget({ root, dir: "ops", name: "deep/er/n.ts" });
+  await createFile(nt.path, root, xo);
+  assert.equal(await pathKind(`${x}/deep/er/n.ts`, { on }), "file");
+  await timed("createDir", () => createDir(`${x}/d1/d2`, root, xo));
+  await assert.rejects(createDir(`${x}/d1`, root, xo), /already exists/);
+  for (const n of odd) { await createFile(`${x}/odd/${n}`, root, xo); assert.equal(await pathKind(`${x}/odd/${n}`, { on }), "file", n); }
+  await timed("movePath", () => movePath(`${x}/a.txt`, `${x}/b.txt`, root, xo));
+  assert.equal(await readTextFile(`${x}/b.txt`, { on }), "keep"); assert.equal(await pathKind(`${x}/a.txt`, { on }), null);
+  await createFile(`${x}/c.txt`, root, xo);
+  await assert.rejects(movePath(`${x}/c.txt`, `${x}/b.txt`, root, xo), (e) => e.code === "exists");
+  assert.equal(await readTextFile(`${x}/b.txt`, { on }), "keep");
+  const rt = renameTarget({ root, rel: "ops/b.txt", name: "moved/in/b.txt" });
+  await movePath(rt.fromPath, rt.path, root, xo);
+  assert.equal(await readTextFile(`${x}/moved/in/b.txt`, { on }), "keep");
+  await movePath(`${x}/d1`, `${x}/D1`, root, xo); // case-only, on a case-sensitive file system
+  assert.equal(await pathKind(`${x}/D1/d2`, { on }), "dir");
+  const fancy = `${x}/odd/中文 \`x\` $y.txt`;
+  await movePath(`${x}/odd/it's.txt`, fancy, root, xo);
+  assert.equal(await pathKind(fancy, { on }), "file");
+  await timed("deleteFile", () => deleteFile(`${x}/c.txt`, root, xo));
+  assert.equal(await pathKind(`${x}/c.txt`, { on }), null);
+  await assert.rejects(deleteFile(`${x}/D1`, root, xo), /is a folder/);
+  await sh('mkdir -p "$1/tree/a/b" && printf f > "$1/tree/a/b/f" && printf r > "$1/tree/ro" && chmod 444 "$1/tree/ro"', x);
+  await timed("deleteTree", () => deleteTree(`${x}/tree`, root, xo));
+  assert.equal(await pathKind(`${x}/tree`, { on }), null);
+  const refused = (p) => assert.rejects(p, /isn't inside|refusing/);
+  await refused(deleteTree(root, root, xo)); // the root itself
+  await refused(deleteTree(`${x}/../..`, root, xo));
+  await refused(deleteTree(`${root}/.git`, root, xo));
+  await refused(deleteFile(`${root}/.git/HEAD`, root, xo));
+  await refused(createFile(`${root}-escape`, root, xo));
+  await refused(movePath(`${x}/D1`, `${root}-escape`, root, xo));
+  assert.equal(await pathKind(`${root}/.git/HEAD`, { on }), "file");
+  assert.equal(await pathKind(`${root}-escape`, { on }), null);
+  await deleteTree(x, root, xo);
+  assert.equal(await pathKind(x, { on }), null);
 
   // ---- D2/D3: a review round trip there ------------------------------------------------------------
   await sh(`cd "$1" && printf 'a1\\na2\\na3\\na4\\na5\\na6\\n' > rev.txt && git add rev.txt && git commit -qm rev`, root);
