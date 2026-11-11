@@ -7,6 +7,7 @@ import { splitLines, parseHunks, wholeHunk } from "./model.js";
 import { writeText, removeFile, makeDir, fingerprints, readOn } from "./fsx.js";
 import { sha256Hex } from "./sha256.js";
 import { REMOTE, mapLimit } from "./remote.js";
+import { parseBlobSize } from "./changelist.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 export const norm = (p) => { const s = p.replace(/\\/g, "/").replace(/^\/\/\?\//, ""); return isWindows(s) ? s.toLowerCase() : s; };
@@ -29,6 +30,20 @@ export const MAX_TEXT = 1048576;
 /** What a version of a file is, for telling whether a commit holds it: the SHA-256 of its text
  *  with CRLF read as LF, or "-" for no file. */
 export const sumOf = async (t) => (t == null ? "-" : await sha256Hex(lf(t)));
+
+/**
+ * A cheap checksum of a text (two 32-bit FNV-1a style hashes over its UTF-16 units, in hex): enough
+ * to tell a text from the one last seen at the same path and length, without keeping that text.
+ */
+export function checksum(t) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ t.length;
+  for (let i = 0; i < t.length; i++) {
+    const c = t.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x5bd1e995) ^ (b >>> 13);
+  }
+  return (a >>> 0).toString(16) + ":" + (b >>> 0).toString(16);
+}
 
 /** The branch a HEAD file names ("ref: refs/heads/x" -> "x"), or "@<sha>" when detached. */
 export function branchOf(headText) {
@@ -113,6 +128,11 @@ export class Store {
     return r.code === 0 ? r.stdout : null;
   }
 
+  /** A file's size in a commit in bytes (nothing is read), or null when the commit doesn't have it. */
+  async blobSize(commit, rel) {
+    return parseBlobSize(await this.git(["cat-file", "-s", `${commit}:${rel}`]));
+  }
+
   /**
    * Whether the agent's change to `rel` is committed: the file on disk is what HEAD has, and HEAD
    * has the agent's change, `sum` (sumOf of the file as last seen differing from HEAD, see
@@ -133,8 +153,9 @@ export class Store {
 
   /**
    * Each file's sumOf on disk now (undefined when it can't be read). Here the texts are read (one
-   * that didn't change since the last look isn't hashed again); on another machine one call hashes
-   * them all there and only contents not seen before are read.
+   * that didn't change since the last look isn't hashed again: its length and checksum say so, the
+   * text itself isn't kept); on another machine one call hashes them all there and only contents
+   * not seen before are read.
    */
   async diskSums(rels) {
     const out = new Map(), seen = (this.seenSums ??= new Map());
@@ -143,10 +164,10 @@ export class Store {
       for (const rel of rels) {
         const t = await this.read(`${this.root}/${rel}`).catch(() => undefined);
         if (t === undefined) continue;
-        const k = seen.get(rel);
-        if (k?.text === t) { out.set(rel, k.sum); continue; }
+        const k = seen.get(rel), len = t == null ? -1 : t.length, ck = t == null ? "" : checksum(t);
+        if (k && k.len === len && k.ck === ck) { out.set(rel, k.sum); continue; }
         const sum = await sumOf(t);
-        seen.set(rel, { text: t, sum }); out.set(rel, sum);
+        seen.set(rel, { len, ck, sum }); out.set(rel, sum);
       }
       return out;
     }

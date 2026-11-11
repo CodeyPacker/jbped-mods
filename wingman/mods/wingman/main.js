@@ -11,7 +11,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
 import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, machines, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
-import { Store, PlainRoot, norm, shows } from "./store.js";
+import { Store, PlainRoot, norm, shows, MAX_TEXT } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { Capture, hostPath, tailText } from "./capture.js";
@@ -43,6 +43,8 @@ import { spans as spansOf } from "./spans.js";
 import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
 import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup.js";
 import { capSteps } from "./undocap.js";
+import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighbours, toUnload, sizeError, binaryError, CHANGES_CHARS } from "./changelist.js";
+import { toLighten, HEAVY_VIEWS } from "./retain.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
 // Agents count as working while they are in a turn, including while blocked on a question.
@@ -50,9 +52,10 @@ const ACTIVE = new Set(["working", "blocked"]);
 const base = (p) => p.split("/").pop();
 const SROW = 22; // a Search result row's height
 const TOK_CHARS = 4e6; // the highlight cache's texts, in characters (tok)
-// Changes' "Committed on this branch": loaded texts kept in all (characters), and repos whose list is kept.
-const COMMITTED_CHARS = 4e6, COMMITTED_REPOS = 16;
-/** A committed row before its texts are read (loadCommitted): no lines, not a file to edit. */
+// Changes' "Committed on this branch": repos whose list is kept (loaded texts: changelist.CHANGES_CHARS).
+const COMMITTED_REPOS = 16;
+const STATS_MS = 300000; // each copy logs one line of what it holds this often (F7)
+/** A Changes row before its texts are read (loadRow): no lines, not a file to edit. */
 const LAZY = { lazy: true, Btext: "", Ctext: undefined, B: [], C: [], hunks: [], oldTok: null, newTok: null };
 
 /** A space's Search view state (the Edit tab's left column): kept per space like the rest of the view. */
@@ -225,6 +228,7 @@ export default class Review extends View {
       }
     });
     this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.searchScroll = VirtualListScrollHandle.new(); this.treeScroll = ScrollHandle.new();
+    this.chgScroll = VirtualListScrollHandle.new();
     this.initFind();
     this.views = new Map(); this.captures = new Map(); this.tokens = new Map();
     this.reset([]);
@@ -233,10 +237,16 @@ export default class Review extends View {
     cx.timer.every(250, (cx) => {
       this.autosave(cx); this.publishDirty(); this.publishReview(); this.takeShared(cx);
       if (this.mode === "changes") {
-        this.loadCommitted(this.file(), cx); // selected some other way (settle, a hand-off)
+        // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
+        const f = this.file();
+        this.loadRow(f, cx);
+        if (f && !f.loading && !f.lazy) for (const n of neighbours(this.files, f.key)) this.loadRow(n, cx);
         // Shown again after being hidden (refreshChanges does nothing meanwhile): look now, not at the next poll.
         const shown = this.changesShown();
-        if (shown && this.changesHidden) cx.spawn(async (cx) => this.refreshChanges(cx));
+        if (shown && this.changesHidden) {
+          log(`changes shown: ${this.files.length} uncommitted, ${this.committed?.length ?? 0} committed, ${this.changesChars()} chars loaded`);
+          cx.spawn(async (cx) => this.refreshChanges(cx));
+        }
         this.changesHidden = !shown;
       }
     });
@@ -245,6 +255,7 @@ export default class Review extends View {
     // Renewed while a long capture pass runs too; so are the failing repos shared with the other copies.
     cx.timer.every(1000, () => { if (this.isLeader) { this.lease(); this.publishCaptureErrors(); } });
     cx.timer.every(3000, (cx) => this.collectAll(cx));
+    cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
     // so a 2 s content check is what catches outside edits. "#index" keeps the index
@@ -262,6 +273,7 @@ export default class Review extends View {
     this.treeCur = this.treeEdit = this.treeDel = null; this.treeFocus = false;
     // Changes (P5) and the workspace panel: the commit box's text is restored from commitMsg on a switch.
     this.committed = []; this.changeSig = null; this.unchecked = new Set(); this.commitRoot = this.commitNote = this.discardKey = null; this.commitMsg = "";
+    this.committedOpen = new Set(); // repos whose "Committed on this branch" is expanded (collapsed by default)
     this.ws = null;
     this.status = stores.length ? "Loading…" : "Waiting for an agent in a git repo in this space, or open a folder.";
   }
@@ -285,6 +297,13 @@ export default class Review extends View {
         const saved = this.views.get(key);
         if (saved) Object.assign(this, saved); else this.reset([]);
         this.views.delete(key); // the live state is on the instance now (saved again on leaving)
+        // A view kept light (its files let go, retain.js; Changes always) loads them again now.
+        // While writes are queued, the reload waits for them (drain after the queue: "*").
+        if (saved?.light) {
+          this.light = false;
+          if (this.writing) this.deferred.add("*");
+          else cx.spawn(async (cx) => { if (this.spaceId === key) await this.reloadAll(cx); });
+        }
         this.pruneViews();
         this.syncSearchInputs();
         this.commitInput?.set_value(this.commitMsg ?? "");
@@ -327,7 +346,7 @@ export default class Review extends View {
           search: this.search, searchFocus: this.searchFocus,
           // The tree's selection, name box and confirm stay while their root does; Changes' state stays.
           treeCur: kept(this.treeCur), treeEdit: kept(this.treeEdit), treeDel: kept(this.treeDel), treeFocus: this.treeFocus && !!kept(this.treeCur),
-          committed: (this.committed ?? []).filter((f) => left.has(f.store)), changeSig: this.changeSig, unchecked: this.unchecked,
+          committed: (this.committed ?? []).filter((f) => left.has(f.store)), changeSig: this.changeSig, unchecked: this.unchecked, committedOpen: this.committedOpen,
           commitRoot: this.commitRoot, commitNote: this.commitNote, commitMsg: this.commitMsg, discardKey: this.discardKey, ws: this.ws };
         this.reset(found);
         Object.assign(this, keep); this.files = files;
@@ -349,6 +368,20 @@ export default class Review extends View {
       if (live.has(k) || v.stores.some((st) => st.on && !ready.has(st.on)) || v.files.some((f) => this.dirty(f))) continue;
       this.views.delete(k); this.rootsAt?.delete(k);
     }
+    // Only the HEAVY_VIEWS most recently left keep their loaded files; a view with unsaved edits,
+    // undo steps or a pending merge keeps everything.
+    if (this.writing) return; // a queued write reports into its space's kept files
+    const pinned = (v) => v.history.length > 0 || v.redo.length > 0 || v.files.some((f) => this.dirty(f) || f.conflict);
+    for (const k of toLighten([...this.views].map(([k, v]) => [k, { light: !!v.light, pinned: pinned(v) }]), HEAVY_VIEWS)) this.views.set(k, this.lighten(this.views.get(k)));
+  }
+
+  /**
+   * A kept view without its loaded files (texts, highlighting, hunks): what restores it stays (the
+   * selection, opened files, Search, the Changes boxes), and its files load again when it's shown.
+   */
+  lighten(v) {
+    for (const f of v.committed ?? []) this.unloadRow(f);
+    return { ...v, files: [], indexTexts: {}, changeSig: null, status: "Loading…", light: true };
   }
 
   /** A repo's store (on machine `on`), or null when the folder isn't (or isn't yet) a repo: retried after 30 s. */
@@ -405,11 +438,15 @@ export default class Review extends View {
    */
   snapshotView() {
     const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, changeSig, unchecked, commitRoot, commitNote } = this;
-    for (const f of this.committed ?? []) this.unloadCommitted(f);
-    return { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
+    for (const f of this.committed ?? []) this.unloadRow(f);
+    const v = { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
       treeCur: null, treeEdit: null, treeDel: null, treeFocus: false,
-      committed: this.committed ?? [], changeSig, unchecked: unchecked ?? new Set(), commitRoot, commitNote, commitMsg: this.commitInput?.value() ?? this.commitMsg ?? "", discardKey: null,
+      committed: this.committed ?? [], changeSig, unchecked: unchecked ?? new Set(), committedOpen: this.committedOpen ?? new Set(), commitRoot, commitNote, commitMsg: this.commitInput?.value() ?? this.commitMsg ?? "", discardKey: null,
       ws: this.ws?.kind === "path" ? null : this.ws ?? null };
+    // Changes keeps nothing loaded for a space that isn't shown (its files are read-only there):
+    // the lists and texts load again when it's back. Its highlighting cache goes with them.
+    if (this.mode === "changes") { this.tokens.clear(); this.tokChars = 0; return this.lighten(v); }
+    return v;
   }
 
   /**
@@ -635,7 +672,7 @@ export default class Review extends View {
 
   close() {
     this.dropSleeper?.();
-    this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
+    this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); this.chgScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
     // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
     // whenever the runtime drops the instance (a task still waiting would keep it, and all of this).
     for (const m of [this.views, this.tokens, this.trees, this.ftrees, this.captures]) m?.clear();
@@ -655,7 +692,8 @@ export default class Review extends View {
   }
 
   async reloadAll(cx) {
-    if (this.mode === "changes") return this.loadChanges(cx);
+    // The Changes copy loads only while it's shown: once shown, refreshChanges finds changeSig unset and loads.
+    if (this.mode === "changes") { if (!this.changesShown()) { this.changeSig = null; return; } return this.loadChanges(cx); }
     // A reload that outlives a space switch or a change of roots is dropped: its files are another state's.
     const space = this.spaceId, stores = this.stores, stale = () => this.spaceId !== space || this.stores !== stores;
     try {
@@ -674,6 +712,12 @@ export default class Review extends View {
       for (const old of this.files) {
         if (kept.some((k) => k.key === old.key) || !(old.plain || this.opened.includes(old.key))) continue;
         kept.push(old.plain || this.dirty(old) ? old : await this.loadPlain(old.store, old.rel, cx));
+      }
+      // Opened files of a view kept light (retain.js) are read again.
+      for (const key of this.opened) {
+        if (kept.some((k) => k.key === key)) continue;
+        const i = key.indexOf("|"), st = this.stores.find((x) => x.root === key.slice(0, i));
+        if (st) kept.push(await this.loadPlain(st, key.slice(i + 1), cx));
       }
       if (stale()) return;
       this.files = kept; this.indexTexts = texts; this.status = null;
@@ -870,7 +914,8 @@ export default class Review extends View {
   shown(f) { return f.hunks.length || (f.edited && f.key === this.sel) || this.dirty(f); }
   /** The tabs: changed files, plus in the Edit view the files opened from the tree. */
   visible() {
-    if (this.mode === "changes") return [...this.files, ...(this.committed ?? [])];
+    // Changes: committed rows count while their repo's section is expanded.
+    if (this.mode === "changes") return [...this.files, ...shownCommitted(this.committed ?? [], this.committedOpen ?? new Set(), idOf)];
     const changed = (f) => !f.plain && (f.error || this.shown(f));
     return this.files.filter((f) => changed(f) || (this.mode === "edit" && this.opened.includes(f.key)));
   }
@@ -886,7 +931,8 @@ export default class Review extends View {
     const vis = this.visible();
     if (!vis.some((f) => f.key === this.sel)) {
       const at = this.files.findIndex((f) => f.key === this.sel);
-      const next = this.files.slice(at + 1).find((f) => vis.includes(f)) ?? vis[vis.length - 1];
+      // Changes never picks a committed row by itself: with no uncommitted files nothing is picked.
+      const next = this.files.slice(at + 1).find((f) => vis.includes(f)) ?? (this.mode === "changes" ? this.files.at(-1) : vis[vis.length - 1]);
       this.sel = next?.key ?? null; this.current = 0;
     }
     const f = this.file();
@@ -1451,7 +1497,9 @@ export default class Review extends View {
   /** Panel split: what the other copy handed over (GOTO) and save requests from Review (SAVE). */
   takeShared(cx) {
     const g = this.view && shared(GOTO);
-    if (g && g.view === this.view && g.stamp > this.gotoSeen) {
+    // Changes loads its list only once shown: a hand-off to it waits for that load (at most 10 s).
+    const waiting = !!g && this.view === "changes" && g.space === this.spaceId && (this.changeSig == null || this.loadingChanges) && Date.now() - g.stamp < 10000;
+    if (g && g.view === this.view && g.stamp > this.gotoSeen && !waiting) {
       this.gotoSeen = g.stamp;
       if (g.space === this.spaceId) {
         this.handle.focus();
@@ -1552,10 +1600,20 @@ export default class Review extends View {
   }
 
   /**
-   * Every uncommitted file in the space's repos, as HEAD (B) against the working tree (C), shown as
-   * soon as it's read; then "Committed on this branch" (committedRows: a list kept per repo until its
-   * base or HEAD moves, whose texts load when a file is picked). A load that outlives a space switch
-   * or a change of roots is dropped.
+   * What says a repo's Changes list is out of date: its status, HEAD, stampOf and line counts.
+   * Returns them with the parsed status and counts (lineCounts).
+   */
+  async changeSigOf(st) {
+    const { out, head, list } = await this.statusOf(st), stamp = await this.stampOf(st, list), counts = await this.lineCounts(st, head);
+    return { head, list, counts: counts.map, sig: [idOf(st), head, out, stamp, counts.raw] };
+  }
+
+  /**
+   * Every uncommitted file in the space's repos, listed from git status and line counts alone; a
+   * file's texts (HEAD as B against the working tree as C), hunks and highlighting load when it's
+   * picked (loadRow; the picked one before the list shows, so it never flashes). Then "Committed on
+   * this branch" (committedRows: a list kept per repo until its base or HEAD moves, whose texts load
+   * the same way). A load that outlives a space switch or a change of roots is dropped.
    */
   async loadChanges(cx) {
     if (this.loadingChanges) return;
@@ -1564,20 +1622,21 @@ export default class Review extends View {
     try {
       const files = [], sig = [], heads = [];
       for (const st of this.repos()) {
-        const { out, head, list } = await this.statusOf(st), stamp = await this.stampOf(st, list);
-        sig.push(idOf(st), head, out, stamp);
-        const { ai, done } = await this.aiMarks(st), counts = await this.lineCounts(st, head);
+        const { head, list, counts, sig: s } = await this.changeSigOf(st);
+        sig.push(...s);
+        const { ai, done } = await this.aiMarks(st);
         // A repo inside this one (git lists it as "inner/") is its own root: its files aren't this one's (P1).
         const mine = list.filter(({ rel }) => !rel.endsWith("/") && this.own(st, rel)[0] === st);
-        // Texts are fetched a few at a time on another machine (each read is a call), one by one here.
-        const texts = await mapLimit(mine, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeTexts(st, rel, xy, !!head));
-        for (const t of texts) {
-          const f = await this.tokened(t, cx);
-          files.push({ ...f, ai: ai.has(f.rel), ...this.countsOf(f, counts.get(f.rel)) });
-        }
+        // An untracked file has no line counts in git's: it's read for them (a few at a time on
+        // another machine, where each read is a call) and its text isn't kept.
+        const rows = await mapLimit(mine, st.on ? REMOTE.parallel : 1, ({ rel, xy }) => this.changeRow(st, rel, xy, !!head, counts.get(rel)));
+        for (const f of rows) files.push({ ...f, ai: ai.has(f.rel) });
         heads.push({ st, head, done });
       }
       if (stale()) return;
+      // The picked file loads before the list shows (as when every text was read here).
+      const sel = files.find((f) => f.key === this.sel);
+      if (sel) { await this.loadRowNow(sel, cx); if (stale()) return; }
       // The committed rows from the last load stay meanwhile (this space's: kept per space).
       this.files = files; this.changeSig = sig.join("\0"); this.status = null;
       if (this.discardKey && !files.some((f) => f.key === this.discardKey)) this.discardKey = null;
@@ -1589,6 +1648,24 @@ export default class Review extends View {
       this.settle(); cx.notify();
     } catch (e) { if (!stale()) { this.error = String(e.message ?? e); cx.notify(); } }
     finally { this.loadingChanges = false; }
+  }
+
+  /**
+   * An uncommitted file's row before its texts load: its status letter and line counts (git's, or
+   * an untracked file's lines, read here and let go). Binary per git's counts (or a NUL in an
+   * untracked file) and unreadable files carry their error, as when their texts were read.
+   */
+  async changeRow(st, rel, xy, hasHead, c) {
+    const path = `${st.root}/${rel}`, key = `${st.root}|${rel}`;
+    const f = { rel, path, basePath: null, store: st, key, xy, letter: statusLetter(xy), plain: false, created: xy === "??" || xy[0] === "A", by: null, as: null, hasHead, ...LAZY };
+    if (c?.binary) return { ...f, lazy: false, error: "binary file" };
+    if (c) return { ...f, add: c.add, del: c.del };
+    if (xy !== "??") return f;
+    try {
+      const text = await readTextFile(path, { on: st.on ?? null });
+      if (text?.includes("\0")) return { ...f, lazy: false, error: "binary file" };
+      return text == null ? f : { ...f, add: countLines(text), del: 0 };
+    } catch (e) { return { ...f, lazy: false, error: String(e.message ?? e) }; }
   }
 
   /** A changed file's HEAD text (B), working-tree text (C) and hunks, read where the repo lives; not yet highlighted. */
@@ -1616,15 +1693,8 @@ export default class Review extends View {
   /** D3: line counts of a repo's uncommitted changes against HEAD (staged plus unstaged with no commits yet). */
   async lineCounts(st, head) {
     const runs = head ? [NUMSTAT] : NUMSTAT_NO_HEAD;
-    const outs = await Promise.all(runs.map((args) => this.git(st, args)));
-    return parseNumstat(...outs.map((r) => (r.code === 0 ? r.stdout : "")));
-  }
-
-  /** { add, del } for a Changes row: git's counts, or an untracked file's lines; none for binary files. */
-  countsOf(f, c) {
-    if (f.error || c?.binary) return {};
-    if (c) return { add: c.add, del: c.del };
-    return f.xy === "??" || (f.created && f.Ctext != null) ? { add: countLines(f.Ctext), del: 0 } : {};
+    const outs = (await Promise.all(runs.map((args) => this.git(st, args)))).map((r) => (r.code === 0 ? r.stdout : ""));
+    return { map: parseNumstat(...outs), raw: outs.join("\0") };
   }
 
   /** Which files an agent of this space changed on this branch: `ai` (still in review), `done` (committed). */
@@ -1658,7 +1728,7 @@ export default class Review extends View {
   /**
    * "Committed on this branch" for one repo (its base against HEAD), with AI marks. The list (path,
    * letter, line counts: two git calls) is kept per repo, keyed by base and HEAD, and made again only
-   * when either moves; a file's texts and diff load when it's first picked (loadCommitted). At most
+   * when either moves; a file's texts and diff load when it's first picked (loadRow). At most
    * COMMITTED_REPOS repos' lists are kept.
    */
   async committedRows(st, head, done) {
@@ -1667,67 +1737,106 @@ export default class Review extends View {
     const cache = (this.committedCache ??= new Map()), id = idOf(st);
     let entry = cache.get(id);
     if (entry?.base !== base || entry?.head !== head) {
-      for (const f of entry?.rows ?? []) this.unloadCommitted(f);
+      for (const f of entry?.rows ?? []) this.unloadRow(f);
       const [r, n] = await Promise.all([this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, head]),
         this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, head])]);
       if (r.code !== 0) return [];
       const counts = parseNumstat(n.code === 0 ? n.stdout : ""), parts = r.stdout.split("\0").filter(Boolean), rows = [];
       for (let i = 0; i + 1 < parts.length && rows.length < MAX_FILES; i += 2) {
         const status = parts[i], rel = parts[i + 1], letter = status[0] === "A" ? "A" : status[0] === "D" ? "D" : "M", k = counts.get(rel);
+        // A binary file (git's "-" counts) is never read: it shows its placeholder.
+        const placeholder = binaryError(k);
         rows.push({ rel, path: `${st.root}/${rel}`, basePath: null, store: st, key: `${st.root}|${rel}#committed`, openKey: `${st.root}|${rel}`,
           committed: true, letter, ai: false, plain: false, created: letter === "A", by: null, as: null, base, head,
-          ...(k && !k.binary ? { add: k.add, del: k.del } : {}), ...LAZY });
+          ...(k && !k.binary ? { add: k.add, del: k.del } : {}), ...LAZY, ...(placeholder ? { lazy: false, placeholder, error: placeholder } : {}) });
       }
       entry = { base, head, rows };
     }
     cache.delete(id); cache.set(id, entry); // newest last
-    while (cache.size > COMMITTED_REPOS) { const [k, old] = cache.entries().next().value; cache.delete(k); for (const f of old.rows) this.unloadCommitted(f); }
+    while (cache.size > COMMITTED_REPOS) { const [k, old] = cache.entries().next().value; cache.delete(k); for (const f of old.rows) this.unloadRow(f); }
     for (const f of entry.rows) f.ai = done.has(f.rel);
     return entry.rows;
   }
 
   /**
-   * A committed row's texts and diff, read when it's picked (P2). The row object itself is filled
-   * (the list and the per-repo cache share it). Loaded texts are capped at COMMITTED_CHARS in all: the
-   * least recently picked others go back to unloaded.
+   * A Changes row's texts, diff and highlighting, read when it's picked (P2) or next to the picked
+   * one. The row object itself is filled (the list, and for a committed row the per-repo cache,
+   * share it). Loaded texts are capped at CHANGES_CHARS in all (capLoaded).
    */
-  loadCommitted(f, cx) {
+  loadRow(f, cx) {
     if (!f?.lazy || f.loading) return;
-    f.loading = true; f.usedAt = Date.now();
-    const st = f.store;
-    cx.spawn(async (cx) => {
-      let next;
-      try {
-        const [b, c] = await Promise.all([st.blobAt(f.base, f.rel), st.blobAt(f.head, f.rel)]);
-        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) next = { error: "binary file" };
-        else {
-          const hunks = await diffHunks(b ?? "", c ?? "");
-          next = await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx);
-        }
-      } catch (e) { next = { error: String(e.message ?? e) }; }
-      if (!f.lazy) { f.loading = false; return; } // unloaded meanwhile
-      Object.assign(f, next, { lazy: false, loading: false });
-      this.capCommitted(f);
-      this.settle(); cx.notify();
-    });
+    cx.spawn(async (cx) => { await this.loadRowNow(f, cx); this.settle(); cx.notify(); });
   }
 
-  /** Puts a committed row back to unloaded (its texts and highlighting go; picked again, they load again). */
-  unloadCommitted(f) {
-    if (!f?.committed || f.lazy) return;
+  async loadRowNow(f, cx) {
+    if (!f?.lazy || f.loading) return;
+    f.loading = true; f.usedAt ??= Date.now();
+    const st = f.store;
+    let next;
+    try {
+      if (f.committed) {
+        // Sizes first: a side over MAX_TEXT is never read (repos hold big binaries and PDFs).
+        const big = sizeError(await Promise.all([st.blobSize(f.base, f.rel), st.blobSize(f.head, f.rel)]), MAX_TEXT);
+        if (big) next = { error: big, placeholder: big };
+        else {
+          const [b, c] = await Promise.all([st.blobAt(f.base, f.rel), st.blobAt(f.head, f.rel)]);
+          if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) next = { error: "binary file", placeholder: "binary file" };
+          else {
+            const hunks = await diffHunks(b ?? "", c ?? "");
+            next = await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx);
+          }
+        }
+      } else {
+        const t = await this.changeTexts(st, f.rel, f.xy, f.hasHead), { add, del, ai } = f;
+        next = { ...(await this.tokened(t, cx)), add, del, ai };
+      }
+    } catch (e) { next = { error: String(e.message ?? e) }; }
+    if (!f.lazy) { f.loading = false; return; } // unloaded meanwhile
+    Object.assign(f, next, { lazy: false, loading: false });
+    this.capLoaded(f);
+  }
+
+  /** Puts a Changes row back to unloaded (its texts and highlighting go; picked again, they load again). A placeholder stays. */
+  unloadRow(f) {
+    if (!f || f.lazy || f.placeholder || f.plain || this.dirty(f)) return;
+    if (!f.committed && !("xy" in f)) return; // not a Changes row
     Object.assign(f, LAZY, { _rows: null, _rowsFor: null, _find: null, diskC: undefined, diskB: undefined, error: undefined });
   }
 
-  /** Keeps the committed rows' loaded texts under COMMITTED_CHARS, unloading the least recently picked first (never `keep`). */
-  capCommitted(keep) {
-    const loaded = [];
-    for (const e of this.committedCache?.values() ?? []) for (const f of e.rows) if (!f.lazy && f.Ctext !== undefined) loaded.push(f);
-    let total = loaded.reduce((n, f) => n + (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0), 0);
-    for (const f of loaded.sort((a, b) => (a.usedAt ?? 0) - (b.usedAt ?? 0))) {
-      if (total <= COMMITTED_CHARS) break;
-      if (f === keep) continue;
-      total -= (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0);
-      this.unloadCommitted(f);
+  /** The Changes rows whose texts are loaded: uncommitted ones and every kept committed list's. */
+  loadedRows() {
+    const out = this.files.filter((f) => !f.lazy && f.Ctext !== undefined && !f.placeholder);
+    for (const e of this.committedCache?.values() ?? []) for (const f of e.rows) if (!f.lazy && f.Ctext !== undefined && !f.placeholder) out.push(f);
+    return out;
+  }
+
+  /**
+   * One short log line of what this copy holds (every STATS_MS): its kept space views, loaded files
+   * and their characters (shown space and kept views), loaded committed rows, highlight cache, captures.
+   */
+  logStats() {
+    const views = [...(this.views?.values() ?? [])], size = (f) => (f.Btext?.length ?? 0) + (typeof f.Ctext === "string" ? f.Ctext.length : 0);
+    const files = [this.files, ...views.map((v) => v.files)].flat().filter((f) => !f.lazy && !f.error && f.Ctext !== undefined);
+    const committed = [];
+    for (const e of this.committedCache?.values() ?? []) for (const f of e.rows) if (!f.lazy && f.Ctext !== undefined && !f.placeholder) committed.push(f);
+    const sum = (list) => list.reduce((n, f) => n + size(f), 0);
+    log(`stats ${this.view ?? "pane"}: views ${views.length}, files ${files.length}/${sum(files)} chars, committed ${committed.length}/${sum(committed)} chars, tokens ${this.tokens.size}, captures ${this.captures.size}`);
+  }
+
+  /** Characters of the Changes rows' loaded texts (both sides). */
+  changesChars() { return this.loadedRows().reduce((n, f) => n + (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0), 0); }
+
+  /**
+   * Keeps the loaded texts under CHANGES_CHARS, unloading the least recently picked first and `keep`
+   * (the picked row) only when it alone is over: it then shows a placeholder instead of loading again.
+   */
+  capLoaded(keep) {
+    const rows = this.loadedRows(), byKey = new Map(rows.map((f) => [f.key, f]));
+    const out = toUnload(rows.map((f) => ({ key: f.key, chars: (f.Btext?.length ?? 0) + (f.Ctext?.length ?? 0), usedAt: f.usedAt })), CHANGES_CHARS, keep?.key ?? null);
+    for (const k of out) {
+      const f = byKey.get(k);
+      this.unloadRow(f);
+      if (f === keep) Object.assign(f, { lazy: false, placeholder: "too large to show", error: "too large to show" });
     }
   }
 
@@ -1760,10 +1869,11 @@ export default class Review extends View {
     this.refreshing = true;
     try {
       const sig = [];
-      for (const st of this.repos()) { const { out, head, list } = await this.statusOf(st); sig.push(idOf(st), head, out, await this.stampOf(st, list)); }
+      for (const st of this.repos()) sig.push(...(await this.changeSigOf(st)).sig);
       let stale = sig.join("\0") !== this.changeSig;
-      // Another machine's files are covered by stampOf's hashes.
-      for (const f of this.files) { if (stale) break; if (!f.error && !f.store?.on && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
+      // A file whose texts aren't loaded is covered by the status and line counts; a loaded one's
+      // text is read again (another machine's are covered by stampOf's hashes).
+      for (const f of this.files) { if (stale) break; if (!f.error && !f.lazy && f.Ctext !== undefined && !f.store?.on && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
       if (stale) await this.loadChanges(cx);
     } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
     finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); }
@@ -1777,7 +1887,9 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       const s = () => this.stateOf(space) ?? {}; // its own space's state, shown or not
       try {
-        for (const args of discardCommands(f.rel, f.inHead)) {
+        // A row whose texts never loaded doesn't know yet whether HEAD has the file.
+        const inHead = f.inHead ?? (f.hasHead === false ? false : (await this.git(f.store, [...READ, "cat-file", "-e", `HEAD:${f.rel}`])).code === 0);
+        for (const args of discardCommands(f.rel, inHead)) {
           const r = await this.git(f.store, args);
           if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
         }
@@ -1826,18 +1938,41 @@ export default class Review extends View {
     });
   }
 
+  /** The Changes list's rows (changelist.listRows): uncommitted files, then each repo's committed section. */
+  changeRows() { return listRows(this.files, this.committed ?? [], this.committedOpen ?? new Set(), idOf); }
+
+  /** A click in the Changes list: a repo header expands or collapses, a checkbox toggles, else the file is picked. */
+  clickChange(key, cx) {
+    const r = this.changeRows().find((x) => x.key === key);
+    if (!r) return;
+    const what = clickTarget(r, this.chgX ?? null);
+    if (what === "toggle") {
+      const open = (this.committedOpen ??= new Set());
+      if (open.has(r.id)) open.delete(r.id); else open.add(r.id);
+      this.settle(); cx.notify(); return;
+    }
+    const f = r.f;
+    if (what === "check") { if (this.unchecked.has(f.key)) this.unchecked.delete(f.key); else this.unchecked.add(f.key); cx.notify(); return; }
+    if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; cx.notify(); }
+  }
+
   renderChanges(t) {
     const review = shared(REVIEW), st = this.commitStore(), multi = this.repos().length > 1;
     const checked = st ? this.checkedIn(st) : [], open = checked.filter((f) => (review?.[f.key] ?? 0) > 0).length;
     const box = (on) => div().w(14).h(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.border).bg(on ? t.accent : t.background)
       .flex().items_center().justify_center().text_size(10).text_color(t.background).child(on ? "✓" : "");
     const letterColor = { A: t.ansi2, D: t.ansi1, "!": t.ansi3, M: t.ansi4 };
-    const row = (f) => {
-      const cut = f.rel.lastIndexOf("/") + 1, tag = f.committed ? null : reviewTag(f.key, review), on = !this.unchecked.has(f.key);
-      return h_flex().id(`chg-${f.key}`).h(26).flex_none().px(8).gap(6).items_center().rounded(5).cursor_pointer()
-        .when(f.key === this.sel, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
-        .on_click((_e, cx) => { if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; cx.notify(); } })
-        .when(!f.committed, (e) => e.child(div().id(`chk-${f.key}`).on_click((_e, cx) => { cx.stop_propagation(); if (on) this.unchecked.add(f.key); else this.unchecked.delete(f.key); cx.notify(); }).child(box(on))))
+    // One list row (inside the virtual list: no handlers or ids here, clicks come through clickChange).
+    const row = (r) => {
+      if (r.kind === "repo") {
+        return h_flex().w_full().h(REPO_H).px(8).pb(4).gap(4).items_end().cursor_pointer().text_size(11).font_semibold().text_color(t.muted)
+          .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(r.open ? "▾" : "▸"))
+          .child(div().flex_1().min_w(0).truncate().child(`Committed on this branch${multi ? ` · ${base(r.st.root)}` : ""} · ${r.count} file${r.count === 1 ? "" : "s"}${r.ai ? ` · ${r.ai} by AI` : ""}`));
+      }
+      const f = r.f, cut = f.rel.lastIndexOf("/") + 1, tag = f.committed ? null : reviewTag(f.key, review), on = !this.unchecked.has(f.key);
+      return div().w_full().h(FILE_H).px(4).child(h_flex().h_full().px(8).gap(6).items_center().rounded(5).cursor_pointer()
+        .when(f.key === this.sel, (e) => e.bg(t.selected))
+        .when(!f.committed, (e) => e.child(box(on)))
         .when(!!f.committed, (e) => e.child(div().w(14).flex_none()))
         .child(div().w(12).flex_none().text_size(11).font_semibold().text_color(letterColor[f.letter] ?? t.muted).child(f.letter))
         .child(h_flex().flex_1().min_w(0).gap(6).items_center()
@@ -1846,9 +1981,9 @@ export default class Review extends View {
         .when(f.add != null, (e) => e.child(h_flex().flex_none().gap(4).text_size(10)
           .child(div().text_color(t.ansi2).child(`+${f.add}`)).child(div().text_color(t.ansi1).child(`−${f.del}`))))
         .when(!!f.ai, (e) => e.child(div().flex_none().px(4).rounded(3).bg(t.accent + "33").text_size(9.5).text_color(t.accent).child("AI")))
-        .when(!!tag, (e) => e.child(div().flex_none().text_size(10).text_color(tag === "reviewed" ? t.dim : t.ansi3).child(tag)));
+        .when(!!tag, (e) => e.child(div().flex_none().text_size(10).text_color(tag === "reviewed" ? t.dim : t.ansi3).child(tag))));
     };
-    const done = this.committed ?? [];
+    const rows = this.changeRows();
     const adds = this.files.reduce((n, f) => n + (f.add ?? 0), 0), dels = this.files.reduce((n, f) => n + (f.del ?? 0), 0);
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
@@ -1857,10 +1992,17 @@ export default class Review extends View {
         .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`))
         .when(adds + dels > 0, (e) => e.child(h_flex().flex_none().gap(4).text_size(11)
           .child(div().text_color(t.ansi2).child(`+${adds}`)).child(div().text_color(t.ansi1).child(`−${dels}`)))))
-      .child(v_flex().id("chg-list").flex_1().min_h(0).p(4).overflow_y_scrollbar().children(this.files.map(row))
-        .when(done.length > 0, (e) => e.child(div().px(8).pt(10).pb(4).text_size(11).font_semibold().text_color(t.muted)
-          .child(`Committed on this branch · ${done.length} file${done.length === 1 ? "" : "s"}${done.some((f) => f.ai) ? ` · ${done.filter((f) => f.ai).length} by AI` : ""}`))
-          .children(done.map(row))))
+      // A virtual list (rows of known heights): its rows can't hold handlers, so the pointer's x is
+      // kept from the area around it and a click (clickChange) tells the checkbox from the row by it.
+      .child(div().id("chg-list").flex_1().min_h(0).pt(4).relative().overflow_hidden()
+        .on_size_change((size, cx) => { if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; cx.notify(); } })
+        .on_mouse_move((ev) => { this.chgX = ev.local_position?.x ?? null; })
+        .on_mouse_down("left", (ev) => { this.chgX = ev.local_position?.x ?? null; })
+        .when(rows.length > 0, (e) => e
+          .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => rows.slice(range.start, range.end).map(row))
+            .w_full().h(Math.max(FILE_H, (this.chgH ?? 300) - 4)).track_scroll(this.chgScroll)
+            .on_item_click((key, cx) => this.clickChange(key, cx)))
+          .child(Scrollbar.vertical("chg-rows").viewport_from_layout().absolute().inset_0())))
       .child(v_flex().flex_none().p(8).gap(6).border_t(1).border_color(t.border)
         .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.repos().filter((s) => this.files.some((f) => f.store === s)).map((s) =>
           div().id(`repo-${s.root}`).h(22).px(8).flex().items_center().rounded(5).text_size(11).cursor_pointer()
@@ -2710,8 +2852,10 @@ export default class Review extends View {
   stepFile(by, cx) {
     const vis = this.visible().filter((f) => !f.error);
     if (!vis.length) return;
-    const at = vis.findIndex((f) => f.key === this.sel);
-    this.pick(vis[(at + by + vis.length) % vis.length].key, cx);
+    const at = vis.findIndex((f) => f.key === this.sel), key = vis[(at + by + vis.length) % vis.length].key;
+    this.pick(key, cx);
+    // Changes: the list follows the keyboard.
+    if (this.mode === "changes") { const i = this.changeRows().findIndex((r) => r.key === key); if (i >= 0) this.chgScroll.scroll_to_item(i); }
   }
 
   pick(key, cx) {
@@ -2723,7 +2867,7 @@ export default class Review extends View {
       this.cur = this.anchor = null; this.hx = 0;
     }
     this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); cx.notify();
-    if (this.mode === "changes") this.loadCommitted(this.file(), cx); // a committed file's texts load when it's first picked
+    if (this.mode === "changes") { const f = this.file(); if (f) f.usedAt = Date.now(); this.loadRow(f, cx); } // a row's texts load when it's picked
   }
 
   // ---- actions -------------------------------------------------------------
@@ -4426,7 +4570,7 @@ export default class Review extends View {
     const tag = (x) => x.created ? "new" : x.Ctext === null ? "deleted" : `${x.hunks.length}`;
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;
     this.bm = f ? this.bracketPair(f) : null; // D2: read by row()
-    const picked = this.files.find((x) => x.key === this.sel); // an error tab shows its error
+    const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine();
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
