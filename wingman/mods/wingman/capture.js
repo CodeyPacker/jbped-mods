@@ -3,6 +3,7 @@
 // their snapshot content as the baseline. Uses only git and Herdr's file APIs.
 import { exec, readTextFile, writeTextFile, appHome } from "herdr";
 import { git, inRepo, ownerOf, knownDistro } from "./git.js";
+import { parkStale } from "./store.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 
@@ -66,13 +67,15 @@ export class Capture {
    * keep their baseline, so the review stays a net diff. Returns how many were added.
    * `by`: the terminal to credit (the one Claude working in the space), or null.
    */
-  async adopt(base, now, by = null) {
+  async adopt(base, now, by = null, space = null) {
     const changes = await this.changed(base, now);
     if (!changes.length) return 0;
     const indexPath = `${this.store.dir}/index.json`, before = await readTextFile(indexPath);
     const index = before ? JSON.parse(before) : { version: 1, files: {} };
-    let added = 0;
+    const branch = await this.store.branch(), head = await this.store.head();
+    let added = 0, parked = false;
     for (const { status, path } of changes) {
+      if (parkStale(index, path, branch)) parked = true;
       if (index.files[path]) continue;
       const created = status === "A";
       // Binary files (a NUL byte, as git decides) aren't reviewed, before or after the change.
@@ -92,10 +95,10 @@ export class Capture {
       }
       const name = `b${Date.now().toString(36)}-${added}.txt`;
       await writeTextFile(`${this.store.dir}/baselines/${name}`, text, null);
-      index.files[path] = by ? { baseline: name, created, by } : { baseline: name, created };
+      index.files[path] = { baseline: name, created, ...(by ? { by } : {}), branch, head, ...(space ? { space } : {}) };
       added++;
     }
-    if (added) await writeTextFile(indexPath, JSON.stringify(index, null, 2) + "\n", before);
+    if (added || parked) await writeTextFile(indexPath, JSON.stringify(index, null, 2) + "\n", before);
     return added;
   }
 }

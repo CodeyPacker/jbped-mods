@@ -4,8 +4,8 @@
 // The first edit of a file sets its baseline from Claude's own `originalFile`, which is
 // exactly what was on disk before the edit. Files outside any git repo are skipped.
 import * as fs from "fs/promises";
-import { readTextFile, writeTextFile, appHome, terminals } from "herdr";
-import { Store, ensureDir } from "./store.js";
+import { readTextFile, writeTextFile, appHome, terminals, agents } from "herdr";
+import { Store, ensureDir, parkStale } from "./store.js";
 import { hostPath } from "./capture.js";
 
 export const reviewDir = () => `${appHome()}/data/wingman`;
@@ -94,6 +94,8 @@ export class Journal {
 
     const indexPath = `${store.dir}/index.json`, before = await readTextFile(indexPath);
     const index = before ? JSON.parse(before) : { version: 1, files: {} };
+    const branch = await store.branch();
+    parkStale(index, rel, branch); // an entry from another branch steps aside for this one
     if (index.files[rel]) {
       if (!index.files[rel].by) {
         Object.assign(index.files[rel], { by: terminal, as: asSeen });
@@ -105,7 +107,8 @@ export class Journal {
     const name = `c${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.txt`;
     await writeTextFile(`${store.dir}/baselines/${name}`, original, null);
     // `as`: the path as Claude wrote it (/mnt/c/... in WSL), so feedback names the file its way.
-    index.files[rel] = { baseline: name, created, by: terminal, as: asSeen };
+    const space = agents().find((a) => a.address === terminal)?.space ?? null;
+    index.files[rel] = { baseline: name, created, by: terminal, as: asSeen, branch, head: await store.head(), ...(space ? { space } : {}) };
     await writeTextFile(indexPath, JSON.stringify(index, null, 2) + "\n", before);
     this.log(`claude ${terminal}: ${store.root} ${rel}${created ? " (new)" : ""}`);
     return { root: store.root, added: true };

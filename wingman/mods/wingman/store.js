@@ -36,6 +36,34 @@ export async function swap(path, before, after) {
   return { path, before, after };
 }
 
+const lf = (t) => (t == null ? null : t.replace(/\r\n/g, "\n"));
+
+/** The branch a HEAD file names ("ref: refs/heads/x" -> "x"), or "@<sha>" when detached. */
+export function branchOf(headText) {
+  const t = (headText ?? "").trim(), m = /^ref:\s*refs\/heads\/(.+)$/.exec(t);
+  return m ? m[1] : t ? `@${t.slice(0, 12)}` : null;
+}
+
+/**
+ * Whether a review entry shows in a space on a branch: entries recorded on another branch, or by
+ * an agent of another space, don't. Entries from before they were recorded (no branch, no space)
+ * take the current branch, and the space of the agent that made them when it's still known.
+ */
+export function shows(entry, branch, space, spaceOf = () => null) {
+  if (entry.branch && branch && entry.branch !== branch) return false;
+  const from = entry.space ?? spaceOf(entry.by);
+  return !(from && space && from !== space);
+}
+
+/** Moves an entry for `rel` recorded on another branch aside (index.parked), so `rel` can start a new one. */
+export function parkStale(index, rel, branch) {
+  const e = index.files[rel];
+  if (!e?.branch || e.branch === branch) return false;
+  (index.parked ??= {})[`${e.branch}|${rel}`] = e;
+  delete index.files[rel];
+  return true;
+}
+
 export class Store {
   static async open(root) {
     // Any folder inside the repo works: the store opens at the top level, where git's paths start.
@@ -64,6 +92,73 @@ export class Store {
     return rels;
   }
 
+  /** The repo's branch now, read from its HEAD file (no git run). */
+  async branch() { return branchOf(await readTextFile(`${this.gitDir}/HEAD`)); }
+
+  /** HEAD's commit, or null in a repo with no commits. */
+  async head() {
+    const r = await git(["rev-parse", "-q", "--verify", "HEAD"], { cwd: this.root });
+    return r.code === 0 ? r.stdout.trim() : null;
+  }
+
+  /** What a pane compares to notice review changes: the index and the branch. */
+  async stamp() {
+    const [i, h] = await Promise.all([readTextFile(`${this.dir}/index.json`), readTextFile(`${this.gitDir}/HEAD`)]);
+    return `${i}\0${h}`;
+  }
+
+  /** A file's text in a commit, or null when the commit doesn't have it. */
+  async blobAt(commit, rel) {
+    const r = await git(["cat-file", "blob", `${commit}:${rel}`], { cwd: this.root });
+    return r.code === 0 ? r.stdout : null;
+  }
+
+  /**
+   * Whether the agent's change to `rel` is committed: the file on disk is what HEAD has, and a
+   * commit since the entry was recorded changed it (before the entry recorded HEAD: HEAD differs
+   * from the baseline).
+   */
+  async committed(rel, e, head) {
+    const [c, h] = await Promise.all([readTextFile(`${this.root}/${rel}`), this.blobAt(head, rel)]);
+    if (lf(c) !== lf(h)) return false;
+    if (e.head) return e.head !== head && lf(await this.blobAt(e.head, rel)) !== lf(h);
+    const b = await readTextFile(`${this.dir}/baselines/${e.baseline}`);
+    return lf(e.created ? null : b ?? "") !== lf(h);
+  }
+
+  /**
+   * The capture leader's pass over the index: entries get their branch and space (old ones),
+   * entries of another branch are parked and come back when the repo is on it again, and
+   * committed changes leave the review for index.done (the Changes view marks them as AI's).
+   * Committed changes are looked for when HEAD moved since the last pass. Compare-and-swap:
+   * when someone else wrote the index first, the next pass tries again.
+   */
+  async reconcile(spaceOf = () => null) {
+    const path = `${this.dir}/index.json`, before = await readTextFile(path);
+    if (!before) return;
+    const index = JSON.parse(before), branch = await this.branch(), head = await this.head();
+    index.files ??= {};
+    let changed = false;
+    for (const [rel, e] of Object.entries(index.files)) {
+      if (!e.branch && branch) { e.branch = branch; changed = true; }
+      if (!e.space) { const sp = spaceOf(e.by); if (sp) { e.space = sp; changed = true; } }
+      if (parkStale(index, rel, branch)) changed = true;
+    }
+    for (const [k, e] of Object.entries(index.parked ?? {})) {
+      const rel = k.slice(e.branch.length + 1);
+      if (e.branch === branch && !index.files[rel]) { index.files[rel] = e; delete index.parked[k]; changed = true; }
+    }
+    if (head && head !== this.checkedHead) {
+      for (const [rel, e] of Object.entries(index.files)) {
+        if (!(await this.committed(rel, e, head))) continue;
+        (index.done ??= {})[`${branch}|${rel}`] = { by: e.by ?? null, space: e.space ?? null, created: !!e.created, head, at: Date.now() };
+        delete index.files[rel]; changed = true;
+      }
+    }
+    if (changed) await writeTextFile(path, JSON.stringify(index, null, 2) + "\n", before);
+    this.checkedHead = head;
+  }
+
   async index() {
     const text = await readTextFile(`${this.dir}/index.json`);
     return text ? JSON.parse(text).files ?? {} : {};
@@ -86,9 +181,11 @@ export class Store {
     return { rel, path, basePath, created: !!entry.created, by: entry.by ?? null, as: entry.as ?? null, store: this, key: `${this.root}|${rel}`, Btext, Ctext: c, B, C, hunks };
   }
 
-  async files() {
+  /** The review's files; `keep(entry)` picks which entries (default: all). */
+  async files(keep = () => true) {
     const index = await this.index(), out = [];
     for (const [rel, entry] of Object.entries(index)) {
+      if (!keep(entry)) continue;
       try { out.push(await this.load(rel, entry)); }
       catch (e) { out.push({ rel, store: this, key: `${this.root}|${rel}`, error: String(e.message ?? e), hunks: [] }); }
     }

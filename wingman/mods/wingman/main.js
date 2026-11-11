@@ -11,7 +11,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
 import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
-import { Store, norm } from "./store.js";
+import { Store, norm, shows } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { Capture, hostPath } from "./capture.js";
@@ -22,7 +22,7 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git } from "./git.js";
-import { READ, STATUS, parseStatus, statusLetter, reviewTag, discardCommands, commitCommands } from "./changes.js";
+import { READ, STATUS, MAX_FILES, parseStatus, statusLetter, reviewTag, discardCommands, commitCommands } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal } from "./keymap.js";
@@ -64,6 +64,9 @@ function agentFolders(space) {
     ?? terminals().find((t) => t.address === a.address)?.cwd)).filter(Boolean);
 }
 
+/** The space of the agent in terminal `by`, while it's still there. */
+const spaceOfAgent = (by) => (by && agents().find((a) => a.address === by)?.space) || null;
+
 /** Spaces that hold a Wingman pane. */
 function reviewSpaces() {
   const tabs = new Set(panes().filter((p) => p.mod === "wingman").map((p) => p.tab));
@@ -98,6 +101,12 @@ async function openFirst(folders) {
 const GOTO = "wingman.goto", DIRTY = "wingman.dirty", SAVE = "wingman.saveReq";
 const REVIEW = "wingman.review"; // Review's open change count per file key, for the Changes view
 const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's gone
+
+/** Whether the layout has a Wingman panel copy for `view`. */
+function hasView(view) {
+  const walk = (n) => !!n && ((n.content?.mod === "wingman" && n.content.props?.view === view) || (n.children ?? []).some(walk));
+  return walk(layout());
+}
 
 /** Shows the layout block of the Wingman copy for `view`: selects it in its stacks, shows hidden parents. */
 function showView(view) {
@@ -320,6 +329,14 @@ export default class Review extends View {
   async collectAll(cx) {
     if (!this.isLeader) return;
     await Promise.all([...this.captures.values()].map((c) => this.collect(c, cx)));
+    // Each repo's index once: branch parking and committed changes (store.reconcile).
+    const seen = new Set();
+    for (const c of this.captures.values()) {
+      const st = c.capture.store;
+      if (seen.has(st.root)) continue;
+      seen.add(st.root);
+      await st.reconcile(spaceOfAgent).catch((e) => log(`reconcile ${st.root}: ${e.message ?? e}`));
+    }
   }
 
   /**
@@ -335,7 +352,7 @@ export default class Review extends View {
       if (!st.tree) {
         if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now() }); log(`snapshot ${tree}`); }
       } else if (!starting) {
-        const added = await c.capture.adopt(st.tree, await c.capture.snapshot(), c.by);
+        const added = await c.capture.adopt(st.tree, await c.capture.snapshot(), c.by, c.space);
         if (added) log(`adopted ${added} files`);
         if (!c.active) await c.capture.setState({ tree: null });
       }
@@ -362,8 +379,10 @@ export default class Review extends View {
     try {
       const files = [], texts = {};
       for (const st of this.stores) {
-        texts[st.root] = await readTextFile(`${st.dir}/index.json`);
-        for (const f of await st.files()) files.push(await this.withTokens(f, cx));
+        // Only this branch's changes, made by this space's agents (store.shows).
+        const [stamp, branch] = await Promise.all([st.stamp(), st.branch()]);
+        texts[st.root] = stamp;
+        for (const f of await st.files((e) => shows(e, branch, this.spaceId, spaceOfAgent))) files.push(await this.withTokens(f, cx));
       }
       const kept = [];
       for (const nf of files) kept.push(await this.keepEdits(nf, cx));
@@ -455,7 +474,7 @@ export default class Review extends View {
       while (this.deferred.size && !this.writing) {
         const pending = this.deferred; this.deferred = new Set();
         let indexChanged = false;
-        for (const st of this.stores) if ((await readTextFile(`${st.dir}/index.json`)) !== this.indexTexts[st.root]) indexChanged = true;
+        for (const st of this.stores) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
         if (pending.has("*") || indexChanged) { await this.reloadAll(cx); continue; }
         for (const f of this.files) {
           if (f.error || !pending.has(norm(f.path))) continue;
@@ -490,7 +509,7 @@ export default class Review extends View {
   shown(f) { return f.hunks.length || (f.edited && f.key === this.sel) || this.dirty(f); }
   /** The tabs: changed files, plus in the Edit view the files opened from the tree. */
   visible() {
-    if (this.mode === "changes") return this.files;
+    if (this.mode === "changes") return [...this.files, ...(this.committed ?? [])];
     const changed = (f) => !f.plain && (f.error || this.shown(f));
     return this.files.filter((f) => changed(f) || (this.mode === "edit" && this.opened.includes(f.key)));
   }
@@ -959,13 +978,23 @@ export default class Review extends View {
     this.settle(); this.handle.focus(); cx.notify();
   }
 
+  /**
+   * ctrl-shift-r: Review → Edit → Changes → Review. A pane copy has no Changes view, so it
+   * flips Review and Edit; a panel copy skips Changes when the layout has no Changes block.
+   */
+  nextView() {
+    if (!this.view) return this.mode === "review" ? "edit" : "review";
+    const order = ["review", "edit", "changes"].filter((v) => v === this.view || hasView(v));
+    return order[(order.indexOf(this.view) + 1) % order.length];
+  }
+
   /** Panel split: shows the other view's copy and hands it the current file and line. */
   handOff(view, cx, at = null, key = null) {
     const f = key ? null : this.file();
     if (this.settings.autosave) this.saveAll(cx);
     at ??= f ? this.cur ?? (f.hunks[this.current] ? { line: f.hunks[this.current].n, col: 0 } : null) : null;
-    if (!showView(view)) { this.error = `This layout has no Wingman ${view === "edit" ? "Edit" : "Review"} panel`; cx.notify(); return; }
-    setShared(GOTO, { view, space: this.spaceId, key: key ?? f?.key ?? null, at, stamp: Date.now() });
+    if (!showView(view)) { this.error = `This layout has no Wingman ${view === "edit" ? "Edit" : view === "changes" ? "Changes" : "Review"} panel`; cx.notify(); return; }
+    setShared(GOTO, { view, space: this.spaceId, key: key ?? f?.openKey ?? f?.key ?? null, at, stamp: Date.now() });
   }
 
   /** Panel split: what the other copy handed over (GOTO) and save requests from Review (SAVE). */
@@ -1048,13 +1077,15 @@ export default class Review extends View {
     if (this.loadingChanges) return;
     this.loadingChanges = true;
     try {
-      const files = [], sig = [];
+      const files = [], committed = [], sig = [];
       for (const st of this.stores) {
-        const { out, head } = await this.statusOf(st);
-        sig.push(st.root, head, out);
-        for (const { rel, xy } of parseStatus(out)) files.push(await this.loadChange(st, rel, xy, !!head, cx));
+        const { out, head } = await this.statusOf(st), stamp = await st.stamp();
+        sig.push(st.root, head, out, stamp);
+        const { ai, done } = await this.aiMarks(st);
+        for (const { rel, xy } of parseStatus(out)) files.push({ ...(await this.loadChange(st, rel, xy, !!head, cx)), ai: ai.has(rel) });
+        if (head) committed.push(...(await this.loadCommitted(st, head, done, cx)));
       }
-      this.files = files; this.changeSig = sig.join("\0"); this.status = null;
+      this.files = files; this.committed = committed; this.changeSig = sig.join("\0"); this.status = null;
       if (this.discardKey && !files.some((f) => f.key === this.discardKey)) this.discardKey = null;
       this.settle(); cx.notify();
     } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
@@ -1073,6 +1104,52 @@ export default class Review extends View {
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
   }
 
+  /** Which files an agent of this space changed on this branch: `ai` (still in review), `done` (committed). */
+  async aiMarks(st) {
+    const [text, branch] = await Promise.all([readTextFile(`${st.dir}/index.json`), st.branch()]);
+    let index = {};
+    try { index = text ? JSON.parse(text) : {}; } catch {}
+    const mine = (e) => shows(e, branch, this.spaceId, spaceOfAgent), ai = new Set(), done = new Set();
+    for (const [rel, e] of Object.entries(index.files ?? {})) if (mine(e)) ai.add(rel);
+    for (const [k, e] of Object.entries(index.done ?? {})) if (k.startsWith(`${branch}|`) && mine({ ...e, branch })) done.add(k.slice(branch.length + 1));
+    return { ai, done };
+  }
+
+  /** Where this branch starts: its merge base with the remote's default branch (else main or master). */
+  async branchBase(st, head) {
+    const cached = (this.bases ??= new Map()).get(st.root);
+    if (cached?.head === head) return cached.base;
+    let base = null;
+    for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
+      const r = await this.git(st, [...READ, "merge-base", "HEAD", ref]);
+      if (r.code === 0 && r.stdout.trim() !== head) { base = r.stdout.trim(); break; }
+      if (r.code === 0) break; // HEAD is that branch's tip: nothing committed on top of it
+    }
+    this.bases.set(st.root, { head, base });
+    return base;
+  }
+
+  /** The files committed on this branch (its base against HEAD), read-only, with AI marks. */
+  async loadCommitted(st, head, done, cx) {
+    const base = await this.branchBase(st, head);
+    if (!base) return [];
+    const r = await this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, "HEAD"]);
+    if (r.code !== 0) return [];
+    const parts = r.stdout.split("\0").filter(Boolean), out = [];
+    for (let i = 0; i + 1 < parts.length && out.length < MAX_FILES; i += 2) {
+      const letter = parts[i][0] === "A" ? "A" : parts[i][0] === "D" ? "D" : "M", rel = parts[i + 1];
+      const f = { rel, path: `${st.root}/${rel}`, basePath: null, store: st, key: `${st.root}|${rel}#committed`, openKey: `${st.root}|${rel}`,
+        committed: true, letter, ai: done.has(rel), plain: false, created: letter === "A", by: null, as: null, hunks: [] };
+      try {
+        const [b, c] = await Promise.all([st.blobAt(base, rel), st.blobAt("HEAD", rel)]);
+        if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) { out.push({ ...f, error: "binary file" }); continue; }
+        const hunks = await diffHunks(b ?? "", c ?? "");
+        out.push(await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx));
+      } catch (e) { out.push({ ...f, error: String(e.message ?? e) }); }
+    }
+    return out;
+  }
+
   /** Every 2 s: reloads when git status or HEAD changed, or a listed file's text did. */
   async refreshChanges(cx) {
     // One check at a time: WSL git on a Windows drive takes over a second per status.
@@ -1080,7 +1157,7 @@ export default class Review extends View {
     this.refreshing = true;
     try {
       const sig = [];
-      for (const st of this.stores) { const { out, head } = await this.statusOf(st); sig.push(st.root, head, out); }
+      for (const st of this.stores) { const { out, head } = await this.statusOf(st); sig.push(st.root, head, out, await st.stamp()); }
       let stale = sig.join("\0") !== this.changeSig;
       for (const f of this.files) { if (stale) break; if (!f.error && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
       if (stale) await this.loadChanges(cx);
@@ -1144,23 +1221,29 @@ export default class Review extends View {
       .flex().items_center().justify_center().text_size(10).text_color(t.background).child(on ? "✓" : "");
     const letterColor = { A: t.ansi2, D: t.ansi1, "!": t.ansi3, M: t.ansi4 };
     const row = (f) => {
-      const cut = f.rel.lastIndexOf("/") + 1, tag = reviewTag(f.key, review), on = !this.unchecked.has(f.key);
+      const cut = f.rel.lastIndexOf("/") + 1, tag = f.committed ? null : reviewTag(f.key, review), on = !this.unchecked.has(f.key);
       return h_flex().id(`chg-${f.key}`).h(26).flex_none().px(8).gap(6).items_center().rounded(5).cursor_pointer()
         .when(f.key === this.sel, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
         .on_click((_e, cx) => { if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; cx.notify(); } })
-        .child(div().id(`chk-${f.key}`).on_click((_e, cx) => { cx.stop_propagation(); if (on) this.unchecked.add(f.key); else this.unchecked.delete(f.key); cx.notify(); }).child(box(on)))
+        .when(!f.committed, (e) => e.child(div().id(`chk-${f.key}`).on_click((_e, cx) => { cx.stop_propagation(); if (on) this.unchecked.add(f.key); else this.unchecked.delete(f.key); cx.notify(); }).child(box(on))))
+        .when(!!f.committed, (e) => e.child(div().w(14).flex_none()))
         .child(div().w(12).flex_none().text_size(11).font_semibold().text_color(letterColor[f.letter] ?? t.muted).child(f.letter))
         .child(h_flex().flex_1().min_w(0).gap(6).items_center()
           .child(div().flex_none().text_size(12.5).when(!!f.error, (e) => e.text_color(t.dim)).child(f.rel.slice(cut)))
           .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child((multi ? base(f.store.root) + (cut ? "/" : "") : "") + f.rel.slice(0, Math.max(0, cut - 1)))))
+        .when(!!f.ai, (e) => e.child(div().flex_none().px(4).rounded(3).bg(t.accent + "33").text_size(9.5).text_color(t.accent).child("AI")))
         .when(!!tag, (e) => e.child(div().flex_none().text_size(10).text_color(tag === "reviewed" ? t.dim : t.ansi3).child(tag)));
     };
+    const done = this.committed ?? [];
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
       .child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); cx.notify(); }).child(box(all)))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`)))
-      .child(v_flex().id("chg-list").flex_1().min_h(0).p(4).overflow_y_scrollbar().children(this.files.map(row)))
+      .child(v_flex().id("chg-list").flex_1().min_h(0).p(4).overflow_y_scrollbar().children(this.files.map(row))
+        .when(done.length > 0, (e) => e.child(div().px(8).pt(10).pb(4).text_size(11).font_semibold().text_color(t.muted)
+          .child(`Committed on this branch · ${done.length} file${done.length === 1 ? "" : "s"}${done.some((f) => f.ai) ? ` · ${done.filter((f) => f.ai).length} by AI` : ""}`))
+          .children(done.map(row))))
       .child(v_flex().flex_none().p(8).gap(6).border_t(1).border_color(t.border)
         .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.stores.filter((s) => this.files.some((f) => f.store === s)).map((s) =>
           div().id(`repo-${s.root}`).h(22).px(8).flex().items_center().rounded(5).text_size(11).cursor_pointer()
@@ -2212,7 +2295,7 @@ export default class Review extends View {
       nextChange: () => this.step(1, cx), prevChange: () => this.step(-1, cx),
       comment: () => this.askPrompt(this.current, cx), reason: () => this.askReason(cx),
       nextFile: () => this.stepFile(1, cx), prevFile: () => this.stepFile(-1, cx),
-      quickOpen: () => this.openQuick(cx), toggleView: () => this.setMode(this.mode === "review" ? "edit" : "review", cx),
+      quickOpen: () => this.openQuick(cx), toggleView: () => this.setMode(this.nextView(), cx),
       toggleTree: () => this.toggleTree(cx), openInVSCode: () => this.toVSCode(cx), toggleWrap: () => this.toggleWrap(cx),
       openInNvim: () => { if (f) this.toNvim(f, this.cur?.line ?? f.hunks[this.current]?.n ?? 0, cx); },
       save: () => this.save(cx), undo: () => this.undo(cx), redo: () => this.redoEdit(cx),
@@ -2643,7 +2726,7 @@ export default class Review extends View {
         .when(!!f && this.nvim(), (e) => e.child(this.button("nvim", `Neovim  ${this.kl("openInNvim")}`, t.raised, (cx) => this.toNvim(f, f.hunks[this.current]?.n ?? 0, cx)).flex_none().whitespace_nowrap()))
         .when(this.dirty(f), (e) => e.child(this.button("save", `Save  ${this.kl("save")}`, t.accent + "55", (cx) => this.save(cx)).flex_none().whitespace_nowrap()))
         // Only a file with the agent's changes (an opened file's own edits aren't the agent's).
-        .when(this.mode === "changes" && !!f, (e) => this.discardKey === f.key
+        .when(this.mode === "changes" && !!f && !f.committed, (e) => this.discardKey === f.key
           ? e.child(this.button("discard-yes", "Discard all changes to this file", t.ansi1 + "88", (cx) => this.discard(f, cx)).flex_none().whitespace_nowrap())
             .child(this.button("discard-no", "Cancel", t.raised, (cx) => { this.discardKey = null; cx.notify(); }).flex_none())
           : e.child(this.button("discard", "Discard file", t.ansi1 + "40", (cx) => { this.discardKey = f.key; cx.notify(); }).flex_none().whitespace_nowrap()))

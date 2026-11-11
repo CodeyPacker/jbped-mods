@@ -11,6 +11,13 @@ When you reject a change, the agent that made it gets a short factual note on it
 
 Syntax highlighting (Prism 1.30, MIT, vendored in `prism.js` and `grammars.js`) covers JavaScript, TypeScript (`.ts .mts .cts .d.ts`), React (`.jsx .tsx`, and JSX in `.js`), Vue (`.vue`), Angular (`.ts` and `.html` templates with `{{ }}`), HTML, C#, JSON, Markdown, Dockerfiles, YAML (including `docker-compose.yml`) and `.env` files. CSS (`.css`) and SCSS (`.scss`) are covered too. In HTML and Vue files, `<script>` blocks use the grammar their `lang` names and `<style>` blocks use CSS or SCSS. Vue and Angular template syntax is recognized: `v-if`, `v-for`, `:prop`, `@event`, `#slot`, `[prop]`, `(event)`, `[(ngModel)]`, `*ngFor`, `#ref`, `@if`/`@for`/`@switch`/`@defer` blocks and `{{ }}`, with the expressions inside highlighted as JavaScript. Other files show as plain text.
 
+Review shows only what belongs to this space and branch:
+- **Branch:** each change records the branch it was made on. Switching branches sets it aside, and it comes back when you switch back. A worktree has its own review anyway.
+- **Space:** only changes made by the space's own agents show. A repo shared with another space doesn't bring that space's changes along.
+- **Committed:** once a change is committed (the file on disk is what `HEAD` has, and a commit since changed it), it leaves Review and shows in Changes under "Committed on this branch", marked AI.
+
+Changes recorded before Wingman kept branches take the branch the repo is on, and the space of the agent that made them while it's still open.
+
 Each repo's review lives in `<git-dir>/wingman/`. Git never tracks or pushes that folder. Files outside any git repo are not reviewed.
 
 ### Workspaces: several repos in one space
@@ -87,9 +94,10 @@ Every uncommitted change in the space's repos, against `HEAD`: your edits, other
 - **Commit**: check the files to commit (all by default), write a message (several lines are fine), then **Commit** or Ctrl+Enter. Only the checked files are committed: they're staged, new and deleted ones too, and anything else you had staged stays staged. With several repos in the space, pick the repo above the message box. A warning shows when checked files still have changes to review in Review; it doesn't stop the commit.
 - Files with unsaved edits in Edit can't be discarded or committed until those are saved or discarded.
 - Up to 500 files are listed; binary files are listed but not shown.
+- **Committed on this branch**, under the uncommitted files: every file changed between where the branch split from the remote's default branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`) and `HEAD`, as a read-only diff. Files an agent of this space changed carry an **AI** mark, here and in the uncommitted list.
 
 
-- Review is read-only. Accept and Reject still write to disk. `ctrl-shift-r`, a double-click on a line, and Quick Open of an unchanged file all switch to the Edit tab at that file and line. Switching from Edit goes back to Review at the change nearest the cursor.
+- Review is read-only. Accept and Reject still write to disk. `ctrl-shift-r`, a double-click on a line, and Quick Open of an unchanged file all switch to the Edit tab at that file and line. In the side panel, `ctrl-shift-r` cycles Review → Edit → Changes → Review, handing over the current file each time.
 - Edit holds any unsaved edits. Before Review accepts or rejects in a file that has unsaved edits in Edit, those edits are saved (autosave on: try again a moment later), or, with autosave off, you're asked to save or discard them in Edit first.
 
 Wingman finds a space's repos from the folders its agents started in and from the files the Claude hook sees them edit. When it finds none, for example for a WSL agent started from a Windows folder, click **Open folder…** and pick a folder in the repo. The Edit view's file tree has the same button for adding more repos. Added repos are remembered for the space, and capture covers them too.
@@ -101,7 +109,7 @@ Wingman finds a space's repos from the folders its agents started in and from th
 | Next / previous change | `ctrl-down` / `ctrl-up` |
 | Next / previous file | `ctrl-shift-down` / `ctrl-shift-up` |
 | Undo last accept/reject | `ctrl-z` |
-| Review / Edit view | `ctrl-shift-r` |
+| Next view: Review → Edit → Changes (side panel), Review ↔ Edit (pane) | `ctrl-shift-r` |
 | Open the file in your external editor | `ctrl-e` (or the editor's button at the far right), at the cursor or the current change; unsaved edits are saved first. Pick the editor in Settings. |
 | File tree (Edit view) | `ctrl-b` |
 | Select lines | click a line, or click and drag; Shift+click or `shift-up` / `shift-down` to extend; click inside the selection or `escape` to clear. |
