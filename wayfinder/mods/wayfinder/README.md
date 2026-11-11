@@ -73,6 +73,7 @@ Refresh reloads the lists. A change that would make the file invalid is refused 
 ```
 
 - `runner`: where commands run. `native`, or `wsl:<distro>` (the default on Windows, `wsl:Ubuntu`).
+- An Azure Account that `az login` can't reach (an organization on a personal Microsoft account) can use a PAT instead: set `"patEnv": "AZURE_DEVOPS_PAT"` on the Account and export that variable in the runner's `~/.profile`. Wayfinder reads it through a login shell on each refresh and sends it only as a request header. It never stores it. Images in such an Account's Tickets show as links.
 - A GitHub account's `login` is a user signed in with `gh` (`gh auth status` lists them).
 - A GitHub Board's `ref` is the project's owner and number (from its URL, `github.com/users/<owner>/projects/<number>` or `orgs/<owner>/...`). Its Columns are the `Status` field's options, and every item shows (view filters don't apply). Optional: `statusField` and `priorityField` to use other single-select fields, and a Board `name`. Private and org projects may need `gh auth refresh -h github.com -s read:project`.
 - Any Board can set `trackedStatuses`, an ordered list of states (Azure `State`, GitHub `Status` values). Each becomes one Column in that order, so two states that share a web-board column show apart, and Tickets in other states are hidden. Case doesn't matter. Leave it out to use the Provider's own columns.

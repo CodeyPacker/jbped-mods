@@ -1,5 +1,5 @@
 // Loads and checks wayfinder.json. Pure: no Herdr imports, so it runs under node for tests.
-import { validOrg } from "./providers/azure.js";
+import { validOrg, ENV_NAME } from "./providers/azure.js";
 import { templateErrors } from "./launch.js";
 
 export const PROVIDERS = ["github", "azure"];
@@ -60,6 +60,7 @@ function checkProfile(name, p, platform, errors) {
     if (a.provider === "azure") {
       if (!validOrg(a.org)) errors.push(`${where}.org: the organization URL, e.g. https://dev.azure.com/<org>`);
       if (a.projects != null && (!Array.isArray(a.projects) || !a.projects.every(isStr))) errors.push(`${where}.projects: a list of project names`);
+      if (a.patEnv != null && !(isStr(a.patEnv) && ENV_NAME.test(a.patEnv))) errors.push(`${where}.patEnv: the name of an environment variable holding a PAT, e.g. "AZURE_DEVOPS_PAT"`);
     }
     if (a.prRepos != null) {
       const f = a.prRepos, names = (v) => v == null || (Array.isArray(v) && v.every((r) => isStr(r) && r.includes("/")));

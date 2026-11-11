@@ -57,7 +57,44 @@ const seg = (s) => encodeURIComponent(s);
 
 const firstLine = (r) => (r.stderr || r.stdout).trim().split("\n")[0];
 
+// A PAT fallback (#19) for organizations az can't sign in to: the name of an environment variable the
+// runner's login shell sets. The PAT is read each time and only ever goes in a header (ADR 0002).
+export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+const PRINTENV_SH = 'printenv "$1"';
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+export function base64(text) {
+  const bytes = [];
+  for (const ch of String(text)) { // UTF-8
+    const c = ch.codePointAt(0);
+    if (c < 0x80) bytes.push(c);
+    else if (c < 0x800) bytes.push(0xc0 | (c >> 6), 0x80 | (c & 63));
+    else if (c < 0x10000) bytes.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+    else bytes.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 63), 0x80 | ((c >> 6) & 63), 0x80 | (c & 63));
+  }
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 3) {
+    const [a, b = 0, c = 0] = bytes.slice(i, i + 3), n = (a << 16) | (b << 8) | c;
+    out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + (i + 1 < bytes.length ? B64[(n >> 6) & 63] : "=") + (i + 2 < bytes.length ? B64[n & 63] : "=");
+  }
+  return out;
+}
+
+async function patFrom(account, io) {
+  if (!ENV_NAME.test(account.patEnv)) throw new Error(`patEnv "${account.patEnv}" isn't an environment variable name`);
+  const r = await io.run("bash", ["-lc", PRINTENV_SH, "wayfinder-env", account.patEnv], { timeout: 15000 });
+  const pat = r.stdout.trim();
+  if (r.code === 127) throw new Error(`The runner can't start bash: ${firstLine(r)}`);
+  if (r.code !== 0 || !pat) throw new Error(`${account.patEnv} isn't set in the runner's login shell. Export it in ~/.profile.`);
+  return pat;
+}
+
+// The Authorization header: the PAT when the Account names one, else a fresh az token (R3).
 async function token(account, io) {
+  if (account.patEnv) return `Basic ${base64(`:${await patFrom(account, io)}`)}`;
+  return `Bearer ${await azToken(account, io)}`;
+}
+
+async function azToken(account, io) {
   const r = await az(io, ["account", "get-access-token", "--resource", RESOURCE, "--query", "accessToken", "-o", "tsv"]);
   const t = r.stdout.trim();
   if (r.code === 127) throw new Error(`az isn't reachable through the runner: ${firstLine(r)}`);
@@ -70,7 +107,7 @@ async function rest(org, tok, io, path, body, version = API_VERSION) {
   const url = `${org}/${path}${path.includes("?") ? "&" : "?"}api-version=${version}`;
   const res = await io.fetch(url, {
     method: body ? "POST" : "GET",
-    headers: { Authorization: `Bearer ${tok}`, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    headers: { Authorization: tok, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   const text = await res.text();
@@ -85,7 +122,7 @@ async function rest(org, tok, io, path, body, version = API_VERSION) {
 async function patchItem(org, tok, io, id, ops) {
   const res = await io.fetch(`${org}/_apis/wit/workitems/${id}?api-version=${API_VERSION}`, {
     method: "PATCH",
-    headers: { Authorization: `Bearer ${tok}`, Accept: "application/json", "Content-Type": "application/json-patch+json" },
+    headers: { Authorization: tok, Accept: "application/json", "Content-Type": "application/json-patch+json" },
     body: JSON.stringify(ops),
   });
   const text = await res.text();
@@ -279,6 +316,7 @@ export const azure = {
   // Saves an attachment image (an imageName URL) to `path`. A file already there is kept.
   async downloadImage(account, url, path, io) {
     if (!imageName(account, url)) throw new Error("Not an attachment of this organization");
+    if (account.patEnv) throw new Error("Images need an az login: a PAT Account shows them as links");
     const full = `${url}${url.includes("?") ? "&" : "?"}api-version=${API_VERSION}`;
     // AZ_SH sets the Profile's az folder, then runs DL_SH (not az itself) with it.
     const r = await io.run("sh", ["-c", AZ_SH, "wayfinder-az", azDir(io.profile), "sh", "-c", DL_SH, "wayfinder-dl", full, path, RESOURCE], { timeout: 60000 });
@@ -357,7 +395,10 @@ export const azure = {
     if (r.code !== 0) throw new Error(`Couldn't move the az login: ${firstLine(r)}`);
   },
 
-  async signInState(_account, io) {
+  async signInState(account, io) {
+    if (account.patEnv) {
+      try { await patFrom(account, io); return { ok: true }; } catch (e) { return { ok: false, reason: String(e.message ?? e), command: null }; }
+    }
     const r = await az(io, ["account", "get-access-token", "--resource", RESOURCE, "--query", "expiresOn", "-o", "tsv"]);
     if (r.code === 0) return { ok: true };
     if (r.code === 127) return { ok: false, reason: `az isn't reachable through the runner: ${firstLine(r)}`, command: null };
