@@ -21,7 +21,7 @@ const COLUMN_W = 280, PANEL_W = 460;
 const IMAGE_DIR = "data/wayfinder-images"; // under Herdr's home: image() reads from there
 const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
 const WANT_FULL_KEY = "wayfinder.wantFullscreen"; // the last fullscreen choice, kept across Close
-const SITE = { github: "GitHub", azure: "Azure" }; // for the Board's "View in …" link
+const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for the Board's "View in …" link
 
 function findNode(node, id) {
   if (node?.id === id) return node;
@@ -674,7 +674,7 @@ export default class Wayfinder extends View {
     const heading = (text) => div().pt(8).text_size(13).font_semibold().text_color(t.foreground).child(text);
     const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
     const card = (id, kids) => v_flex().id(id).p(12).gap(6).rounded(8).bg(t.surface).border_1().border_color(t.border).children(kids);
-    const who = (a) => `${a.id} · ${a.provider === "azure" ? a.org : a.login}`;
+    const who = (a) => `${a.id} · ${a.provider === "azure" ? a.org : a.provider === "clickup" ? `ClickUp (token from ${a.tokenEnv ?? "CLICKUP_API_TOKEN"})` : a.login}`;
     const line = () => div().h(1).my(4).bg(t.border);
     // A clickable row that folds what follows it. Returns [row, folded].
     const fold = (id, a, part, label, color = t.muted) => {
@@ -719,7 +719,7 @@ export default class Wayfinder extends View {
     if (!p) return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);
 
     // Accounts
-    out.push(heading(`Accounts in ${p.name}`), note("Wayfinder signs in through the gh and az CLIs and stores no secrets."));
+    out.push(heading(`Accounts in ${p.name}`), note("Wayfinder signs in through the gh and az CLIs, or a token it reads from an environment variable, and stores no secrets."));
     out.push(card("wf-set-accounts", [
       ...(p.accounts.length ? [] : [note("No accounts yet.")]),
       ...p.accounts.flatMap((a) => {
@@ -742,6 +742,12 @@ export default class Wayfinder extends View {
           this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "azure", org: this.inputs.ado.value().trim() }), cx);
           this.inputs.ado.set_value(""); this.ensureInputs(); this.checkSignIn(cx); this.loadSettings(cx);
         })),
+      h_flex().gap(8).items_center()
+        .child(button("wf-add-cu", "Add ClickUp account", t, (cx) => {
+          this.saveConfig((raw) => edits.addAccount(raw, p.name, { provider: "clickup" }), cx);
+          this.ensureInputs(); this.checkSignIn(cx); this.loadSettings(cx);
+        }))
+        .child(note("Reads a personal token from CLICKUP_API_TOKEN in the runner's ~/.profile.")),
     ]));
 
     // Boards: one card per Account. Its followed Boards first, a line, then the others (foldable, searchable).

@@ -2,7 +2,7 @@
 import { validOrg, ENV_NAME } from "./providers/azure.js";
 import { templateErrors } from "./launch.js";
 
-export const PROVIDERS = ["github", "azure"];
+export const PROVIDERS = ["github", "azure", "clickup"];
 // Wayfinder never stores secrets (ADR 0002). A field with one of these names is an error.
 const SECRET_KEY = /^(token|pat|password|secret|access_?token|api_?key)$/i;
 
@@ -62,6 +62,9 @@ function checkProfile(name, p, platform, errors) {
       if (a.projects != null && (!Array.isArray(a.projects) || !a.projects.every(isStr))) errors.push(`${where}.projects: a list of project names`);
       if (a.patEnv != null && !(isStr(a.patEnv) && ENV_NAME.test(a.patEnv))) errors.push(`${where}.patEnv: the name of an environment variable holding a PAT, e.g. "AZURE_DEVOPS_PAT"`);
     }
+    if (a.provider === "clickup" && a.tokenEnv != null && !(isStr(a.tokenEnv) && ENV_NAME.test(a.tokenEnv))) {
+      errors.push(`${where}.tokenEnv: the name of an environment variable holding a ClickUp token (default CLICKUP_API_TOKEN)`);
+    }
     if (a.prRepos != null) {
       const f = a.prRepos, names = (v) => v == null || (Array.isArray(v) && v.every((r) => isStr(r) && r.includes("/")));
       if (!isObj(f) || (f.mode != null && !["all", "selected", "ignored"].includes(f.mode)) || !names(f.selected) || !names(f.ignored)) {
@@ -82,6 +85,8 @@ function checkProfile(name, p, platform, errors) {
     if (!isObj(b.ref)) errors.push(`${where}.ref: must be an object`);
     else if (accounts.find((a) => a?.id === b.account)?.provider === "azure" && !(isStr(b.ref.project) && isStr(b.ref.team))) {
       errors.push(`${where}.ref: an Azure Board needs "project" and "team" (and optionally "board")`);
+    } else if (accounts.find((a) => a?.id === b.account)?.provider === "clickup" && !isStr(b.ref.list)) {
+      errors.push(`${where}.ref: a ClickUp Board needs "list" (the List's id)`);
     }
     for (const r of b.repos ?? []) if (!repoIds.has(r)) errors.push(`${where}.repos: no repo "${r}" in this profile`);
     if (b.trackedStatuses != null && (!Array.isArray(b.trackedStatuses) || !b.trackedStatuses.every(isStr))) {

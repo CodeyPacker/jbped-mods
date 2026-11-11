@@ -19,6 +19,7 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 export function showsBoard(cfg, accountId, found, firstOfTeam = false) {
   if (cfg.account !== accountId) return false;
   const a = cfg.ref ?? {}, b = found.ref;
+  if ("list" in b) return String(a.list) === String(b.list);
   if ("team" in b) {
     return a.project === b.project && a.team === b.team && (a.board == null ? firstOfTeam : a.board === b.board);
   }
@@ -128,16 +129,28 @@ export function removeProfile(raw, name) {
 }
 
 export function accountId(provider, name, taken) {
+  if (provider === "clickup") {
+    let id = "cu";
+    for (let n = 2; taken.has(id); n++) id = `cu-${n}`;
+    return id;
+  }
   const base = `${provider === "azure" ? "ado" : "gh"}-${String(name).toLowerCase().replace(/^https:\/\/(dev\.azure\.com\/)?/, "").replace(/\.visualstudio\.com.*$/, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")}`;
   let id = base;
   for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
   return id;
 }
 
-// account: { provider: "github", login } or { provider: "azure", org }. Checking it is parseConfig's job.
+// account: { provider: "github", login }, { provider: "azure", org } or { provider: "clickup" }.
+// Checking it is parseConfig's job.
 export function addAccount(raw, profileName, account) {
   return edit(raw, profileName, (p) => {
     p.accounts ??= [];
+    if (account.provider === "clickup") {
+      // One token per variable: a second ClickUp Account needs its own tokenEnv, set in the file.
+      if (p.accounts.some((a) => a.provider === "clickup" && !a.tokenEnv)) throw new Error("This profile has a ClickUp account already");
+      p.accounts.push({ id: accountId("clickup", "", new Set(p.accounts.map((a) => a.id))), provider: "clickup" });
+      return;
+    }
     const key = account.provider === "azure" ? "org" : "login";
     const value = String(account[key] ?? "").trim().replace(/\/+$/, "");
     if (!value) throw new Error(account.provider === "azure" ? "Enter the organization URL" : "Enter the GitHub user name");
