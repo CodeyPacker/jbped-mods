@@ -92,6 +92,15 @@ test("Accounts add with an id from their name, no duplicates, and removing one d
   assert.deepEqual([gone.accounts.map((a) => a.id), gone.boards], [["gh"], []]);
 });
 
+test("a second ClickUp Account on the default token is refused, even when the first names it", () => {
+  const p = (accounts) => ({ profiles: { p: { accounts } } });
+  const named = p([{ id: "clickup", provider: "clickup", tokenEnv: "CLICKUP_API_TOKEN" }]);
+  assert.throws(() => e.addAccount(named, "p", { provider: "clickup" }), /already/);
+  assert.throws(() => e.addAccount(p([{ id: "clickup", provider: "clickup" }]), "p", { provider: "clickup", tokenEnv: "CLICKUP_API_TOKEN" }), /already/);
+  const other = e.addAccount(p([{ id: "clickup", provider: "clickup", tokenEnv: "WORK_TOKEN" }]), "p", { provider: "clickup" });
+  assert.deepEqual(other.profiles.p.accounts.map((a) => a.tokenEnv), ["WORK_TOKEN", undefined]);
+});
+
 test("the repo filter keeps an Account's PRs: all, only selected, all but ignored", async () => {
   const pr = (repo) => ({ repo });
   const registry = { x: { capabilities: ["pullRequests"], pullRequests: async () => ({ me: "m", mine: [pr("o/a"), pr("o/b")], needsReview: [pr("o/b")], more: { mine: 0, needsReview: 0 } }) } };

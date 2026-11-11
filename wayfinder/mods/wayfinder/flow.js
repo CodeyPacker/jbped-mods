@@ -120,15 +120,17 @@ const script = async (io, text, name, args, timeout = 300000) => {
   return r.stdout;
 };
 
-// The repo names under ~/.herdr/worktrees/<folder> that already have a worktree.
-export async function existingWorktrees(folder, names, io) {
+// The repo names that already have a worktree, under the Ticket's existing folder (found by prefix) or
+// ~/.herdr/worktrees/<folder>.
+export async function existingWorktrees(prefix, folder, names, io) {
   if (!names.length) return [];
-  return (await script(io, EXISTS_SH, "wayfinder-exists", [folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  return (await script(io, EXISTS_SH, "wayfinder-exists", [prefix, folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
 
-// repos: [{ path, name }]. Returns { space, path, made, reused }.
-export async function makeLaunchWorktrees(folder, branch, repos, io) {
-  return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [folder, branch, ...repos.flatMap((r) => [r.path, r.name])]));
+// repos: [{ path, name }]. Reuses the Ticket's existing folder (by prefix), else makes `folder`; the branch
+// is the folder's name. Returns { space, path, branch, made, reused }.
+export async function makeLaunchWorktrees(prefix, folder, repos, io) {
+  return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [prefix, folder, ...repos.flatMap((r) => [r.path, r.name])]));
 }
 
 export async function makeReviewWorktree(folder, repo, branch, io) {
@@ -164,7 +166,7 @@ export async function commentOnTicket(profile, boardCfg, ticket, text, io, regis
   return provider.comment(account, ticket.ref, text, io);
 }
 
-// Deletes saved images not used for `days` (their files' time is when they were saved). Only image
+// Deletes images saved over 30 days ago (`days`; their files' time is when they were saved). Only image
 // files directly in that folder. A Windows path is converted for a WSL runner.
 export const PRUNE_SH = 'd="$1"; case "$d" in [A-Za-z]:*) d=$(wslpath -u "$d") || exit 0;; esac; [ -d "$d" ] || exit 0; find "$d" -maxdepth 1 -type f \\( -name "*.png" -o -name "*.jpg" -o -name "*.jpeg" -o -name "*.gif" -o -name "*.webp" -o -name "*.bmp" -o -name "*.part" \\) -mtime +"$2" -delete';
 export async function pruneImages(dir, io, days = 30) {

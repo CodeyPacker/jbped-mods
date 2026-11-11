@@ -13,6 +13,15 @@ test("imageName: only this organization's image attachments", () => {
   assert.equal(imageName(account, `https://dev.azure.com/other/p1/_apis/wit/attachments/99aac3a3-9da9-4f67-a55c-832f7df3a88d?fileName=a.png`), null);
   assert.equal(imageName(account, `https://dev.azure.com/o2/_apis/wit/attachments/99aac3a3-9da9-4f67-a55c-832f7df3a88d?fileName=a.png`), null);
   assert.equal(imageName(account, "https://dev.azure.com/o/p1/_apis/wit/attachments/../../x?fileName=a.png"), null);
+  // Dot segments that would leave the org, plain or encoded (security F5).
+  const g = "99aac3a3-9da9-4f67-a55c-832f7df3a88d";
+  assert.equal(imageName(account, `https://dev.azure.com/o/../other/_apis/wit/attachments/${g}?fileName=a.png`), null);
+  assert.equal(imageName(account, `https://dev.azure.com/o/%2e%2e/other/_apis/wit/attachments/${g}?fileName=a.png`), null);
+  assert.equal(imageName(account, `https://dev.azure.com/o/%2E%2E/other/_apis/wit/attachments/${g}?fileName=a.png`), null);
+  assert.equal(imageName(account, `https://dev.azure.com/o/./p/_apis/wit/attachments/${g}?fileName=a.png`), null);
+  assert.equal(imageName(account, `https://dev.azure.com/o\\..\\other/_apis/wit/attachments/${g}?fileName=a.png`), null);
+  // A PAT Account has no az to sign the download, so its images stay links.
+  assert.equal(imageName({ ...account, patEnv: "ADO_PAT" }, `${att}?fileName=a.png`), null);
 });
 
 test("attachedImages keeps image files and names the type in the URL", () => {
@@ -43,6 +52,15 @@ test("loadImages downloads the provider's images into the folder and skips other
   assert.ok(args.some((a) => a.startsWith(`${att}?fileName=a.png&api-version=`)));
   assert.ok(!args.some((a) => /Bearer|accessToken/.test(a))); // az signs the request: no token in argv
   await assert.rejects(azure.downloadImage(account, "https://example.test/z.png", "/x", io));
+});
+
+test("loadImages skips a PAT Account's images, so they render as links", async () => {
+  const runs = [], got = [];
+  const io = { profile: "work", run: async (cmd, args) => { runs.push(args); return { code: 0, stdout: "", stderr: "" }; } };
+  const pat = { ...account, patEnv: "ADO_PAT" };
+  const tk = { description: `![x](<${att}?fileName=a.png>)`, comments: [], images: [] };
+  await loadImages({ name: "work", accounts: [pat], boards: [] }, { id: "b", account: "ado" }, tk, "/d", io, (...a) => got.push(a));
+  assert.deepEqual([runs, got], [[], []]);
 });
 
 test("pruneImages deletes only old image files in that folder", async () => {

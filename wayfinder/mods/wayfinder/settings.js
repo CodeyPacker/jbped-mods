@@ -147,8 +147,9 @@ export function addAccount(raw, profileName, account) {
     p.accounts ??= [];
     if (account.provider === "clickup") {
       // One token per variable: a second ClickUp Account needs its own tokenEnv, set in the file.
-      if (p.accounts.some((a) => a.provider === "clickup" && !a.tokenEnv)) throw new Error("This profile has a ClickUp account already");
-      p.accounts.push({ id: accountId("clickup", "", new Set(p.accounts.map((a) => a.id))), provider: "clickup" });
+      const env = account.tokenEnv ?? "CLICKUP_API_TOKEN";
+      if (p.accounts.some((a) => a.provider === "clickup" && (a.tokenEnv ?? "CLICKUP_API_TOKEN") === env)) throw new Error("This profile has a ClickUp account already");
+      p.accounts.push({ id: accountId("clickup", "", new Set(p.accounts.map((a) => a.id))), provider: "clickup", ...(account.tokenEnv ? { tokenEnv: account.tokenEnv } : {}) });
       return;
     }
     const key = account.provider === "azure" ? "org" : "login";

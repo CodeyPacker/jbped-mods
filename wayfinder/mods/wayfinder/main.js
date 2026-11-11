@@ -11,9 +11,9 @@ import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
-import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
+import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
-import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget } from "./providers/contract.js";
+import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
 
 const VIEW_KEY = "wayfinder.view.v1";
@@ -97,7 +97,11 @@ const field = (state, t, w = 260) => div().on_mouse_down("left", stop)
 
 // Markdown link text: brackets would end the link early.
 const linkText = (s) => String(s ?? "").replace(/([[\]\\])/g, "\\$1");
-const link = (label, url) => url ? `[${linkText(label)}](<${url}>)` : linkText(label);
+// Only web and mail links are links (security F3). Others show as plain text. `<`, `>` and whitespace
+// would end the `<…>` destination early, so they are percent-encoded.
+const SAFE_URL = /^(https?:\/\/|mailto:)/i;
+const linkUrl = (url) => String(url).replace(/[<>\s]/g, (c) => encodeURIComponent(c));
+const link = (label, url) => url && SAFE_URL.test(String(url)) ? `[${linkText(label)}](<${linkUrl(url)}>)` : linkText(label);
 
 // `cursor`: the card the arrow keys are on (#20).
 function card(tk, t, selected, onClick, cursor = false) {
@@ -163,6 +167,7 @@ export default class Wayfinder extends View {
     this.state = { status: "loading" };
     this.checks = null;
     this.boards = {}; // board id -> { status: "cached" | "loading" | "ok" | "error", data, at, tried, error }
+    this.boardSeq = {}; // board id -> the newest fetch's number: an older result is dropped
     this.hidden = true; // until seen on screen: the first show refreshes
     this.lastRefresh = null;
     this.selected = null; // { boardId, summary }: the Ticket in the detail panel
@@ -173,8 +178,11 @@ export default class Wayfinder extends View {
     this.editing = null; // the title being edited: { key, input, status, error }
     this.commentBox = TextareaState.new({ placeholder: "Write a comment (markdown)", rows: 3 });
     this.commentBox.set_auto_grow(3, 10);
-    this.commentBox.on("focus", () => { this.typing = true; });
+    // `typing`: which text box has focus ("comment" or "title"), else false.
+    this.commentBox.on("focus", () => { this.typing = "comment"; });
     this.commentBox.on("blur", () => { this.typing = false; });
+    this.commentDrafts = {}; // ticket key -> the comment box's text, kept while another Ticket is open
+    this.draftKey = null; // the Ticket whose draft is in the box
     this.commenting = null; // { key, status, error }
     this.prs = null; // { status, data: loadPullRequests()'s list, at, tried, error }
     this.found = {}; // settings: account id -> { boards: { status, data, error }, repos: { ... } }
@@ -287,7 +295,12 @@ export default class Wayfinder extends View {
     // Shift with left or right moves the card under the cursor one Column over (#15).
     if (c && shift && (key === "left" || key === "right")) {
       const tk = cols[c.col]?.tickets[c.row], to = cols[c.col + (key === "left" ? -1 : 1)];
-      if (tk && to && this.canMove(b)) { this.moveCard(b, tk, to.column.id, cx); this.cursor = { board: b.id, col: c.col + (key === "left" ? -1 : 1), row: 0 }; }
+      // GitHub's "No Status" is not a target. The cursor follows the card only when the Move started.
+      if (tk && to && to.column.id !== NO_COLUMN && this.canMove(b) && this.moveCard(b, tk, to.column.id, cx)) {
+        const now = this.columnsOf(b, this.boards[b.id].data);
+        const col = now.findIndex((x) => x.tickets.some((y) => y.key === tk.key));
+        if (col >= 0) this.cursor = { board: b.id, col, row: now[col].tickets.findIndex((y) => y.key === tk.key) };
+      }
       return true;
     }
     if (!c) {
@@ -336,7 +349,11 @@ export default class Wayfinder extends View {
         : { status: "ok", path, text, ...parsed, runner: createRunner(parsed.profile.runner) };
       // Another Profile: its Ticket detail must not carry over, even to a Board with the same id (D10).
       const now = parsed.profile?.name ?? null;
-      if (now !== before) { this.selected = null; this.fetchTicketLater = false; }
+      if (now !== before) {
+        this.selected = null; this.fetchTicketLater = false;
+        this.launch = null; this.reviews = {}; this.editing = null; this.typing = false;
+        this.commenting = null; this.moving = null; this.cursor = null;
+      }
       this.lastProfile = now;
       if (this.state.status === "ok") {
         let cached = null;
@@ -357,22 +374,35 @@ export default class Wayfinder extends View {
   // A failed refresh keeps the data it had and shows the error beside its age.
   fetchBoard(b, cx) {
     const prev = this.boards[b.id], profile = this.profile, tried = Date.now();
+    // Only the newest fetch of a Board lands: an older one finishing later is dropped.
+    const seq = this.boardSeq[b.id] = (this.boardSeq[b.id] ?? 0) + 1;
     this.boards[b.id] = { status: "loading", data: prev?.data ?? null, at: prev?.at ?? null, tried };
     const io = this.io();
     cx.spawn(async (cx) => {
       let data = null;
       try { data = await loadBoard(profile, b, io); } catch (e) {
-        if (this.profile?.name !== profile.name) return; // a reload replaced the Profile meanwhile
+        if (this.profile?.name !== profile.name || this.boardSeq[b.id] !== seq) return; // a reload or a newer fetch replaced it
         this.boards[b.id] = { status: "error", data: prev?.data ?? null, at: prev?.at ?? null, tried, error: String(e.message ?? e) };
         cx.notify();
         return;
       }
-      if (this.profile?.name !== profile.name) return;
+      if (this.profile?.name !== profile.name || this.boardSeq[b.id] !== seq) return;
       const at = Date.now();
       this.boards[b.id] = { status: "ok", data, at, tried };
+      this.clampCursor(b, data);
       cx.notify();
       await this.saveCache(profile, (c) => withBoard(c, profile.boards, b, data, at));
     });
+  }
+
+  // After a Board's data changes: the cursor stays on a card, or goes when its Column has none.
+  clampCursor(b, data) {
+    const c = this.cursor;
+    if (!c || c.board !== b.id) return;
+    const cols = this.columnsOf(b, data);
+    if (cols[c.col]?.tickets[c.row]) return;
+    const col = Math.min(c.col, cols.length - 1), n = cols[col]?.tickets.length ?? 0;
+    this.cursor = n ? { ...c, col, row: Math.min(c.row, n - 1) } : null;
   }
 
   // One request per Account. Accounts that fail show their error and the rest still list (D19).
@@ -446,11 +476,24 @@ export default class Wayfinder extends View {
   openTicket(b, summary, cx) {
     this.selected = { boardId: b.id, summary };
     this.handle.focus(); // a card's click stops the root's, which would focus: keys need it (#20)
+    // One comment draft per Ticket: the box keeps the old Ticket's text aside and shows this one's.
+    if (summary.key !== this.draftKey) {
+      if (this.draftKey != null) {
+        const text = this.commentBox.value();
+        if (text.trim()) this.commentDrafts[this.draftKey] = text; else delete this.commentDrafts[this.draftKey];
+      }
+      this.commentBox.set_value(this.commentDrafts[summary.key] ?? "");
+      this.draftKey = summary.key;
+    }
     if (this.tickets[summary.key]?.status !== "ok") this.fetchTicket(cx);
     cx.notify();
   }
 
-  closeTicket() { this.selected = null; }
+  closeTicket() {
+    const key = this.selected?.summary.key;
+    if (this.moving?.status === "error" && this.moving.key === key) this.moving = null;
+    this.selected = null; this.editing = null; this.typing = false; this.launch = null;
+  }
 
   fetchTicket(cx) {
     const sel = this.selected, p = this.profile;
@@ -633,15 +676,16 @@ export default class Wayfinder extends View {
   }
 
   // Applies `change(rawConfig)` and writes it. A change that leaves the config invalid is refused.
+  // Returns the refusal's message, else null (a failed write shows later, in settingsError).
   saveConfig(change, cx, { after = null } = {}) {
     const s = this.state;
     const base = s.status === "ok" ? s.config : s.status === "missing" ? {} : null;
-    if (!base) return;
+    if (!base) return "the configuration isn't loaded";
     let raw;
-    try { raw = change(base); } catch (e) { this.settingsError = String(e.message ?? e); cx.notify(); return; }
+    try { raw = change(base); } catch (e) { this.settingsError = String(e.message ?? e); cx.notify(); return this.settingsError; }
     const text = JSON.stringify(raw, null, 2) + "\n";
     const parsed = parseConfig(text, herdrWindow().platform);
-    if (parsed.errors.length) { this.settingsError = parsed.errors[0]; cx.notify(); return; }
+    if (parsed.errors.length) { this.settingsError = parsed.errors[0]; cx.notify(); return this.settingsError; }
     this.settingsError = null;
     this.confirm = null;
     const expected = s.status === "ok" ? s.text : null;
@@ -651,15 +695,22 @@ export default class Wayfinder extends View {
       this.state = { ...s, text, config: parsed.config, profile: parsed.profile, profileNames: parsed.profileNames };
       if (this.prs) this.prs = { ...this.prs, status: "cached" }; // followed repos may have changed: refetch on show
     }
-    this.writes = (this.writes ?? Promise.resolve()).then(async () => {
-      try { await writeTextFile(s.path, text, expected); } catch (e) {
-        this.settingsError = `Couldn't save (${e.message ?? e}). The file changed elsewhere, so it was read again.`;
+    // The chain only orders the file writes. What follows a write runs in this call's own task, with its own cx.
+    const write = this.writes = (this.writes ?? Promise.resolve()).then(async () => {
+      try { await writeTextFile(s.path, text, expected); return null; } catch (e) { return e; }
+    });
+    cx.spawn(async (cx) => {
+      const failed = await write;
+      if (failed) {
+        this.settingsError = `Couldn't save (${failed.message ?? failed}). The file changed elsewhere, so it was read again.`;
         this.reload(cx); cx.notify(); return;
       }
       if (after) await after();
-      if (reload || after) { this.reload(cx); cx.notify(); }
+      if (reload || after) this.reload(cx);
+      cx.notify();
     });
     cx.notify();
+    return null;
   }
 
   // A remove button: the first click asks, the second removes.
@@ -940,14 +991,18 @@ export default class Wayfinder extends View {
   }
 
   // Moves a card (#15): shown in its new Column at once, then the Board reloads. A failure puts it back.
+  // True when a write started.
   moveCard(b, summary, columnId, cx) {
     const entry = this.boards[b.id], data = entry?.data;
-    if (!data || this.moving?.status === "busy") return;
+    if (!data || this.moving?.status === "busy") return false;
     let target;
-    try { target = moveTarget(data, b, columnId); } catch (e) { this.moving = { key: summary.key, status: "error", error: String(e.message ?? e) }; return; }
+    try { target = moveTarget(data, b, columnId); } catch (e) { this.moving = { key: summary.key, status: "error", error: String(e.message ?? e) }; return false; }
     const before = data.tickets.find((x) => x.key === summary.key);
-    if (!before) return;
-    const after = { ...before, columnId: target.column?.id ?? before.columnId, status: target.status ?? target.column?.states?.[before.type] ?? before.status };
+    if (!before) return false;
+    // Columns without states (GitHub, ClickUp) are the status themselves.
+    const col = target.column;
+    const status = target.status ?? (col?.states ? col.states[before.type] : col?.name) ?? before.status;
+    const after = { ...before, columnId: col?.id ?? before.columnId, status };
     entry.data = { ...data, tickets: data.tickets.map((x) => (x.key === summary.key ? after : x)) };
     if (this.selected?.summary.key === summary.key) this.selected = { ...this.selected, summary: { ...this.selected.summary, ...after } };
     this.moving = { key: summary.key, status: "busy" };
@@ -959,20 +1014,26 @@ export default class Wayfinder extends View {
         delete this.tickets[summary.key]; // its Column changed: the detail reloads
         if (this.selected?.summary.key === summary.key) this.fetchTicket(cx);
       } catch (e) {
+        if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
         const cur = this.boards[b.id];
         if (cur?.data) cur.data = { ...cur.data, tickets: cur.data.tickets.map((x) => (x.key === summary.key ? before : x)) };
+        if (this.selected?.summary.key === summary.key) {
+          this.selected = { ...this.selected, summary: { ...this.selected.summary, columnId: before.columnId, status: before.status } };
+        }
         this.moving = { key: summary.key, status: "error", error: `Couldn't move it: ${e.message ?? e}` };
       }
       if (this.profile?.name === p.name) this.fetchBoard(b, cx);
       cx.notify();
     });
+    return true;
   }
 
   moveRow(t, b, sum) {
     const data = this.boards[b.id]?.data;
     if (!data || !this.canMove(b)) return null;
-    const cols = this.columnsOf(b, data).map((x) => x.column);
     const cur = this.columnsOf(b, data).find((x) => x.tickets.some((tk) => tk.key === sum.key))?.column.id;
+    // GitHub's "No Status" is not a target: it shows only as the card's current Column.
+    const cols = this.columnsOf(b, data).map((x) => x.column).filter((c) => c.id !== NO_COLUMN || c.id === cur);
     const m = this.moving?.key === sum.key ? this.moving : null;
     return v_flex().gap(6)
       .child(h_flex().gap(6).flex_wrap().items_center()
@@ -991,7 +1052,7 @@ export default class Wayfinder extends View {
   startEdit(sum, title) {
     const input = InputState.new({ value: title });
     input.on("submit", (_e, cx) => { this.saveTitle(cx); cx.notify(); });
-    input.on("focus", () => { this.typing = true; });
+    input.on("focus", () => { this.typing = "title"; });
     input.on("blur", () => { this.typing = false; });
     this.editing = { key: sum.key, input, status: "idle" };
     input.focus();
@@ -1028,8 +1089,11 @@ export default class Wayfinder extends View {
     cx.spawn(async (cx) => {
       try {
         await commentOnTicket(p, b, sum, text, io);
-        this.commentBox.set_value("");
-        this.commenting = null;
+        // The box is cleared only while it still holds this Ticket's draft. A draft put aside is
+        // dropped when it is the text just posted.
+        if (this.draftKey === sum.key && this.selected?.summary.key === sum.key) { this.commentBox.set_value(""); delete this.commentDrafts[sum.key]; }
+        else if (this.commentDrafts[sum.key]?.trim() === text) delete this.commentDrafts[sum.key];
+        if (this.commenting === C) this.commenting = null;
         if (this.selected?.summary.key === sum.key) this.fetchTicket(cx);
       } catch (e) {
         C.status = "error"; C.error = `Couldn't post the comment: ${e.message ?? e}`;
@@ -1057,7 +1121,7 @@ export default class Wayfinder extends View {
     const io = this.io();
     cx.spawn(async (cx) => {
       let exists = [];
-      try { exists = await existingWorktrees(ticketFolder(tk), repos.map(repoName), io); } catch { /* shown as not made */ }
+      try { exists = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map(repoName), io); } catch { /* shown as not made */ }
       if (this.launch?.key !== key) return;
       this.launch.exists = exists;
       cx.notify();
@@ -1068,7 +1132,7 @@ export default class Wayfinder extends View {
     const boardId = this.selected?.boardId, name = this.profile.name;
     cx.spawn(async (cx) => {
       const folder = await pickFolder({ prompt: "Pick a local clone for this Board" });
-      if (!folder) return;
+      if (!folder || this.profile?.name !== name) return; // none picked, or a reload replaced the Profile meanwhile
       let id = null;
       this.saveConfig((raw) => { const r = edits.addRepo(raw, name, { path: folder, boardId }); id = r.id; return r.raw; }, cx, {
         after: () => { if (this.launch && id && !this.launch.selected.includes(id)) this.launch.selected.push(id); },
@@ -1079,21 +1143,22 @@ export default class Wayfinder extends View {
   startLaunch(tk, cx) {
     const L = this.launch, p = this.profile;
     if (!L || L.status === "busy") return;
-    // A second Launch selects the space it made (D18).
+    // A second Launch selects the space it made (D18), found by the Ticket's id: a title edit renames the Ticket.
     const name = launchSpaceName(tk);
-    const open = spaces().find((x) => x.name === name);
+    const open = spaces().find((x) => x.name?.startsWith(`${tk.id} `) || x.name === name);
     if (open) { run("space.select", { id: open.id }); this.launch = null; return; }
     const repos = this.launchRepos().filter((r) => L.selected.includes(r.id));
     let argv;
     const tpl = this.launchTemplate();
     try { argv = agentArgv(tpl); } catch (e) { L.status = "error"; L.error = String(e.message ?? e); return; }
-    const folder = ticketFolder(tk), branch = folder;
+    const prefix = ticketPrefix(tk), folder = ticketFolder(tk);
     L.status = "busy"; L.message = repos.length ? "Making worktrees…" : "Starting…"; L.error = null;
     const io = this.io(), runner = p.runner;
     cx.spawn(async (cx) => {
       try {
-        const made = await makeLaunchWorktrees(folder, branch, repos.map((r) => ({ path: r.path, name: repoName(r) })), io);
-        const info = repos.map((r) => ({ id: r.id, branch, worktree: `${made.path}/${repoName(r)}` }));
+        // An earlier Launch's folder and branch are reused when the title has changed since.
+        const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r) })), io);
+        const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: `${made.path}/${repoName(r)}` }));
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
       } catch (e) {
@@ -1107,10 +1172,10 @@ export default class Wayfinder extends View {
     const L = this.launch, repos = this.launchRepos(), tpl = this.launchTemplate();
     const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
     const exists = (r) => L.exists?.includes(repoName(r));
-    const open = spaces().some((x) => x.name === launchSpaceName(tk));
+    const open = spaces().find((x) => x.name?.startsWith(`${tk.id} `) || x.name === launchSpaceName(tk));
     return v_flex().id("wf-launch-card").p(12).gap(8).rounded(8).bg(t.surface).border_1().border_color(t.accent)
       .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Launch"))
-      .child(note(open ? `The space "${launchSpaceName(tk)}" is open. Launch selects it.`
+      .child(note(open ? `The space "${open.name}" is open. Launch selects it.`
         : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} in ~/.herdr/worktrees/${ticketFolder(tk)}, on branch ${ticketFolder(tk)}.`))
       .children(repos.length ? repos.map((r) => h_flex().gap(8).items_center()
         .child(checkRow(`wf-launch-r-${r.id}`, L.selected.includes(r.id), r.id, t, (cx) => {
@@ -1132,26 +1197,36 @@ export default class Wayfinder extends View {
     const name = reviewSpaceName(pr);
     const open = spaces().find((x) => x.name === name);
     if (open) { run("space.select", { id: open.id }); return; }
+    // The Profile as the Review started: a reload during an await must not mix in another's.
+    const p = this.profile;
+    if (!p) return;
     const st = this.reviews[pr.key] = { status: "busy", message: "Starting…" };
-    const profileName = this.profile.name, io = this.io(), runner = this.profile.runner;
+    const io = this.io(), runner = p.runner, templates = this.state.templates;
     cx.spawn(async (cx) => {
       try {
-        let repo = this.profile.repos.find((r) => r.prRepo === pr.repo);
+        let repo = p.repos.find((r) => r.prRepo === pr.repo);
         if (!repo) {
           st.message = "Pick its clone…"; cx.notify();
           const folder = await pickFolder({ prompt: `Pick your local clone of ${pr.repo}` });
+          if (this.profile?.name !== p.name) {
+            this.reviews[pr.key] = { status: "error", error: "The profile changed while picking the clone. Start the Review again." };
+            cx.notify(); return;
+          }
           if (!folder) { delete this.reviews[pr.key]; cx.notify(); return; }
           let id = null;
-          this.saveConfig((raw) => { const r = edits.addRepo(raw, profileName, { path: folder, prRepo: pr.repo }); id = r.id; return r.raw; }, cx);
+          const failed = this.saveConfig((raw) => { const r = edits.addRepo(raw, p.name, { path: folder, prRepo: pr.repo }); id = r.id; return r.raw; }, cx);
+          // Not remembered, but this Review still goes ahead with the picked folder.
+          if (failed) st.error = `Couldn't save the clone: ${failed}`;
           repo = { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo: pr.repo };
         }
         st.message = "Reading the Pull Request…"; cx.notify();
-        const info = await loadReviewInfo(this.profile, accountId, pr, io);
+        const info = await loadReviewInfo(p, accountId, pr, io);
         st.message = "Making the worktree…"; cx.notify();
-        const tpl = resolveTemplate(DEFAULT_REVIEW, this.state.templates?.review, repo.review);
+        const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
         const made = await makeReviewWorktree(reviewFolder(pr), { path: repo.path, name: repoName(repo) }, info.branch, io);
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
-        delete this.reviews[pr.key];
+        if (st.error) this.reviews[pr.key] = { status: "error", error: st.error };
+        else delete this.reviews[pr.key];
       } catch (e) {
         this.reviews[pr.key] = { status: "error", error: `Review failed: ${e.message ?? e}` };
       }
@@ -1332,7 +1407,12 @@ export default class Wayfinder extends View {
       .on_mouse_down("left", () => this.handle.focus())
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
-          if (this.selected) this.closeTicket(); else this.setFullscreen(false);
+          // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
+          if (this.typing) {
+            if (this.typing === "title") this.editing = null;
+            this.typing = false;
+            this.handle.focus();
+          } else if (this.selected) this.closeTicket(); else this.setFullscreen(false);
           cx.notify(); return;
         }
         if (this.typing) return; // keys in a text box are for the text
