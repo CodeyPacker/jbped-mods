@@ -71,6 +71,18 @@ export function discardCommands(rel, inHead) {
     : [[LITERAL, "rm", "--cached", "-f", "-q", "--ignore-unmatch", "--", rel], [LITERAL, "clean", "-f", "-q", "--", rel]];
 }
 
+/** git arguments that list `rel` if HEAD has it (inHeadOf reads the result). */
+export const inHeadArgs = (rel) => [...READ, LITERAL, "ls-tree", "-z", "--name-only", "HEAD", "--", rel];
+
+/**
+ * Whether HEAD has `rel`, from inHeadArgs' result. A failed call throws: read as "not in HEAD", a
+ * discard would untrack and delete a tracked file instead of restoring it.
+ */
+export function inHeadOf(r, rel) {
+  if (!r || r.code !== 0) throw new Error(`git ls-tree: ${(r?.stderr || r?.stdout || "failed").trim()}`);
+  return String(r.stdout).split("\0").includes(rel);
+}
+
 /** A path in C quotes, as git reads a pathspec file's line: any name (quotes, newlines, spaces at either end) reads back exactly. */
 const cquote = (p) => `"${p.replace(/[\\"\x00-\x1f\x7f]/g, (c) => (c === "\\" || c === '"' ? `\\${c}` : `\\${c.charCodeAt(0).toString(8).padStart(3, "0")}`))}"`;
 

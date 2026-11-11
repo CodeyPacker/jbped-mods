@@ -28,7 +28,7 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git, onWindows } from "./git.js";
-import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
+import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal, allowedIn } from "./keymap.js";
@@ -774,7 +774,8 @@ export default class Review extends View {
     this.replace(f, next); this.settle();
   }
 
-  dirty(f) { return !!f && !f.error && (f.Ctext !== f.diskC || f.Btext !== f.diskB); }
+  // A Changes row whose texts aren't loaded (lazy) has nothing in memory to save.
+  dirty(f) { return !!f && !f.error && !f.lazy && (f.Ctext !== f.diskC || f.Btext !== f.diskB); }
 
   async reloadOne(f, cx) {
     if (f.plain) {
@@ -1509,7 +1510,8 @@ export default class Review extends View {
         else if (store && this.visible().some((f) => f.key === g.key)) {
           this.pick(g.key, cx);
           const f = this.file(), line = g.at?.line ?? 0;
-          if (f?.hunks.length) { let h = 0; f.hunks.forEach((x, j) => { if (x.n <= line) h = j; }); this.current = h; this.reveal(); }
+          // Changes: a row still loading goes to the line once its hunks are in (loadRow).
+          if (f?.lazy && g.at) this.gotoLine = { key: f.key, line }; else this.toLine(f, line);
         }
         cx.notify();
       }
@@ -1765,7 +1767,17 @@ export default class Review extends View {
    */
   loadRow(f, cx) {
     if (!f?.lazy || f.loading) return;
-    cx.spawn(async (cx) => { await this.loadRowNow(f, cx); this.settle(); cx.notify(); });
+    cx.spawn(async (cx) => {
+      await this.loadRowNow(f, cx);
+      if (this.gotoLine?.key === f.key) { if (this.sel === f.key) this.toLine(f, this.gotoLine.line); this.gotoLine = null; }
+      this.settle(); cx.notify();
+    });
+  }
+
+  /** Makes the hunk at or before `line` of `f` the current one (a hand-off's position). */
+  toLine(f, line) {
+    if (!f?.hunks?.length) return;
+    let h = 0; f.hunks.forEach((x, j) => { if (x.n <= line) h = j; }); this.current = h; this.reveal();
   }
 
   async loadRowNow(f, cx) {
@@ -1792,7 +1804,7 @@ export default class Review extends View {
       }
     } catch (e) { next = { error: String(e.message ?? e) }; }
     if (!f.lazy) { f.loading = false; return; } // unloaded meanwhile
-    Object.assign(f, next, { lazy: false, loading: false });
+    Object.assign(f, next, { lazy: false, loading: false, evicted: false });
     this.capLoaded(f);
   }
 
@@ -1837,6 +1849,7 @@ export default class Review extends View {
       const f = byKey.get(k);
       this.unloadRow(f);
       if (f === keep) Object.assign(f, { lazy: false, placeholder: "too large to show", error: "too large to show" });
+      else f.evicted = true; // not loaded ahead again (neighbours); picking it loads it
     }
   }
 
@@ -1887,8 +1900,9 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       const s = () => this.stateOf(space) ?? {}; // its own space's state, shown or not
       try {
-        // A row whose texts never loaded doesn't know yet whether HEAD has the file.
-        const inHead = f.inHead ?? (f.hasHead === false ? false : (await this.git(f.store, [...READ, "cat-file", "-e", `HEAD:${f.rel}`])).code === 0);
+        // Asked now, not taken from the row: a row whose texts never loaded doesn't know, and a loaded
+        // row's inHead reads a failed `git show` as "not in HEAD" (which would untrack and delete it).
+        const inHead = f.hasHead === false ? false : inHeadOf(await this.git(f.store, inHeadArgs(f.rel)), f.rel);
         for (const args of discardCommands(f.rel, inHead)) {
           const r = await this.git(f.store, args);
           if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);

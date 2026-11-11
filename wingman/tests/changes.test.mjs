@@ -1,4 +1,4 @@
-import { parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, pathspecText, NUMSTAT, parseNumstat, countLines, STATUS, STATUS_V2, parseStatusV2, onDisk } from "../mods/wingman/changes.js";
+import { parseStatus, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, parseNumstat, countLines, STATUS, STATUS_V2, parseStatusV2, onDisk } from "../mods/wingman/changes.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -64,5 +64,23 @@ assert.deepEqual(onDisk([{ xy: " M", rel: "a" }, { xy: " D", rel: "b" }, { xy: "
   // The files on disk hash fine (what another machine's refresh compares).
   vg("hash-object", "--no-filters", "--", ...onDisk(v2.list));
   rmSync(v, { recursive: true, force: true });
+}
+// inHeadArgs/inHeadOf: whether HEAD has a path, read literally (a glob-like name matches only itself);
+// a failed call throws rather than read as "not in HEAD" (a discard would then untrack and delete it).
+{
+  const h = mkdtempSync(tmpdir() + "/wm-inhead-"), hg = (...a) => execFileSync("git", a, { cwd: h, encoding: "utf8" });
+  const run = (rel) => { try { return { code: 0, stdout: hg(...inHeadArgs(rel)) }; } catch (e) { return { code: e.status ?? 1, stdout: "", stderr: String(e.stderr ?? "") }; } };
+  hg("init", "-q"); hg("config", "user.email", "t@t"); hg("config", "user.name", "t");
+  for (const n of ["a[b]", "ab", "d/f"]) { if (n.includes("/")) execFileSync("mkdir", ["-p", h + "/d"]); writeFileSync(`${h}/${n}`, "x\n"); }
+  hg("add", "-A"); hg("commit", "-qm", "i");
+  writeFileSync(h + "/new", "n\n"); hg("add", "new");
+  assert.equal(inHeadOf(run("a[b]"), "a[b]"), true);
+  assert.equal(inHeadOf(run("d/f"), "d/f"), true);
+  assert.equal(inHeadOf(run("new"), "new"), false, "staged, not in HEAD");
+  assert.equal(inHeadOf(run("a?b"), "a?b"), false, "no glob match of a[b]/ab");
+  assert.equal(inHeadOf(run("*"), "*"), false);
+  assert.throws(() => inHeadOf({ code: 128, stdout: "", stderr: "fatal: index.lock" }, "ab"), /ls-tree/);
+  assert.throws(() => inHeadOf(undefined, "ab"));
+  rmSync(h, { recursive: true, force: true });
 }
 console.log("changes tests pass");

@@ -36,6 +36,8 @@ const committed = [done(a, "c1", { ai: true }), done(a, "c2"), done(b, "c3")];
 assert.deepEqual(neighbours(files.concat(file(a, "z")), "/b|y").map((f) => f.rel), ["z", "x"]);
 assert.deepEqual(neighbours(files, "/a|x").map((f) => f.rel), ["y"]);
 assert.deepEqual(neighbours(files, "nope"), []);
+// A file the cap unloaded isn't loaded ahead again (it would be unloaded again every tick).
+assert.deepEqual(neighbours([file(a, "p", { evicted: true }), file(a, "q"), file(a, "r")], "/a|q").map((f) => f.rel), ["r"]);
 // Unloading: least recently used first, never the kept one unless it alone is over the cap.
 {
   const L = [{ key: "old", chars: 50, usedAt: 1 }, { key: "mid", chars: 50, usedAt: 2 }, { key: "sel", chars: 50, usedAt: 0 }];

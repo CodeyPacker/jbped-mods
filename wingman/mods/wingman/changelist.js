@@ -45,12 +45,15 @@ export function clickTarget(row, x) {
 /** The committed rows that show (their repo is open), for picking and keyboard steps. */
 export const shownCommitted = (committed, open, idOf) => committed.filter((f) => open.has(idOf(f.store)));
 
-/** The uncommitted files next to the picked one (`by` on each side), to load ahead of a keyboard step. */
+/**
+ * The uncommitted files next to the picked one (`by` on each side), to load ahead of a keyboard
+ * step. A file the cap unloaded (`evicted`) isn't: loading it again would unload it again, every tick.
+ */
 export function neighbours(files, sel, by = 1) {
   const i = files.findIndex((f) => f.key === sel);
   if (i < 0) return [];
   const out = [];
-  for (let d = 1; d <= by; d++) for (const j of [i + d, i - d]) if (files[j]) out.push(files[j]);
+  for (let d = 1; d <= by; d++) for (const j of [i + d, i - d]) if (files[j] && !files[j].evicted) out.push(files[j]);
   return out;
 }
 
