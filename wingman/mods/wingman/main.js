@@ -15,6 +15,7 @@ import { Store, PlainRoot, norm, shows } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { Capture, hostPath } from "./capture.js";
+import { capturePlan, applyPlan, capturePass } from "./captureplan.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
@@ -173,7 +174,8 @@ export default class Review extends View {
   // - Display: a Wingman pane is only visible while its space is active, so every copy
   //   shows the active space's review, and keeps each space's state for when it returns.
   // - Capture: one copy holds a lease (.leader.json) and captures for every reviewed space
-  //   (reviewSpaces), so the work never runs twice.
+  //   (reviewSpaces), so the work never runs twice. A repo has one capture record, shared by
+  //   every space that includes it (captureplan.js).
   init(_props, cx) {
     // Opened as a popup (reason or follow-up prompt): a small form, none of the pane's work.
     if (props()?.form) return this.initForm(cx);
@@ -235,6 +237,7 @@ export default class Review extends View {
     });
     if (this.view === "changes") this.initChanges(cx);
     cx.timer.every(500, (cx) => this.lead(cx));
+    cx.timer.every(1000, () => this.isLeader && this.lease()); // renewed while a long capture pass runs too
     cx.timer.every(3000, (cx) => this.collectAll(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
@@ -420,62 +423,89 @@ export default class Review extends View {
     catch { return false; } // another copy renewed or took it first
   }
 
+  /**
+   * Sets isLeader from the lease. Runs at the start of each lead() and every second on its own: a
+   * lead() pass can outlast LEASE_MS (store opens, snapshots), and a lease left unrenewed meanwhile
+   * would let another copy lead while this one still runs its pass and collectAll. One call at a
+   * time, so this copy's own renewals never fail each other's compare-and-swap.
+   */
+  async lease() {
+    if (this.leasing) return this.isLeader;
+    this.leasing = true;
+    try { this.isLeader = await this.leader(); }
+    catch (e) { this.isLeader = false; log(`lease error ${e.message ?? e}`); }
+    finally { this.leasing = false; }
+    return this.isLeader;
+  }
+
   /** Every 500 ms: agent status is cheap, and a snapshot must land before the first edit. */
   async lead(cx) {
     if (this.leading) return;
     this.leading = true;
     try {
-      this.isLeader = await this.leader();
-      if (!this.isLeader) return;
+      if (!(await this.lease())) return;
       this.journal ??= new Journal(log);
       await this.journal.drain();
       await drainOutbox((t) => agents().some((a) => a.address === t && ACTIVE.has(a.status)),
         (t, text) => hc(["send", t, text]), log);
-      for (const sp of reviewSpaces()) {
+      const reviewed = reviewSpaces(), groups = (this.groups ??= new Map());
+      for (const id of [...groups.keys()]) if (!reviewed.some((sp) => sp.id === id)) groups.delete(id);
+      for (const sp of reviewed) {
+        if (!this.isLeader) return; // the lease was lost during this pass
         // W1: capture follows every repo of the space's workspace. Its repos are looked up again
-        // every 5 s (cached stores are reused), never while an agent is starting a turn.
-        const g = (this.groups ??= new Map()).get(sp.id) ?? { active: false, by: null, at: 0, caps: [] };
-        this.groups.set(sp.id, g);
-        const working = agents().filter((a) => a.space === sp.id && ACTIVE.has(a.status)), active = working.length > 0;
+        // every 5 s (cached stores are reused), never while an agent is starting a turn. A group
+        // holds the space's repos (keys into this.captures) and whether an agent there works.
+        const g = groups.get(sp.id) ?? { active: false, at: 0, keys: [] };
+        groups.set(sp.id, g);
+        const active = agents().some((a) => a.space === sp.id && ACTIVE.has(a.status));
         // Another machine: nothing is looked up there for a space that isn't shown and has no agent
-        // working (every call there costs about 200 ms). Captures already made finish their last pass.
+        // working (every call there costs about 200 ms). Its repos stay as last looked up, and
+        // captures already made finish their last pass.
         if (sp.machine && !active && !g.active && !sp.active) continue;
         // Any space: with no agent at all, nothing is looked up or opened unless it is shown.
         if (!active && !g.active && !sp.active && !agents().some((a) => a.space === sp.id)) continue;
         if (!g.at || (active === g.active && Date.now() - g.at > 5000)) {
           g.at = Date.now();
-          const { repos } = await this.folderRoots(sp);
+          const on = sp.machine ?? null, { repos } = await this.folderRoots(sp);
           const { roots } = await spaceRoots(sp, repos);
-          const caps = [];
+          const keys = [], alias = (this.capAlias ??= new Map());
           for (const root of roots) {
-            let c = this.captures.get(`${sp.id}|${root}`);
-            if (!c) {
-              const store = await this.openStore(root, sp.machine ?? null);
+            // One record per repo (its store's id), whichever space or path found it first.
+            let key = alias.get(rootId(root, on));
+            if (!key || !this.captures.has(key)) {
+              const store = await this.openStore(root, on);
               if (!store) continue;
-              log(`${sp.name}: capturing ${store.root}${store.on ? ` on ${store.on}` : ""}`);
-              // after: a capture on another machine checks its saved state once (a pass may be left over).
-              c = { capture: new Capture(store, log), space: sp.id, active: g.active, busy: false, by: g.by, after: !!store.on };
-              this.captures.set(`${sp.id}|${root}`, c);
+              key = idOf(store); alias.set(rootId(root, on), key);
+              if (!this.captures.has(key)) {
+                log(`${sp.name}: capturing ${store.root}${store.on ? ` on ${store.on}` : ""}`);
+                // after: a capture on another machine checks its saved state once (a pass may be left over).
+                this.captures.set(key, { capture: new Capture(store, log), spaces: [], active: false, busy: false, by: null, space: null, fresh: true, after: !!store.on });
+              }
             }
-            caps.push(c);
+            if (!keys.includes(key)) keys.push(key);
           }
-          for (const [k, c] of this.captures) if (c.space === sp.id && !caps.includes(c)) { this.captures.delete(k); log(`${sp.name}: stopped capturing ${c.capture.store.root}`); }
-          g.caps = caps;
-          if (!caps.length && !this.noRepo?.has(sp.id)) { (this.noRepo ??= new Set()).add(sp.id); log(`${sp.name}: no repo in ${JSON.stringify(agentFolders(sp))}`); }
+          g.keys = keys;
+          if (!keys.length && !this.noRepo?.has(sp.id)) { (this.noRepo ??= new Set()).add(sp.id); log(`${sp.name}: no repo in ${JSON.stringify(agentFolders(sp))}`); }
         }
-        // Credit captured edits to the working agent when it is a lone Claude: its hook delivers
-        // rejection feedback even for edits made through Bash. Kept until the next turn starts,
-        // so the last pass after the agent stops is credited too.
-        if (active) g.by = working.length === 1 && working[0].app === "claude-code" ? working[0].address : null;
-        for (const c of g.caps) c.by = g.by;
         if (active !== g.active) {
-          g.active = active; log(`${sp.name}: agent ${active ? "working" : "stopped"} (${g.caps.map((c) => c.capture.store.root).join(", ")})`);
-          for (const c of g.caps) { c.active = active; if (!active) c.after = true; }
-          // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
-          if (active) await Promise.all(g.caps.map((c) => this.collect(c, cx, true)));
-          cx.notify();
+          g.active = active;
+          log(`${sp.name}: agent ${active ? "working" : "stopped"} (${g.keys.map((k) => this.captures.get(k)?.capture.store.root).filter(Boolean).join(", ")})`);
         }
       }
+      // Each repo's record from every space that includes it: working while an agent works in any
+      // of them, so one space's idle agent never clears the snapshot another's turn depends on.
+      const plan = capturePlan([...groups].map(([id, g]) => ({ id, roots: g.keys })), agents(), ACTIVE);
+      for (const [k, c] of this.captures) if (!plan.has(k)) { this.captures.delete(k); log(`stopped capturing ${c.capture.store.root}`); }
+      const started = [];
+      for (const [k, p] of plan) {
+        const c = this.captures.get(k);
+        if (!c) continue;
+        const change = applyPlan(c, p);
+        if (change === "started") started.push(c);
+        if (change) { log(`${c.capture.store.root}: ${change === "started" ? "working" : "idle"}`); cx.notify(); }
+      }
+      // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
+      if (started.length) await Promise.all(started.map((c) => this.collect(c, cx, true)));
     } catch (e) { this.error = `capture: ${e.message ?? e}`; log(`lead error ${e.message ?? e}`); cx.notify(); }
     finally { this.leading = false; }
   }
@@ -509,7 +539,7 @@ export default class Review extends View {
       if (seen.has(id)) continue;
       seen.add(id);
       if (st.on) {
-        if (!(c.active || spaces().find((s) => s.id === c.space)?.active) || now - (st.reconciledAt ?? 0) < REMOTE.reconcileMs) continue;
+        if (!(c.active || spaces().some((s) => s.active && c.spaces.includes(s.id))) || now - (st.reconciledAt ?? 0) < REMOTE.reconcileMs) continue;
         st.reconciledAt = now;
       }
       await st.reconcile(spaceOfAgent).catch((e) => log(`reconcile ${st.root}: ${e.message ?? e}`));
@@ -558,31 +588,12 @@ export default class Review extends View {
     finally { j.busy = false; }
   }
 
-  /**
-   * One capture pass for a space. Starting: snapshot the working tree. While working,
-   * and once after: adopt files that changed since that snapshot. The snapshot is kept
-   * in capture.json, so a new leader or a reloaded pane carries on where it was.
-   */
+  /** One capture pass for a repo's record (captureplan.capturePass), one at a time per record. */
   async collect(c, cx, starting = false) {
     if (c.busy) return;
     c.busy = true;
-    // On another machine a pass whose snapshot is the last one's adopts nothing new: skipped (c.last).
-    const remote = !!c.capture.store.on;
-    try {
-      const st = await c.capture.state();
-      if (!st.tree) {
-        if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now() }); c.last = tree; log(`snapshot ${tree}`); }
-        else c.after = false;
-      } else if (!starting) {
-        const now = await c.capture.snapshot();
-        if (!(remote && now === c.last)) {
-          const added = await c.capture.adopt(st.tree, now, c.by, c.space);
-          if (added) log(`adopted ${added} files${remote ? ` on ${c.capture.store.on}` : ""}`);
-        }
-        c.last = now;
-        if (!c.active) { await c.capture.setState({ tree: null }); c.after = false; }
-      }
-    } catch (e) { this.error = `capture: ${e.message ?? e}`; log(`error ${e.message ?? e}`); cx.notify(); }
+    try { await capturePass(c, starting, log); }
+    catch (e) { this.error = `capture: ${e.message ?? e}`; log(`error ${e.message ?? e}`); cx.notify(); }
     finally { c.busy = false; }
   }
 
