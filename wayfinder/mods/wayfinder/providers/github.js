@@ -220,6 +220,83 @@ export function mapReview(node) {
   };
 }
 
+// A Pull Request's detail (#1): everything but the files in one query, the files by REST.
+const ISSUE_COMMENTS = 100, THREADS = 50, THREAD_COMMENTS = 20, FILE_PAGES = 3;
+const REST = "https://api.github.com";
+export const PR_DETAIL_QUERY = `query($id: ID!) {
+  node(id: $id) { ... on PullRequest {
+    number title url repository { nameWithOwner }
+    body state isDraft mergedAt createdAt updatedAt headRefName baseRefName changedFiles
+    author { login ... on User { name } }
+    reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login name } ... on Team { name } } } }
+    latestReviews(first: 30) { nodes { author { login } state } }
+    comments(first: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } body createdAt } }
+    reviewThreads(first: ${THREADS}) { totalCount nodes { path line comments(first: ${THREAD_COMMENTS}) { totalCount nodes { author { login } body createdAt } } } }
+  } }
+}`;
+
+const REVIEW_STATE = { APPROVED: "approved", CHANGES_REQUESTED: "changes", COMMENTED: "commented", PENDING: "pending", DISMISSED: "commented" };
+const FILE_STATUS = { added: "added", modified: "modified", removed: "deleted", renamed: "renamed", copied: "added", changed: "modified" };
+
+// One REST "List pull request files" entry. GitHub leaves out the patch of binary and very large files.
+export function mapPrFile(f) {
+  const patch = typeof f.patch === "string" ? f.patch : null;
+  return {
+    path: f.filename, oldPath: f.previous_filename ?? null, status: FILE_STATUS[f.status] ?? "modified",
+    additions: f.additions ?? 0, deletions: f.deletions ?? 0, patch, binary: patch == null,
+  };
+}
+
+// The detail query's node and the fetched files into a PrDetail. Pure.
+export function mapPrDetail(node, files, pr) {
+  if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
+  const repo = node.repository?.nameWithOwner ?? pr.repo;
+  const login = (a) => a?.login ?? "ghost";
+  const reviewers = (node.latestReviews?.nodes ?? []).filter(Boolean).map((r) => ({ name: login(r.author), state: REVIEW_STATE[r.state] ?? "commented" }));
+  for (const q of node.reviewRequests?.nodes ?? []) {
+    const name = q?.requestedReviewer?.login ?? q?.requestedReviewer?.name;
+    if (name && !reviewers.some((r) => r.name === name)) reviewers.push({ name, state: "waiting" });
+  }
+  const comment = (c, path = null, line = null) => ({ author: login(c.author), createdAt: c.createdAt ?? null, body: safeMarkdown(c.body ?? ""), path, line });
+  const issue = (node.comments?.nodes ?? []).filter(Boolean);
+  const threads = (node.reviewThreads?.nodes ?? []).filter(Boolean);
+  const comments = [
+    ...issue.map((c) => comment(c)),
+    ...threads.flatMap((t) => (t.comments?.nodes ?? []).filter(Boolean).map((c) => comment(c, t.path ?? null, t.line ?? null))),
+  ].sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const moreComments = Math.max(0, (node.comments?.totalCount ?? 0) - issue.length)
+    + threads.reduce((n, t) => n + Math.max(0, (t.comments?.totalCount ?? 0) - (t.comments?.nodes ?? []).length), 0)
+    + Math.max(0, (node.reviewThreads?.totalCount ?? 0) - threads.length); // unfetched threads count as one comment each
+  return {
+    key: pr.key, id: `${repo.split("/")[1]}#${node.number}`, title: node.title ?? "", url: node.url ?? null, repo,
+    state: String(node.state).toLowerCase() === "merged" ? "merged" : String(node.state).toLowerCase() === "closed" ? "closed" : "open",
+    draft: Boolean(node.isDraft),
+    author: { id: login(node.author), name: node.author?.name || login(node.author) },
+    branch: node.headRefName, target: node.baseRefName ?? null,
+    createdAt: node.createdAt ?? null, updatedAt: node.updatedAt ?? null, mergedAt: node.mergedAt ?? null,
+    description: safeMarkdown(node.body ?? ""),
+    reviewers, comments, moreComments,
+    files: files.map(mapPrFile),
+    moreFiles: Math.max(0, (node.changedFiles ?? files.length) - files.length),
+    truncated: false, // GitHub doesn't say when it left a patch out for size
+  };
+}
+
+const REPO_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+// A GET on the REST API. Rejects with a message fit to show, never with the token.
+async function restGet(io, url, t) {
+  let res;
+  try {
+    res = await io.fetch(url, { method: "GET", headers: { Authorization: `Bearer ${t}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "herdr-wayfinder" } });
+  } catch { throw new Error("The request to GitHub failed before it was answered"); }
+  const text = await res.text();
+  let body;
+  try { body = JSON.parse(text); } catch { throw new Error(`GitHub answered ${res.status}: ${text.slice(0, 200)}`); }
+  if (!res.ok) throw new Error(body?.message ? `GitHub answered ${res.status}: ${body.message}` : `GitHub answered ${res.status}`);
+  return body;
+}
+
 export const REPOS_QUERY = `query($after: String) {
   viewer { repositories(first: ${PAGE}, after: $after, affiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER], ownerAffiliations: [OWNER, COLLABORATOR, ORGANIZATION_MEMBER]) {
     pageInfo { hasNextPage endCursor } nodes { nameWithOwner isArchived } } }
@@ -267,7 +344,7 @@ async function needsScope(write, scope, what) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "review", "repos", "signInState"],
+  capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "prDetail", "review", "repos", "signInState"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -343,6 +420,23 @@ export const github = {
     const r = mapReview((await graphql(account, io, REVIEW_QUERY, { id: pr.key })).node);
     if (r.fork) throw new Error("This Pull Request comes from a fork. Reviews check out branches from the repo itself.");
     return r;
+  },
+
+  // A PrDetail (#1). pr: a PrSummary from pullRequests(). Files: up to 3 pages of 100.
+  async pullRequest(account, pr, io) {
+    const node = (await graphql(account, io, PR_DETAIL_QUERY, { id: pr.key })).node;
+    if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
+    const repo = node.repository?.nameWithOwner ?? pr.repo;
+    if (!REPO_NAME.test(String(repo)) || !Number.isInteger(node.number)) throw new Error("GitHub returned a Pull Request without a repo or number");
+    const t = await token(account, io), files = [];
+    const pages = Math.min(FILE_PAGES, Math.ceil((node.changedFiles ?? PAGE * FILE_PAGES) / PAGE));
+    for (let page = 1; page <= pages; page++) {
+      const list = await restGet(io, `${REST}/repos/${repo}/pulls/${node.number}/files?per_page=${PAGE}&page=${page}`, t);
+      if (!Array.isArray(list)) throw new Error("GitHub didn't return this Pull Request's files");
+      files.push(...list);
+      if (list.length < PAGE) break;
+    }
+    return mapPrDetail(node, files, pr);
   },
 
   async pullRequests(account, io) {

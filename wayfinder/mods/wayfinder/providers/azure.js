@@ -12,6 +12,7 @@
 // Linked Azure PRs are fetched. GitHub PR links show by URL only (R5).
 import { htmlToMarkdown } from "./html.js";
 import { repoFilter, safeMarkdown } from "./contract.js";
+import { unifiedDiff } from "./diff.js";
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const RESOURCE = "499b84ac-1321-427f-aa17-267ca6975798"; // Azure DevOps
@@ -297,6 +298,73 @@ export function mapReview(pr, items) {
   };
 }
 
+// A Pull Request's detail (#1). Azure has no patch API, so both sides of each file are fetched and diffed.
+const PR_THREADS = 100, PR_FILES = 50, PR_CHANGES = 100, FILE_FETCHES = 6;
+const VOTE = { 10: "approved", 5: "approved", 0: "waiting", "-5": "commented", "-10": "rejected" };
+
+export function fileStatus(changeType) {
+  const t = String(changeType ?? "").toLowerCase();
+  if (t.includes("rename")) return "renamed";
+  if (t.includes("add")) return "added";
+  if (t.includes("delete")) return "deleted";
+  return "modified";
+}
+
+// Threads into comments, oldest first: deleted threads and comments and system comments left out. The first
+// PR_THREADS threads (by their first comment) are kept, the rest counted in moreComments. Pure.
+export function mapThreads(threads) {
+  const kept = (threads ?? []).filter((t) => t && !t.isDeleted)
+    .map((t) => ({ t, list: (t.comments ?? []).filter((c) => c && !c.isDeleted && c.commentType !== "system") }))
+    .filter((x) => x.list.length)
+    .sort((a, b) => String(a.list[0].publishedDate).localeCompare(String(b.list[0].publishedDate)));
+  const comments = kept.slice(0, PR_THREADS).flatMap(({ t, list }) => list.map((c) => ({
+    author: c.author?.displayName ?? "", createdAt: c.publishedDate ?? null, body: safeMarkdown(String(c.content ?? "")),
+    path: t.threadContext?.filePath ?? null, line: t.threadContext?.filePath ? (t.threadContext.rightFileStart?.line ?? null) : null,
+  }))).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  return { comments, moreComments: kept.slice(PR_THREADS).reduce((n, x) => n + x.list.length, 0) };
+}
+
+// One Items Get answer: the text, or null when the item is binary or has no text content.
+export function itemText(item) {
+  if (!item || item.isBinary || item.contentMetadata?.isBinary || (item.gitObjectType && item.gitObjectType !== "blob")) return null;
+  return typeof item.content === "string" ? item.content : null;
+}
+
+// A change entry and its two sides (undefined: the side doesn't exist; null: binary) into a PrDetail file. Pure.
+export function mapChange(entry, oldItem, newItem) {
+  const status = fileStatus(entry.changeType), path = entry.item?.path ?? "";
+  const oldPath = status === "renamed" ? (entry.originalPath ?? entry.sourceServerItem ?? null) : null;
+  const oldText = oldItem === undefined ? "" : itemText(oldItem), newText = newItem === undefined ? "" : itemText(newItem);
+  if (oldText == null || newText == null) return { file: { path, oldPath, status, additions: 0, deletions: 0, patch: null, binary: true }, truncated: false };
+  const d = unifiedDiff(oldText, newText);
+  return { file: { path, oldPath, status, additions: d.additions, deletions: d.deletions, patch: d.patch, binary: false }, truncated: d.truncated };
+}
+
+export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated }) {
+  if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
+  const { comments, moreComments } = mapThreads(threads);
+  const s = mapPrSummary(pr, org);
+  return {
+    key: s.key, id: s.id, title: s.title, url: s.url, repo: s.repo,
+    state: PR_STATE[pr.status] ?? "open", draft: Boolean(pr.isDraft), author: s.author,
+    branch: branchOf(pr.sourceRefName), target: branchOf(pr.targetRefName) || null,
+    createdAt: pr.creationDate ?? null, updatedAt: null, mergedAt: pr.status === "completed" ? (pr.closedDate ?? null) : null,
+    description: safeMarkdown(pr.description ?? ""),
+    reviewers: (pr.reviewers ?? []).map((r) => ({ name: r.displayName ?? r.uniqueName ?? "", state: VOTE[r.vote] ?? "waiting" })),
+    comments, moreComments, files, moreFiles, truncated,
+  };
+}
+
+// Runs fn over items, at most `limit` at a time, keeping their order.
+async function pool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i], i); }
+  }));
+  return out;
+}
+
 export function mapTicket(w, { org, project, columnField = null, parent = null, comments = { comments: [], moreComments: 0 }, pullRequests = [] }) {
   const f = w.fields ?? {}, type = f["System.WorkItemType"] ?? "";
   const a = f["System.AssignedTo"], p = f["Microsoft.VSTS.Common.Priority"];
@@ -321,7 +389,7 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "images", "move", "update", "pullRequests", "review", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "move", "update", "pullRequests", "prDetail", "review", "repos", "statuses", "signInState"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -375,6 +443,45 @@ export const azure = {
     if (!Number.isInteger(id) || id <= 0) throw new Error("This card has no work item to move");
     const org = orgUrl(account), tok = await token(account, io);
     await patchItem(org, tok, io, id, moveOps(ref, target, ticket.type));
+  },
+
+  // A PrDetail (#1). pr: a PrSummary from pullRequests(). The PR, its threads, its last iteration's changes,
+  // then both sides of the first PR_FILES files (the target's last merge commit and the source's), diffed here.
+  async pullRequest(account, pr, io) {
+    const [repoId, n] = String(pr.key).split("!");
+    if (!repoId || !/^\d+$/.test(n ?? "")) throw new Error("This row has no Pull Request to show");
+    const project = pr.repo.slice(0, pr.repo.lastIndexOf("/"));
+    const org = orgUrl(account), tok = await token(account, io);
+    const base = `${seg(project)}/_apis/git/repositories/${seg(repoId)}`, prPath = `${base}/pullRequests/${n}`;
+    const [d, threads, iterations] = await Promise.all([
+      rest(org, tok, io, prPath), rest(org, tok, io, `${prPath}/threads`), rest(org, tok, io, `${prPath}/iterations`),
+    ]);
+    const lastIt = (iterations.value ?? []).at(-1), last = lastIt?.id;
+    const entries = last == null ? [] : ((await rest(org, tok, io, `${prPath}/iterations/${last}/changes?$top=${PR_CHANGES}`)).changeEntries ?? [])
+      .filter((e) => e?.item?.path && !e.item.isFolder && e.item.gitObjectType !== "tree");
+    const commit = (c) => (/^[0-9a-f]{40}$/i.test(String(c?.commitId ?? "")) ? c.commitId : null);
+    // The old side is the merge base (the iteration's commonRefCommit), as Azure's own diff view shows:
+    // the target branch's tip would show its later commits reversed. Older iterations lack it.
+    const oldCommit = commit(lastIt?.commonRefCommit) ?? commit(d.lastMergeTargetCommit), newCommit = commit(d.lastMergeSourceCommit);
+    const item = (path, version) => (version
+      ? rest(org, tok, io, `${base}/items?path=${seg(path)}&versionDescriptor.versionType=commit&versionDescriptor.version=${version}&includeContent=true`)
+      : Promise.resolve(null));
+    let truncated = false;
+    const files = await pool(entries.slice(0, PR_FILES), FILE_FETCHES, async (e) => {
+      const status = fileStatus(e.changeType), oldPath = status === "renamed" ? (e.originalPath ?? e.sourceServerItem ?? e.item.path) : e.item.path;
+      try {
+        const [oldItem, newItem] = await Promise.all([
+          status === "added" ? undefined : item(oldPath, oldCommit),
+          status === "deleted" ? undefined : item(e.item.path, newCommit),
+        ]);
+        const r = mapChange(e, oldItem, newItem);
+        truncated ||= r.truncated;
+        return r.file;
+      } catch { // one unreadable file doesn't hide the rest: it shows without a patch
+        return { path: e.item.path, oldPath: status === "renamed" ? oldPath : null, status, additions: 0, deletions: 0, patch: null, binary: false };
+      }
+    });
+    return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: Math.max(0, entries.length - PR_FILES), truncated });
   },
 
   // A Review's data (D16): the branches, the description, and the acceptance criteria of every linked

@@ -149,6 +149,15 @@ export async function loadReviewInfo(profile, accountId, pr, io, registry = PROV
   return provider.review(account, pr, io);
 }
 
+// One Pull Request's detail (#1): description, reviewers, comments and files with their diffs.
+export async function loadPullRequestDetail(profile, accountId, pr, io, registry = PROVIDERS) {
+  const account = profile.accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error(`No account "${accountId}" in this profile`);
+  const provider = providerFor(account, registry);
+  if (!can(provider, "prDetail")) throw new Error(`Pull Request detail on ${account.provider} isn't supported yet`);
+  return provider.pullRequest(account, pr, io);
+}
+
 // Moves a Ticket to a Column on its Board (#15). columnId: a Column of the Board as shown.
 export async function moveTicket(profile, boardCfg, data, ticket, columnId, io, registry = PROVIDERS) {
   const { account, provider } = resolve(profile, boardCfg, registry);

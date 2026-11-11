@@ -5,11 +5,11 @@
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { run, layout, shared, setShared, theme, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
+import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
+import { run, layout, shared, setShared, theme, settings, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
@@ -22,6 +22,10 @@ const IMAGE_DIR = "data/wayfinder-images"; // under Herdr's home: image() reads 
 const FULL_KEY = "wayfinder.fullscreen"; // { px }: the panel's width before fullscreen
 const WANT_FULL_KEY = "wayfinder.wantFullscreen"; // the last fullscreen choice, kept across Close
 const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for the Board's "View in …" link
+const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
+const DIFF_LINES = 300; // a patch's lines shown before "Show N more lines"
+// A faint background of a theme color (#rrggbb), or none.
+const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
 
 function findNode(node, id) {
   if (node?.id === id) return node;
@@ -121,8 +125,12 @@ function card(tk, t, selected, onClick, cursor = false) {
 const prAge = (pr) => pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}`
   : pr.createdAt ? ` · opened ${formatAge(Date.now() - Date.parse(pr.createdAt))}` : "";
 
-function prRow(pr, t, review = null) {
+// `select`: { selected, onClick }, the row opens the Pull Request panel.
+function prRow(pr, t, review = null, select = null) {
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
+    .when(Boolean(select), (el) => el.cursor_pointer().when(select.selected, (r) => r.bg(t.selected))
+      .hover((s) => s.bg(select.selected ? t.selected : t.hover))
+      .on_mouse_down("left", stop).on_click((_e, cx) => select.onClick(cx)))
     .child(v_flex().flex_1().min_w(0).gap(4)
       .child(h_flex().gap(8).items_center().min_w(0)
         .when(pr.draft, (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
@@ -132,7 +140,7 @@ function prRow(pr, t, review = null) {
     .when(Boolean(review?.state?.status === "error"), (el) => el.child(div().max_w(260).flex_none().text_size(11).text_color(t.blocked).child(review.state.error)))
     .when(Boolean(review), (el) => el.child(button(`wf-pr-review-${pr.key}`, review.state?.status === "busy" ? (review.state.message ?? "Starting…") : "Review", t,
       (cx) => review.start(cx), { on: review.state?.status === "busy" })))
-    .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
+    .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).on_mouse_down("left", stop).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
 }
 
 // Loading placeholders: grey bars in the shape of what's coming, pulsing (native animation, no timer).
@@ -148,16 +156,36 @@ function skeletonColumns(t) {
           .child(bar(t, 70, 9)).child(bar(t, (i + j) % 2 ? 210 : 230, 12)).child(bar(t, (i + j) % 2 ? 120 : 160, 12))))))));
 }
 
+// Both skeletons follow their panel's order below the title.
+const skelRow = (t, w) => h_flex().gap(8).items_center().child(div().w(84).flex_none().child(bar(t, 56))).child(bar(t, w));
+const skelSection = (t, w) => div().pt(8).child(bar(t, w, 9));
+const skelComment = (t) => v_flex().gap(8).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+  .child(bar(t, 120, 9)).child(bar(t, 360, 11)).child(bar(t, 240, 11));
+
+// Column, Assignees, Tags, Priority, Parent; Open in browser; Move to; description; Pull requests; Comments.
 function skeletonTicket(t) {
-  const row = (w) => h_flex().gap(8).items_center().child(div().w(84).flex_none().child(bar(t, 56))).child(bar(t, w));
   return pulse(v_flex().gap(10)
-    .child(v_flex().gap(8).child(row(90)).child(row(140)).child(row(70)).child(row(40)).child(row(180)))
+    .child(v_flex().gap(8).children([90, 140, 70, 40, 180].map((w) => skelRow(t, w))))
     .child(bar(t, 96, 12))
-    .child(div().pt(8).child(bar(t, 80, 9)))
-    .child(v_flex().gap(8).children([380, 400, 340, 0, 360, 300, 390, 220].map((w) => w ? bar(t, w, 11) : div().h(4))))
-    .child(div().pt(8).child(bar(t, 110, 9)))
-    .child(v_flex().gap(8).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
-      .child(bar(t, 120, 9)).child(bar(t, 360, 11)).child(bar(t, 240, 11))));
+    .child(bar(t, 180, 26))
+    .child(skelSection(t, 80))
+    .child(v_flex().gap(8).children([380, 400, 340, 360, 300, 390, 220].map((w) => bar(t, w, 11))))
+    .child(skelSection(t, 100)).child(bar(t, 240, 11))
+    .child(skelSection(t, 110))
+    .child(skelComment(t)));
+}
+
+// Author, Branch, Reviewers, Opened, Updated; Open in browser; description; files; comments.
+function skeletonPr(t) {
+  return pulse(v_flex().gap(10)
+    .child(v_flex().gap(8).children([110, 200, 160, 80, 80].map((w) => skelRow(t, w))))
+    .child(bar(t, 96, 12))
+    .child(skelSection(t, 80))
+    .child(v_flex().gap(8).children([380, 400, 340, 360, 220].map((w) => bar(t, w, 11))))
+    .child(skelSection(t, 60))
+    .child(v_flex().gap(6).children([0, 1, 2].map(() => div().w_full().h(22).rounded(4).bg(t.raised))))
+    .child(skelSection(t, 110))
+    .child(skelComment(t)));
 }
 
 export default class Wayfinder extends View {
@@ -176,6 +204,9 @@ export default class Wayfinder extends View {
     this.images = {}; // image url -> { status, file, error }: saved files stay across reloads
     this.launch = null; // the Launch dialog: { key, selected: repo ids, exists: names | null, status, error, message }
     this.reviews = {}; // pr key -> { status: "busy" | "error", message, error }
+    this.selectedPr = null; // { account, pr }: the Pull Request in the detail panel
+    this.prDetails = {}; // pr key -> { status, data, error }
+    this.prFolds = {}; // pr key -> { file path -> "open" | "folded" | "all" }
     this.editing = null; // the title being edited: { key, input, status, error }
     this.commentBox = TextareaState.new({ placeholder: "Write a comment (markdown)", rows: 3 });
     this.commentBox.set_auto_grow(3, 10);
@@ -262,6 +293,7 @@ export default class Wayfinder extends View {
     else if (this.board) this.fetchBoard(this.board, cx);
     else cx.spawn((cx) => this.check(cx));
     if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
+    if (this.fetchPrLater) { this.fetchPrLater = false; this.fetchPr(cx); }
   }
 
   // What a Provider gets: the runner, fetch, and the Profile's name (Azure keeps an az login per Profile).
@@ -334,12 +366,14 @@ export default class Wayfinder extends View {
     this.boards = {};
     this.movedRecently = {};
     this.tickets = {};
+    this.prDetails = {};
     this.prs = null;
     this.found = {};
     this.statusLists = {};
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     this.lastRefresh = null;
     if (this.selected) this.fetchTicketLater = true;
+    if (this.selectedPr) this.fetchPrLater = true;
     cx.spawn(async (cx) => {
       const path = configPath();
       let text = null;
@@ -352,7 +386,8 @@ export default class Wayfinder extends View {
       // Another Profile: its Ticket detail must not carry over, even to a Board with the same id (D10).
       const now = parsed.profile?.name ?? null;
       if (now !== before) {
-        this.selected = null; this.fetchTicketLater = false;
+        this.selected = null; this.fetchTicketLater = false; this.moveOpen = null;
+        this.selectedPr = null; this.fetchPrLater = false; this.prFolds = {};
         this.launch = null; this.reviews = {}; this.editing = null; this.typing = false;
         this.commenting = null; this.moving = null; this.cursor = null;
       }
@@ -504,7 +539,7 @@ export default class Wayfinder extends View {
   closeTicket() {
     const key = this.selected?.summary.key;
     if (this.moving?.status === "error" && this.moving.key === key) this.moving = null;
-    this.selected = null; this.editing = null; this.typing = false; this.launch = null;
+    this.selected = null; this.editing = null; this.typing = false; this.launch = null; this.moveOpen = null;
   }
 
   fetchTicket(cx) {
@@ -522,6 +557,33 @@ export default class Wayfinder extends View {
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.tickets[key] = next;
       if (next.status === "ok") this.fetchImages(p, b, next.data, io, cx);
+      cx.notify();
+    });
+  }
+
+  // Opens the Pull Request panel, or switches it to another.
+  openPr(accountId, pr, cx) {
+    this.selectedPr = { account: accountId, pr };
+    this.handle.focus(); // the row's click stops the root's, which would focus: Esc needs it
+    if (this.prDetails[pr.key]?.status !== "ok") this.fetchPr(cx);
+    cx.notify();
+  }
+
+  closePr() { this.selectedPr = null; }
+
+  fetchPr(cx) {
+    const sel = this.selectedPr, p = this.profile;
+    if (!sel || !p) return;
+    const key = sel.pr.key;
+    this.prDetails[key] = { status: "loading", data: this.prDetails[key]?.data ?? null };
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      let next;
+      try { next = { status: "ok", data: await loadPullRequestDetail(p, sel.account, sel.pr, io) }; } catch (e) {
+        next = { status: "error", data: this.prDetails[key]?.data ?? null, error: String(e.message ?? e) };
+      }
+      if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
+      this.prDetails[key] = next;
       cx.notify();
     });
   }
@@ -992,7 +1054,7 @@ export default class Wayfinder extends View {
     return h_flex().size_full().items_start()
       // A click on the Board outside a card closes the detail panel. Cards and buttons stop their own.
       .child(v_flex().id("wf-board-area").flex_1().min_w(0).h_full()
-        .on_click((_e, cx) => { if (this.selected) { this.closeTicket(); cx.notify(); } })
+        .on_click((_e, cx) => { if (this.moveOpen) this.moveOpen = null; else if (this.selected) this.closeTicket(); cx.notify(); })
         .child(bar).child(content))
       .when(Boolean(panel), (el) => el.child(panel));
   }
@@ -1023,7 +1085,7 @@ export default class Wayfinder extends View {
       try {
         await moveTicket(p, b, data, before, columnId, io);
         if (this.profile?.name === p.name) this.movedRecently[b.id] = { key: summary.key, columnId: after.columnId, status, until: Date.now() + 15000 };
-        this.moving = null;
+        this.moving = null; this.moveOpen = null;
         delete this.tickets[summary.key]; // its Column changed: the detail reloads
         if (this.selected?.summary.key === summary.key) this.fetchTicket(cx);
       } catch (e) {
@@ -1034,6 +1096,7 @@ export default class Wayfinder extends View {
           this.selected = { ...this.selected, summary: { ...this.selected.summary, columnId: before.columnId, status: before.status } };
         }
         this.moving = { key: summary.key, status: "error", error: `Couldn't move it: ${e.message ?? e}` };
+        this.moveOpen = null;
       }
       if (this.profile?.name === p.name) this.fetchBoard(b, cx);
       cx.notify();
@@ -1048,10 +1111,24 @@ export default class Wayfinder extends View {
     // GitHub's "No Status" is not a target: it shows only as the card's current Column.
     const cols = this.columnsOf(b, data).map((x) => x.column).filter((c) => c.id !== NO_COLUMN || c.id === cur);
     const m = this.moving?.key === sum.key ? this.moving : null;
+    const open = this.moveOpen === sum.key;
+    const name = cols.find((c) => c.id === cur)?.name ?? "—";
+    const trigger = button("wf-move-trigger", h_flex().gap(6).items_center().child(name).child(svg("mods/workspace-chrome/chevron-down.svg").size(12)), t,
+      (cx) => { this.moveOpen = open ? null : sum.key; cx.notify(); }, { on: open });
+    // The current Column shows selected and is not a target.
+    const list = v_flex().id("wf-move-list").min_w(180).p(4).rounded(6).bg(t.popover).border_1().border_color(t.border).on_mouse_down("left", stop)
+      .children(cols.map((c) => {
+        const here = c.id === cur;
+        return h_flex().id(`wf-move-${c.id}`).px(10).h(26).items_center().rounded(4).text_size(12)
+          .text_color(here ? t.foreground : t.muted).when(here, (el) => el.bg(t.selected))
+          .when(!here, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_click((_e, cx) => { this.moveOpen = null; this.moveCard(b, sum, c.id, cx); cx.notify(); }))
+          .child(div().truncate().child(c.name));
+      }));
     return v_flex().gap(6)
-      .child(h_flex().gap(6).flex_wrap().items_center()
+      .child(h_flex().gap(6).items_center()
         .child(div().w(84).flex_none().text_size(12).text_color(t.dim).child("Move to"))
-        .children(cols.map((c) => button(`wf-move-${c.id}`, c.name, t, (cx) => { if (c.id !== cur) this.moveCard(b, sum, c.id, cx); cx.notify(); }, { on: c.id === cur }))))
+        .child(Popup.new("wf-move-pop", trigger).anchor("bottom_left").when(open, (el) => el.content(list))))
       .when(m?.status === "busy", (el) => el.child(div().text_size(12).text_color(t.dim).child("Moving…")))
       .when(m?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(m.error)));
   }
@@ -1319,8 +1396,9 @@ export default class Wayfinder extends View {
     const ub = this.profile.boards.find((x) => x.id === this.selected.boardId);
     if (tk && this.launch?.key === k) body.child(this.launchCard(t, tk));
     const mb = this.profile.boards.find((x) => x.id === this.selected.boardId);
-    const mr = mb && this.moveRow(t, mb, sum);
-    if (mr) body.child(mr);
+    // Below "Open in browser" once the Ticket is here (the skeleton's bar holds its place), else after the error.
+    const mr = mb && (tk || entry.status !== "loading") ? this.moveRow(t, mb, sum) : null;
+    if (mr && !tk) body.child(mr);
     if (tk) {
       body
         .child(v_flex().gap(6)
@@ -1330,6 +1408,7 @@ export default class Wayfinder extends View {
           .child(row("Priority", tk.priority))
           .child(row("Parent", tk.parent ? `${tk.parent.id} ${tk.parent.title}` : null)))
         .when(Boolean(tk.url), (el) => el.child(md("url", link("Open in browser", tk.url))))
+        .when(Boolean(mr), (el) => el.child(mr))
         .child(section(tk.descriptionLabel ?? "Description"))
         .child(tk.description.trim() ? rich("desc", tk.description) : div().text_size(12).text_color(t.dim).child("No description."))
         .when(tk.acceptanceCriteria != null, (el) => el.child(section("Acceptance criteria")).child(rich("ac", tk.acceptanceCriteria ?? "")))
@@ -1384,7 +1463,8 @@ export default class Wayfinder extends View {
           ...(ok.length > 1 ? [div().pt(4).text_size(12).text_color(t.dim).child(`${l.account} · ${a?.login ?? a?.org ?? ""}`)] : []),
           ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
-            .children(g.prs.map((pr) => prRow(pr, t, { state: this.reviews[pr.key], start: (cx) => this.startReview(l.account, pr, cx) })))),
+            .children(g.prs.map((pr) => prRow(pr, t, { state: this.reviews[pr.key], start: (cx) => this.startReview(l.account, pr, cx) },
+              { selected: this.selectedPr?.pr.key === pr.key, onClick: (cx) => this.openPr(l.account, pr, cx) })))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
       });
@@ -1396,8 +1476,102 @@ export default class Wayfinder extends View {
       ...lists.filter((l) => l.error && !signedOut(l.account)).map((l) => note(`${l.account}: couldn't load Pull Requests: ${l.error}`, t.blocked)),
     ];
     const body = entry.data ? [section("Mine", "mine"), section("Needs my review", "needsReview")] : (entry.status === "loading" ? [] : [note("No Pull Requests yet.")]);
-    return v_flex().size_full().min_h(0).child(bar)
-      .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body]));
+    // A click on the list outside a row closes the panel. Rows and buttons stop their own.
+    return h_flex().size_full().items_start()
+      .child(v_flex().id("wf-prs-area").flex_1().min_w(0).min_h(0).h_full()
+        .on_click((_e, cx) => { if (this.selectedPr) { this.closePr(); cx.notify(); } })
+        .child(bar)
+        .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body])))
+      .when(Boolean(this.selectedPr), (el) => el.child(this.prPanel(t)));
+  }
+
+  // One changed file: a header that folds its diff. The first DIFF_LINES lines show, then a row for the rest.
+  prFile(t, k, f, i, defaultOpen) {
+    const st = this.prFolds[k]?.[f.path] ?? (defaultOpen ? "open" : "folded");
+    const setFold = (v) => { (this.prFolds[k] ??= {})[f.path] = v; };
+    const head = h_flex().id(`wf-pr-file-${k}-${i}`).h(28).px(8).gap(8).items_center().cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+      .on_click((_e, cx) => { setFold(st === "folded" ? "open" : "folded"); cx.notify(); })
+      .child(div().w(12).flex_none().text_size(11).text_color(t.dim).child(FILE_STATUS[f.status] ?? "?"))
+      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground)
+        .child(f.status === "renamed" && f.oldPath ? `${f.oldPath} → ${f.path}` : f.path))
+      .child(h_flex().flex_none().gap(6).text_size(11)
+        .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
+        .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)));
+    const block = v_flex().rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(head);
+    if (st === "folded") return block;
+    const note = (text) => div().px(8).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).child(text);
+    if (f.binary) return block.child(note("Binary file"));
+    if (f.patch == null) return block.child(note("Diff not shown"));
+    const lines = String(f.patch).replace(/\n$/, "").split("\n");
+    const shown = st === "all" ? lines : lines.slice(0, DIFF_LINES);
+    const line = (text) => {
+      const [color, bg] = text.startsWith("@@") ? [t.dim, null] : text.startsWith("+") ? [t.done, tint(t.done)]
+        : text.startsWith("-") ? [t.blocked, tint(t.blocked)] : [t.foreground, null];
+      return div().px(8).whitespace_nowrap().text_color(color).when(Boolean(bg), (el) => el.bg(bg)).child(text || " ");
+    };
+    return block
+      .child(div().id(`wf-pr-diff-${k}-${i}`).border_t(1).border_color(t.border).overflow_x_scrollbar()
+        .child(v_flex().flex_none().min_w_full().py(4).font_family(settings().font_family ?? settings().font ?? "monospace").text_size(11).children(shown.map(line))))
+      .when(shown.length < lines.length, (el) => el.child(h_flex().id(`wf-pr-more-${k}-${i}`).h(26).px(8).items_center().border_t(1).border_color(t.border)
+        .cursor_pointer().text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { setFold("all"); cx.notify(); })
+        .child(`Show ${lines.length - shown.length} more lines`)));
+  }
+
+  // The Pull Request panel: the row's summary shows at once, the rest when the detail arrives.
+  prPanel(t) {
+    const sel = this.selectedPr, pr = sel.pr, k = pr.key;
+    const entry = this.prDetails[k] ?? { status: "loading" };
+    const d = entry.data, cur = d ?? pr;
+    const md = (id, text) => div().text_size(13).text_color(t.foreground).child(TextView.markdown(`wf-pr-${id}-${k}`, text).selectable(true));
+    const section = (title) => div().pt(8).text_size(11).font_semibold().text_color(t.dim).child(title.toUpperCase());
+    const note = (text) => div().text_size(12).text_color(t.dim).child(text);
+    const row = (label, value) => h_flex().gap(8).items_start().text_size(12)
+      .child(div().w(84).flex_none().text_color(t.dim).child(label))
+      .child(div().flex_1().min_w(0).text_color(t.foreground).child(value || "—"));
+    const date = (s) => String(s ?? "").slice(0, 10);
+    const rv = this.reviews[k];
+
+    const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
+      .child(div().min_w(0).text_size(12).text_color(t.muted).truncate().child([cur.id, cur.repo, cur.state].filter(Boolean).join(" · ")))
+      .when(Boolean(cur.draft), (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
+      .child(div().flex_1())
+      .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
+        (cx) => this.startReview(sel.account, pr, cx), { on: rv?.status === "busy" }))
+      .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
+
+    const body = v_flex().id(`wf-pr-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
+      .child(div().text_size(16).font_semibold().text_color(t.foreground).child(cur.title))
+      .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
+      .when(rv?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(rv.error)))
+      .when(!d && entry.status === "loading", (el) => el.child(skeletonPr(t)));
+    if (d) {
+      const files = d.files ?? [], comments = d.comments ?? [];
+      const adds = files.reduce((n, f) => n + (f.additions ?? 0), 0), dels = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
+      const summary = [`${files.length} ${files.length === 1 ? "file" : "files"} · +${adds} −${dels}`,
+        ...(d.moreFiles ? [`${d.moreFiles} more not shown`] : []), ...(d.truncated ? ["Some diffs were cut"] : [])].join(" · ");
+      body
+        .child(v_flex().gap(6)
+          .child(row("Author", d.author?.name))
+          .child(row("Branch", d.branch ? `${d.branch} → ${d.target ?? "?"}` : null))
+          .child(row("Reviewers", (d.reviewers ?? []).map((r) => `${r.name} (${r.state})`).join(", ")))
+          .child(row("Opened", date(d.createdAt)))
+          .child(row("Updated", date(d.updatedAt))))
+        .when(Boolean(d.url), (el) => el.child(md("url", link("Open in browser", d.url))))
+        .child(section("Description"))
+        .child(String(d.description ?? "").trim() ? md("desc", d.description) : note("No description."))
+        .child(section("Files"))
+        .child(note(summary))
+        .children(files.map((f, i) => this.prFile(t, k, f, i, files.length <= 5)))
+        .child(section(`Comments (${comments.length + (d.moreComments ?? 0)})`))
+        .children(comments.map((c, i) => v_flex().id(`wf-pr-c-${k}-${i}`).gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+          .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${date(c.createdAt)}${c.path ? ` · ${c.path}${c.line != null ? `:${c.line}` : ""}` : ""}`))
+          .child(md(`c${i}`, c.body ?? ""))));
+    }
+    return v_flex().id("wf-pr-panel").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border)
+      .child(head).child(body);
   }
 
   // Shown while fullscreen is wanted but off (Close, the tab bar, another panel left it): back to
@@ -1426,7 +1600,9 @@ export default class Wayfinder extends View {
             if (this.typing === "title") this.editing = null;
             this.typing = false;
             this.handle.focus();
-          } else if (this.selected) this.closeTicket(); else this.setFullscreen(false);
+          } else if (this.moveOpen) this.moveOpen = null;
+          else if (this.view === "prs" && this.selectedPr) this.closePr();
+          else if (this.selected) this.closeTicket(); else this.setFullscreen(false);
           cx.notify(); return;
         }
         if (this.typing) return; // keys in a text box are for the text

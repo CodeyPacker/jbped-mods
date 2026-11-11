@@ -14,6 +14,7 @@
 //     imageName(account, url) -> string | null      // "images": a safe file name, null if not its image
 //     downloadImage(account, url, path, io)         // "images": saves it to path, keeps a file already there
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
+//     pullRequest(account, pr, io) -> PrDetail      // "prDetail": pr a PrSummary from pullRequests()
 //     repos(account, io) -> string[]                // "repos": what can be followed, "owner/name" or "project/repo"
 //     statuses(account, ref, io) -> string[]        // "statuses": a Board's states, for Tracked Statuses
 //     renameProfile(from, to, io)                   // optional: move what the Provider keeps per Profile
@@ -53,8 +54,22 @@
 //   more       how many more matched than were fetched
 // PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt? }
 //   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
+// PrDetail     pullRequest()'s answer (#1): one Pull Request with its description, comments and files
+//   key, id, title, url, repo           as in PrSummary
+//   state      "open" | "merged" | "closed";  draft  boolean
+//   author     { id, name };  branch, target  head and base branch names, no refs/heads/
+//   createdAt, updatedAt, mergedAt      ISO strings or null
+//   description  markdown, safeMarkdown applied; "" when none
+//   reviewers  [{ name, state }]  state: "approved" | "changes" | "commented" | "pending" | "rejected" | "waiting"
+//   comments   [{ author, createdAt, body, path, line }], oldest first; path and line null unless on a file
+//   moreComments  how many comments weren't fetched
+//   files      [{ path, oldPath, status, additions, deletions, patch, binary }]
+//              status: "added" | "modified" | "deleted" | "renamed"; oldPath set for renames, else null
+//              patch: unified hunks from the first "@@ … @@" line, no "diff --git" header; null when binary or too big
+//   moreFiles  how many changed files weren't returned
+//   truncated  true when any file's patch was cut for size
 
-export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "repos", "statuses", "signInState", "move", "update"];
+export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "prDetail", "repos", "statuses", "signInState", "move", "update"];
 
 export const NO_COLUMN = "__none__";
 

@@ -21,9 +21,16 @@ Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side
 
 Tab bar: the Wayfinder button. Palette: `Wayfinder: Open`, `Wayfinder: Toggle`, `Wayfinder: Close`, `Wayfinder: Fullscreen`, `Wayfinder: Switch Profile`, `Wayfinder: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfinder shows one Profile at a time, and switching saves it as `activeProfile` in `wayfinder.json` (rewritten as formatted JSON), so it holds across restarts. Fullscreen hides the terminals and gives the panel the whole work area. Another panel, Close, or a space with the panel closed puts them back, and opening Wayfinder again returns to fullscreen. Wayfinder remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfinder saves them through az into `data/wayfinder-images/` in the herdr-app folder, and deletes ones saved over 30 days ago (a Ticket shown again saves them again). Click another card to switch it, or the Board outside the cards to close it. Arrow keys move between cards (left and right skip empty Columns, Home and End jump in a Column), Enter opens the card, and while the detail panel is open it follows the arrows. Esc closes the detail panel, then a second Esc leaves fullscreen. Toggle (`ctrl-shift-g` with this share's `keys.json`) shows Wayfinder, or hides it when it is what the panel shows. The tab bar (tabs-plus) runs it, because a hidden Wayfinder gets no commands.
 
+## Pull Request detail
+
+Click a Pull Request row to open its panel on the right, built like the Ticket panel: author, branch into target, reviewers and their state, dates, "Open in browser", the description, the changed files with their diffs, and the comments (file comments show their path and line). Files fold and unfold by their header, start unfolded when there are five or fewer, and show 300 lines before "Show more". Diffs use the terminal font. Click the list outside a row, or press Esc, to close it. The Review button is in the row and in the panel's header.
+
+- GitHub: one GraphQL request for the fields and comments, and the REST files endpoint for each file's patch (up to 300 files, 100 issue comments, 50 review threads).
+- Azure: the PR, its threads, the last iteration's changes, and both sides of each file (the merge base and the source commit), diffed by Wayfinder. Up to 50 files are diffed and 100 threads shown; a file over 3000 lines shows no diff.
+
 ## Move
 
-The detail panel's "Move to" row moves a Ticket to another Column, and Shift with Left or Right moves the card under the arrow-key cursor one Column over. The card moves at once, then the Board reloads, and a failure puts it back with the error.
+The detail panel's "Move to" dropdown moves a Ticket to another Column, and Shift with Left or Right moves the card under the arrow-key cursor one Column over. The card moves at once, then the Board reloads, and a failure puts it back with the error.
 
 - Azure: a Tracked Statuses Column sets the work item's State. A Column of the team's board sets the State that Column maps for the item's type, plus the board's own Column field.
 - GitHub: sets the item's Status option. It needs the `project` scope: `gh auth refresh -h github.com -s project`.
