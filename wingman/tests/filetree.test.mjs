@@ -1,4 +1,4 @@
-import { PER_FOLDER, TOTAL, createTree, setFolder, toggle, reveal, loaded, rows, STATUS_TREE, parseStatus, ignoredMatcher, folderMarks } from "../mods/wingman/filetree.js";
+import { PER_FOLDER, TOTAL, folderIndex, createTree, setFolder, toggle, reveal, loaded, rows, STATUS_TREE, parseStatus, ignoredMatcher, folderMarks } from "../mods/wingman/filetree.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -143,4 +143,24 @@ try {
   const m2 = ignoredMatcher(ignored); assert.ok(m2("node_modules/p1/lib/s1/f1.js", false)); assert.ok(m2("logs/app.log", false)); assert.ok(!m2("logs/keep.txt", false));
   console.log(`filetree git: ${lines.length} entries, ${ms.toFixed(0)}ms`);
 } finally { rmSync(d, { recursive: true, force: true }); }
+// folderIndex: folders from a file list plus ignored entries; an ignored folder has no listing of its own.
+{
+  const idx = folderIndex(["a.js", "src/b.js", "src/lib/c.js", "src/lib/d.js", "README.md"], ["node_modules/", "src/out.log", "dist/"]);
+  const sorted = (rel) => idx.get(rel).map((e) => e.name + (e.dir ? "/" : "")).sort();
+  assert.deepEqual(sorted(""), ["README.md", "a.js", "dist/", "node_modules/", "src/"]);
+  assert.deepEqual(sorted("src"), ["b.js", "lib/", "out.log"]);
+  assert.deepEqual(sorted("src/lib"), ["c.js", "d.js"]);
+  assert.ok(!idx.has("node_modules") && !idx.has("dist"));
+  assert.deepEqual([...folderIndex([]).keys()], [""]);
+  // Into the tree: the root from the index, an opened folder too.
+  const tr = createTree(); setFolder(tr, "", idx.get("")); toggle(tr, "src"); setFolder(tr, "src", idx.get("src"));
+  const m = ignoredMatcher(["node_modules/", "src/out.log", "dist/"]);
+  assert.deepEqual(rows(tr, { ignored: m }).map((x) => [x.rel, x.ignored]),
+    [["dist", true], ["node_modules", true], ["src", false], ["src/lib", false], ["src/b.js", false], ["src/out.log", true], ["a.js", false], ["README.md", false]]);
+  // 50k paths stay fast.
+  const many = Array.from({ length: 50000 }, (_, i) => `d${i % 100}/e${i % 7}/f${i}.js`);
+  const t0 = performance.now(); const big = folderIndex(many, ["node_modules/"]); const ms = performance.now() - t0;
+  assert.equal(big.get("").length, 101); assert.equal(big.get("d3/e2").length > 0, true);
+  assert.ok(ms < 2000, `folderIndex took ${ms}ms`);
+}
 console.log("filetree ok");

@@ -23,16 +23,18 @@ Each repo's review lives in `<git-dir>/wingman/`. Git never tracks or pushes tha
 ### Workspaces: several repos in one space
 
 A space reviews every repo in its workspace, which is made up of:
-- the repo its agents started in, and every repo Claude edited,
+- the repo of every terminal's folder in the space (agents or not), and every repo Claude edited,
 - the folders of a VS Code workspace file (`*.code-workspace`) in the space's folder. Wayfinder's Launch writes one into the Ticket folder, listing one worktree per repo,
 - repos you add yourself.
 
-With more than one repo, the Edit tree shows each repo as a top-level entry, with its name (the file's `name`, else the folder), its open change count and a × to remove it. **+ Add repo…** under the tree takes:
+A terminal's folder outside any git repo, or a workspace folder that isn't a repo, is a plain folder: the Edit tree lists it and its files open, edit and save, but nothing is reviewed or captured there, and Changes and Quick Open leave it out. Next to a repo, a plain folder starts collapsed. Its header has a ⟳ button that lists its open folders again. Its open folders are also relisted on their own, one folder at a time, at most every 30 seconds. A home folder is never searched for a repo, and is listed one level at a time like any plain folder.
+
+With more than one repo or folder, the Edit tree shows each as a top-level entry, with its name (the file's `name`, else the folder), its open change count and a × to remove it. **+ Add repo…** under the tree takes:
 - a repo,
 - a folder of repos, listing the repos inside it to tick,
 - a main clone while the space's worktrees share a branch. Wingman offers to make a worktree for it beside them, on that branch (fetching first, then branching from the remote's default branch when the branch is new).
 
-Removing asks first. Open changes come back when you add the repo again. For a worktree, you choose whether to delete it too (`git worktree remove`, which refuses while it has uncommitted or untracked files).
+Removing asks first. A removed repo or folder stays out even while a terminal is still in it. Open changes come back when you add the repo again. For a worktree, you choose whether to delete it too (`git worktree remove`, which refuses while it has uncommitted or untracked files).
 
 The workspace file uses VS Code's format: `{"folders": [{"path": "api"}, {"path": "../web", "name": "Web"}], "settings": {}}`. Paths are relative to the file or absolute, and comments are allowed. When a folder has several, Wingman reads the one named after the folder, else the first by name, and rereads it whenever it changes. When Wingman edits it, only `folders` changes, so every other key, comment and the order stay as they were. A space with one repo has no file. Adding a second repo makes one, in the space's folder, named after that folder. If the folder is inside a repo, or is the home folder, the file goes to `data/wingman/workspaces/<space>.code-workspace` with absolute paths instead. VS Code and Cursor can open either.
 
@@ -88,19 +90,19 @@ A third block, `{"id": "wingman-changes", "type": "block", "content": {"mod": "w
 
 ### Changes
 
-Every uncommitted change in the space's repos, against `HEAD`: your edits, other tools', and the agent's from before Wingman started capturing. The list on the left shows each file's status (A added or untracked, M modified, D deleted, ! conflict) and what Review says about it ("2 to review", "reviewed"). The diff is read-only; a double-click opens the line in Edit.
+Every uncommitted change in the space's repos, against `HEAD`: your edits, other tools', and the agent's from before Wingman started capturing. The list on the left shows each file's status (A added or untracked, M modified, D deleted, ! conflict), its added and deleted line counts (`+12 −3`, none for binary files), and what Review says about it ("2 to review", "reviewed"). The list header shows the totals. The diff is read-only; a double-click opens the line in Edit.
 
 - **Discard file** puts the file back as `HEAD` has it (a new file is deleted), after you confirm.
 - **Commit**: check the files to commit (all by default), write a message (several lines are fine), then **Commit** or Ctrl+Enter. Only the checked files are committed: they're staged, new and deleted ones too, and anything else you had staged stays staged. With several repos in the space, pick the repo above the message box. A warning shows when checked files still have changes to review in Review; it doesn't stop the commit.
 - Files with unsaved edits in Edit can't be discarded or committed until those are saved or discarded.
 - Up to 500 files are listed; binary files are listed but not shown.
-- **Committed on this branch**, under the uncommitted files: every file changed between where the branch split from the remote's default branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`) and `HEAD`, as a read-only diff. Files an agent of this space changed carry an **AI** mark, here and in the uncommitted list.
+- **Committed on this branch**, under the uncommitted files: every file changed between where the branch split from the remote's default branch (`origin/HEAD`, else `origin/main`, `origin/master`, `main`, `master`) and `HEAD`, as a read-only diff with its line counts. Files an agent of this space changed carry an **AI** mark, here and in the uncommitted list.
 
 
 - Review is read-only. Accept and Reject still write to disk. `ctrl-shift-r`, a double-click on a line, and Quick Open of an unchanged file all switch to the Edit tab at that file and line. In the side panel, `ctrl-shift-r` cycles Review → Edit → Changes → Review, handing over the current file each time.
 - Edit holds any unsaved edits. Before Review accepts or rejects in a file that has unsaved edits in Edit, those edits are saved (autosave on: try again a moment later), or, with autosave off, you're asked to save or discard them in Edit first.
 
-Wingman finds a space's repos from the folders its agents started in and from the files the Claude hook sees them edit. When it finds none, for example for a WSL agent started from a Windows folder, click **Open folder…** and pick a folder in the repo. The Edit view's file tree has the same button for adding more repos. Added repos are remembered for the space, and capture covers them too.
+Wingman finds a space's repos from its terminals' folders and from the files the Claude hook sees agents edit. When it finds none, for example for a WSL agent started from a Windows folder, click **Open folder…** and pick a folder in the repo. The Edit view's file tree has the same button for adding more repos. Added repos are remembered for the space, and capture covers them too.
 
 | Action | Key |
 |---|---|
@@ -123,7 +125,7 @@ Wingman finds a space's repos from the folders its agents started in and from th
 The header switches between two views (`ctrl-shift-r`):
 
 - **Review**: the tabs are the files with changes to review.
-- **Edit**: a file tree of the space's repos on the left (`ctrl-b` shows or hides it, and opens the Edit view from Review). It lists tracked and untracked files, without ignored ones, with each file's and folder's change count and a dot for unsaved edits. Click a file to open it in the same editor, with its diff when it has changes. The tabs are the changed files plus the files you opened. Opened files close with their ×, which saves them when autosave is on. Changed files stay until they're reviewed.
+- **Edit**: a file tree of the space's repos and plain folders on the left, like VS Code's Explorer (`ctrl-b` shows or hides it, and opens the Edit view from Review). Folders load when you open them. In a repo, the tree comes from git's file list, so empty folders don't show. Ignored files and folders are dimmed, and an ignored folder's content is read from disk when you open it. Each file shows its git status letter (A added or untracked, M modified, D deleted, U conflict), its change count to review and a dot for unsaved edits. Folders show the strongest letter under them and their total count. Deleted files are struck through and still open their diff while under review. A folder lists at most 500 entries and the tree 5000, then "… more files not shown". Click any file to open it in the same editor, with its diff when it has changes. Binary files show "binary file" instead of their content. The tabs are the changed files plus the files you opened. Opened files close with their ×, which saves them when autosave is on. Changed files stay until they're reviewed.
 
 ## Editing
 

@@ -10,8 +10,9 @@
 // (spaces.json, from the Claude hook), minus the ones removed by hand (hidden.json).
 // Wingman's edits change only the "folders" array, keeping every other key, comment and order.
 import * as fs from "fs/promises";
-import { exec, readTextFile, writeTextFile, appHome } from "herdr";
-import { git, toWsl, hostOf } from "./git.js";
+import { readTextFile, writeTextFile, appHome } from "herdr";
+import { git, hostOf } from "./git.js";
+import { listDir } from "./fsx.js";
 import { hostPath } from "./capture.js";
 import { spaceRepos } from "./journal.js";
 
@@ -142,16 +143,6 @@ export function worktreeDest(worktrees, repo) {
 
 // ---- the file on disk ----------------------------------------------------------------
 
-/** A folder's entry names. fs/promises first; the OS's own listing where a mod can't read. */
-export async function listDir(dir) {
-  try { return await fs.readdir(dir); } catch {}
-  const p = slash(dir);
-  const r = /^\/\/(?:wsl\.localhost|wsl\$)\//i.test(p) ? await exec("wsl.exe", ["-e", "ls", "-1A", "--", toWsl(p)])
-    : isWindows(p) ? (/[&|<>^%!"\r\n]/.test(p) ? { code: 1 } : await exec("cmd", ["/d", "/c", "dir", "/b", "/a", p.replace(/\//g, "\\")]))
-    : await exec("ls", ["-1A", "--", p]);
-  return r.code === 0 ? r.stdout.split(/\r?\n/).filter(Boolean) : [];
-}
-
 /** The space's folder as this machine opens it, or null (none, or the home folder). */
 export function spaceFolder(sp) {
   const f = sp?.folder ? hostPath(sp.folder)?.replace(/\/+$/, "") : null;
@@ -160,13 +151,22 @@ export function spaceFolder(sp) {
   return f && f !== "~" && !same(f, home) ? f : null;
 }
 
+/** Whether `p` is a home folder: this machine's, or a Unix or WSL user's (/home/<user>, /Users/<user>, /root). */
+export function isHome(p) {
+  const s = slash(p ?? "").replace(/\/+$/, ""), home = slash(appHome()).replace(/\/\.config\/herdr-app\/?$/, "");
+  if (s && same(s, home)) return true;
+  const rest = s.replace(/^\/\/(?:wsl\.localhost|wsl\$)\/[^/]+/i, "");
+  return /^(?:\/home\/[^/]+|\/Users\/[^/]+|\/root|[A-Za-z]:\/Users\/[^/]+)$/i.test(rest);
+}
+
 const ownFile = (spaceId) => `${dataDir()}/workspaces/${spaceId.replace(/[^\w-]/g, "_")}${EXT}`;
 
+// A listing is a PowerShell run on Windows (about 1 s), so a new workspace file is noticed within 30 s.
 const listCache = new Map(); // folder -> { at, names }
 async function namesIn(dir) {
   const c = listCache.get(dir);
-  if (c && Date.now() - c.at < 5000) return c.names;
-  const names = await listDir(dir);
+  if (c && Date.now() - c.at < 30000) return c.names;
+  const names = (await listDir(dir).catch(() => ({ entries: [] }))).entries.map((e) => e.name);
   listCache.set(dir, { at: Date.now(), names });
   return names;
 }
@@ -307,8 +307,9 @@ export async function removeWorktree(root) {
 /** The git repos directly inside `parent` (folders holding a .git file or folder), sorted. */
 export async function scanRepos(parent) {
   const dir = slash(parent).replace(/\/+$/, ""), out = [];
-  for (const name of (await listDir(dir)).sort((a, b) => a.localeCompare(b))) {
-    if (name.startsWith(".") && name !== ".git") continue;
+  const { entries } = await listDir(dir, { limit: 5000 }).catch(() => ({ entries: [] }));
+  for (const name of entries.filter((e) => e.dir).map((e) => e.name).sort((a, b) => a.localeCompare(b))) {
+    if (name.startsWith(".")) continue;
     const p = `${dir}/${name}`;
     if ((await readTextFile(`${p}/.git`)) != null || (await readTextFile(`${p}/.git/HEAD`)) != null) out.push(p);
   }

@@ -204,3 +204,23 @@ export class Store {
     for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before);
   }
 }
+
+/**
+ * A folder outside any git repo, shown in the Edit tree as a plain root: its files open, edit and
+ * save like a repo's (keys "<root>|<rel>", `apply`), and nothing else applies to it (no review,
+ * capture, git status or Changes). `plain` tells it apart from a Store.
+ */
+export class PlainRoot {
+  constructor(root) { this.root = root; this.asked = root; this.plain = true; this.label = null; }
+
+  /** Saves a file's text (compare-and-swap, like Store.apply). There is no baseline to write. */
+  async apply(f, w) {
+    if (w.target !== "current") throw new Error(`${f.rel} has no review baseline outside a git repo`);
+    await swap(f.path, w.before, w.after);
+    return { path: f.path, before: w.before, after: w.after };
+  }
+
+  async undo(writes) {
+    for (const w of [...writes].reverse()) await swap(w.path, w.after, w.before);
+  }
+}

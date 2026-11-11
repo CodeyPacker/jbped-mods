@@ -11,24 +11,25 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
 import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, agents, terminals, appHome, exec, hc, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
-import { Store, norm, shows } from "./store.js";
+import { Store, PlainRoot, norm, shows } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { Capture, hostPath } from "./capture.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
-import { buildTree, flatten, parents } from "./tree.js";
+import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER } from "./filetree.js";
+import { listDir, pathKind, join as pjoin } from "./fsx.js";
 import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git } from "./git.js";
-import { READ, STATUS, MAX_FILES, parseStatus, statusLetter, reviewTag, discardCommands, commitCommands } from "./changes.js";
+import { READ, STATUS, MAX_FILES, parseStatus, statusLetter, reviewTag, discardCommands, commitCommands, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
 import { splitLines } from "./model.js";
-import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest } from "./workspace.js";
+import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome } from "./workspace.js";
 import { Journal, addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, drainOutbox, loadSettings, saveSettings, loadKeys, saveKeys } from "./journal.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
@@ -64,6 +65,13 @@ function agentFolders(space) {
     ?? terminals().find((t) => t.address === a.address)?.cwd)).filter(Boolean);
 }
 
+/** Folders of every terminal in `space`, agents' first (Q18), as this machine's git sees them. */
+function termFolders(space) {
+  const tabs = new Set(space.tabs.map((t) => t.id));
+  const all = [...agentFolders(space), ...panes().filter((p) => p.terminal && tabs.has(p.tab)).map((p) => hostPath(p.cwd))];
+  return [...new Set(all.filter(Boolean))];
+}
+
 /** The space of the agent in terminal `by`, while it's still there. */
 const spaceOfAgent = (by) => (by && agents().find((a) => a.address === by)?.space) || null;
 
@@ -73,7 +81,6 @@ function reviewSpaces() {
   return spaces().filter((s) => s.tabs.some((t) => tabs.has(t.id)));
 }
 
-/** The first folder that opens as a git repo, or null. */
 /**
  * Herdr's global keys reach Herdr before Wingman. For each Wingman key that Herdr binds globally,
  * the "mod:wingman" section of Herdr's keys.json sends it to Wingman while Wingman has focus
@@ -88,11 +95,6 @@ async function syncHerdrKeys(keymap) {
     const next = withModSection(text, entries);
     if (next) { await writeTextFile(path, next, text); log(`keys.json: mod:wingman now ${JSON.stringify(entries)}`); }
   } catch (e) { log(`keys.json: ${e.message ?? e}`); } // another copy wrote it first, or the file isn't JSON
-}
-
-async function openFirst(folders) {
-  for (const f of folders) { try { return await Store.open(f); } catch {} }
-  return null;
 }
 
 // Panel split: a copy whose block has props {view: "review" | "edit"} shows only that view. The
@@ -144,7 +146,8 @@ export default class Review extends View {
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
     this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
-    this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.expanded = new Set();
+    try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
+    this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
     loadSettings().then((st) => { this.settings = st; });
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });
@@ -225,13 +228,18 @@ export default class Review extends View {
       // The space's repos (workspace.js): where its agents started (any agent), its workspace
       // file's folders, and every repo the Claude hook saw them edit, less the ones removed by
       // hand. A repo joins the view when it appears and leaves when it's removed.
-      const start = props()?.root ? await Store.open(props().root).catch(() => null) : await openFirst(agentFolders(sp));
-      const { roots, names } = await spaceRoots(sp, start ? [start.root] : []);
+      // D2: every terminal's folder counts. One outside any repo, or a workspace folder that isn't
+      // one, is a plain root: listed and editable, never reviewed. Repos come first.
+      const start = props()?.root ? await Store.open(props().root).catch(() => null) : null;
+      const { repos, plain } = props()?.root ? { repos: start ? [start.root] : [], plain: [] } : await this.folderRoots(sp);
+      const { roots, names } = await spaceRoots(sp, [...repos, ...plain]);
       const found = [];
       for (const root of roots) {
-        const st = this.stores.find((x) => x.root === root || x.asked === root) ?? (await this.openStore(root));
+        const st = this.stores.find((x) => x.root === root || x.asked === root) ?? (isHome(root) ? null : await this.openStore(root))
+          ?? ((await this.folderKind(root)).dir ? new PlainRoot(root) : null);
         if (st && !found.includes(st)) found.push(st);
       }
+      found.sort((a, b) => !!a.plain - !!b.plain);
       for (const st of found) st.label = names.get(st.asked ?? st.root) ?? names.get(st.root) ?? null;
       const same = found.length === this.stores.length && found.every((st, i) => st === this.stores[i]);
       if (!same && this.spaceId === key) {
@@ -255,6 +263,32 @@ export default class Review extends View {
     miss.delete(root); st.asked = root;
     return st;
   }
+
+  /**
+   * What a folder is, cached: { root } (the repo it's in), { dir: true } (a folder outside any repo)
+   * or neither (gone). A home folder is never searched for a repo. Misses are checked again after 30 s.
+   */
+  async folderKind(folder) {
+    const cache = (this.resolved ??= new Map()), c = cache.get(folder);
+    if (c && (c.root || Date.now() - c.at < 30000)) return c;
+    const st = isHome(folder) ? null : await Store.open(folder).catch(() => null);
+    const r = { at: Date.now(), root: st?.root ?? null, dir: !st && (await pathKind(folder)) === "dir" };
+    cache.set(folder, r);
+    return r;
+  }
+
+  /** The space's terminal folders as repo roots and plain folders. */
+  async folderRoots(sp) {
+    const repos = [], plain = [];
+    for (const dir of termFolders(sp)) {
+      const r = await this.folderKind(dir);
+      if (r.root) { if (!repos.includes(r.root)) repos.push(r.root); } else if (r.dir) plain.push(dir);
+    }
+    return { repos, plain };
+  }
+
+  /** The space's git repos: every root but the plain ones. */
+  repos() { return this.stores.filter((st) => !st.plain); }
 
   snapshotView() {
     const { stores, files, sel, current, history, indexTexts, error, status, redo, opened } = this;
@@ -291,13 +325,13 @@ export default class Review extends View {
         const working = agents().filter((a) => a.space === sp.id && ACTIVE.has(a.status)), active = working.length > 0;
         if (!g.at || (active === g.active && Date.now() - g.at > 5000)) {
           g.at = Date.now();
-          const start = await openFirst(agentFolders(sp));
-          const { roots } = await spaceRoots(sp, start ? [start.root] : []);
+          const { repos } = await this.folderRoots(sp);
+          const { roots } = await spaceRoots(sp, repos);
           const caps = [];
           for (const root of roots) {
             let c = this.captures.get(`${sp.id}|${root}`);
             if (!c) {
-              const store = root === start?.root ? start : await this.openStore(root);
+              const store = await this.openStore(root);
               if (!store) continue;
               log(`${sp.name}: capturing ${store.root}`);
               c = { capture: new Capture(store), space: sp.id, active: g.active, busy: false, by: g.by };
@@ -378,7 +412,7 @@ export default class Review extends View {
     if (this.mode === "changes") return this.loadChanges(cx);
     try {
       const files = [], texts = {};
-      for (const st of this.stores) {
+      for (const st of this.repos()) {
         // Only this branch's changes, made by this space's agents (store.shows).
         const [stamp, branch] = await Promise.all([st.stamp(), st.branch()]);
         texts[st.root] = stamp;
@@ -393,6 +427,8 @@ export default class Review extends View {
       }
       this.files = kept; this.indexTexts = texts; this.status = null;
       this.settle(); cx.notify();
+      // The review changed: the tree's counts and status letters follow.
+      if (this.mode === "edit" && (this.treeOn || this.nvim())) this.refreshTrees(cx);
     } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
   }
 
@@ -474,7 +510,7 @@ export default class Review extends View {
       while (this.deferred.size && !this.writing) {
         const pending = this.deferred; this.deferred = new Set();
         let indexChanged = false;
-        for (const st of this.stores) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
+        for (const st of this.repos()) if ((await st.stamp()) !== this.indexTexts[st.root]) indexChanged = true;
         if (pending.has("*") || indexChanged) { await this.reloadAll(cx); continue; }
         for (const f of this.files) {
           if (f.error || !pending.has(norm(f.path))) continue;
@@ -599,7 +635,7 @@ export default class Review extends View {
     return Math.ceil(26 + base(x.rel).length * 7.4 + repo + tag.length * 6.2 + 6 + (this.dirty(x) ? 12 : 0) + (this.closable(x) ? 16 : 0));
   }
 
-  tabTag(x) { return x.error ? "error" : x.created ? "new" : x.Ctext === null ? "deleted" : x.hunks.length ? String(x.hunks.length) : ""; }
+  tabTag(x) { return x.error ? (x.error === "binary file" ? "binary" : "error") : x.created ? "new" : x.Ctext === null ? "deleted" : x.hunks.length ? String(x.hunks.length) : ""; }
 
   /** Opened files close; changed files stay until reviewed (Q48). */
   closable(x) { return this.mode === "edit" && this.opened.includes(x.key) && !x.hunks.length; }
@@ -658,7 +694,8 @@ export default class Review extends View {
     let text = null, error = null;
     try { text = await readTextFile(path); } catch (e) { error = String(e.message ?? e); }
     if (!error && text === null) error = "file not found";
-    if (!error && text.includes("\0")) error = "binary file";
+    // Binary: a NUL, or text that isn't UTF-8 (many replacement characters near the start).
+    if (!error && (text.includes("\0") || (text.slice(0, 8000).match(/\uFFFD/g)?.length ?? 0) > 8)) error = "binary file";
     if (error) return { ...f, error };
     const C = splitLines(text);
     return this.withTokens({ ...f, Btext: text, Ctext: text, B: C, C }, cx);
@@ -670,7 +707,7 @@ export default class Review extends View {
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
     if (this.treeOnly()) {
       const f = this.files.find((x) => x.key === key);
-      this.treeSel = key; this.revealInTree(key); cx.notify();
+      this.treeSel = key; this.revealInTree(key, cx); cx.notify();
       try { await openInNvim(space, store.root, `${store.root}/${rel}`, at?.line ?? f?.hunks[0]?.n ?? 0); }
       catch (e) { this.error = String(e.message ?? e); cx.notify(); }
       return;
@@ -690,7 +727,7 @@ export default class Review extends View {
   // ---- Quick Open (ctrl-p) ------------------------------------------------------
 
   openQuick(cx) {
-    if (!this.stores.length) return;
+    if (!this.repos().length) return;
     this.refreshTrees(cx);
     this.qo = { sel: 0, items: [] };
     this.quickInput.set_value(""); this.rankQuick();
@@ -710,10 +747,11 @@ export default class Review extends View {
     const seen = new Set(), out = [];
     const add = (store, rel) => { const k = `${store.root}|${rel}`; if (!seen.has(k)) { seen.add(k); out.push({ key: k, store, rel }); } };
     const byKey = new Map(this.files.map((f) => [f.key, f]));
-    for (const k of this.recent) { const f = byKey.get(k); if (f) add(f.store, f.rel); else { const st = this.stores.find((s) => k.startsWith(s.root + "|")); if (st) add(st, k.slice(st.root.length + 1)); } }
+    // Plain roots (folders outside git) aren't searched.
+    for (const k of this.recent) { const f = byKey.get(k); if (f) { if (!f.store.plain) add(f.store, f.rel); } else { const st = this.repos().find((s) => k.startsWith(s.root + "|")); if (st) add(st, k.slice(st.root.length + 1)); } }
     for (const f of this.files) if (!f.plain && !f.error && f.hunks.length) add(f.store, f.rel);
     const head = out.length;
-    for (const st of this.stores) for (const rel of this.trees.get(st.root)?.paths ?? []) add(st, rel);
+    for (const st of this.repos()) for (const rel of this.trees.get(st.root)?.paths ?? []) add(st, rel);
     return { all: out, head };
   }
 
@@ -751,7 +789,7 @@ export default class Review extends View {
   }
 
   quickOpen(t) {
-    const items = this.qo.items, multi = this.stores.length > 1, counts = new Map(this.files.map((f) => [f.key, f.hunks.length]));
+    const items = this.qo.items, multi = this.repos().length > 1, counts = new Map(this.files.map((f) => [f.key, f.hunks.length]));
     const label = (it) => {
       const cut = it.rel.lastIndexOf("/") + 1, name = it.rel.slice(cut), dir = it.rel.slice(0, Math.max(0, cut - 1)), hit = new Set(it.pos);
       // The file name with its matched letters in the accent color.
@@ -827,7 +865,7 @@ export default class Review extends View {
 
   /** The workspace's worktrees' shared branch and the folder beside them for `repo`, or null. */
   async worktreeOffer(repo) {
-    const infos = await Promise.all(this.stores.map(async (st) => ({ st, info: await repoInfo(st.root).catch(() => null) })));
+    const infos = await Promise.all(this.repos().map(async (st) => ({ st, info: await repoInfo(st.root).catch(() => null) })));
     const linked = infos.filter((x) => x.info?.linked);
     const branch = sharedBranch(linked.map((x) => x.info.branch)), dest = worktreeDest(linked.map((x) => x.st.root), repo);
     return branch && dest ? { branch, dest } : null;
@@ -863,7 +901,7 @@ export default class Review extends View {
     const sp = this.space();
     if (!sp) return;
     for (const root of roots) {
-      await addFolder(sp, root, this.stores.map((st) => st.asked ?? st.root));
+      await addFolder(sp, root, this.repos().map((st) => st.asked ?? st.root));
       // The capture leader writes the same file: retry when it wrote first.
       for (let i = 0; ; i++) { try { await addSpaceRepos([[sp.id, root]]); break; } catch (e) { if (i >= 2) throw e; } }
       this.misses?.delete(root);
@@ -902,7 +940,7 @@ export default class Review extends View {
     const open = this.files.filter((f) => f.store === st).reduce((n, f) => n + (f.plain ? 0 : f.hunks.length), 0);
     this.ws = { kind: "remove", st, open, linked: null };
     cx.notify();
-    cx.spawn(async (cx) => { const info = await repoInfo(st.root).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
+    if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
   }
 
   confirmRemove(deleteWorktree, cx) {
@@ -922,11 +960,13 @@ export default class Review extends View {
 
   repoName(st) { return st.label ?? base(st.root); }
 
-  /** Collapses or expands a repo in the tree. Kept across reloads (per pane copy). */
-  toggleRepo(root, cx) {
-    const shut = (this.repoShut ??= new Set());
-    if (shut.has(root)) shut.delete(root); else shut.add(root);
-    try { localStorage.setItem("repoShut", JSON.stringify([...shut])); } catch {}
+  /** Collapses or expands a root in the tree. Kept across reloads (per pane copy); repoOpen
+   *  remembers plain roots opened by hand, which otherwise start collapsed beside a repo. */
+  toggleRepo(st, cx) {
+    const shut = (this.repoShut ??= new Set()), open = (this.repoOpen ??= new Set()), was = this.rootShut(st);
+    if (was) { shut.delete(st.root); open.add(st.root); } else { shut.add(st.root); open.delete(st.root); }
+    try { localStorage.setItem("repoShut", JSON.stringify([...shut])); localStorage.setItem("repoOpen", JSON.stringify([...open])); } catch {}
+    if (was && st.plain) this.loadFolder(st, this.rootTree(st), "", cx);
     cx.notify();
   }
 
@@ -1078,11 +1118,14 @@ export default class Review extends View {
     this.loadingChanges = true;
     try {
       const files = [], committed = [], sig = [];
-      for (const st of this.stores) {
+      for (const st of this.repos()) {
         const { out, head } = await this.statusOf(st), stamp = await st.stamp();
         sig.push(st.root, head, out, stamp);
-        const { ai, done } = await this.aiMarks(st);
-        for (const { rel, xy } of parseStatus(out)) files.push({ ...(await this.loadChange(st, rel, xy, !!head, cx)), ai: ai.has(rel) });
+        const { ai, done } = await this.aiMarks(st), counts = await this.lineCounts(st, head);
+        for (const { rel, xy } of parseStatus(out)) {
+          const f = await this.loadChange(st, rel, xy, !!head, cx);
+          files.push({ ...f, ai: ai.has(rel), ...this.countsOf(f, counts.get(rel)) });
+        }
         if (head) committed.push(...(await this.loadCommitted(st, head, done, cx)));
       }
       this.files = files; this.committed = committed; this.changeSig = sig.join("\0"); this.status = null;
@@ -1102,6 +1145,20 @@ export default class Review extends View {
       const hunks = await diffHunks(Btext, Ctext ?? "");
       return this.withTokens({ ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks }, cx);
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
+  }
+
+  /** D3: line counts of a repo's uncommitted changes against HEAD (staged plus unstaged with no commits yet). */
+  async lineCounts(st, head) {
+    const runs = head ? [NUMSTAT] : NUMSTAT_NO_HEAD;
+    const outs = await Promise.all(runs.map((args) => this.git(st, args)));
+    return parseNumstat(...outs.map((r) => (r.code === 0 ? r.stdout : "")));
+  }
+
+  /** { add, del } for a Changes row: git's counts, or an untracked file's lines; none for binary files. */
+  countsOf(f, c) {
+    if (f.error || c?.binary) return {};
+    if (c) return { add: c.add, del: c.del };
+    return f.xy === "??" || (f.created && f.Ctext != null) ? { add: countLines(f.Ctext), del: 0 } : {};
   }
 
   /** Which files an agent of this space changed on this branch: `ai` (still in review), `done` (committed). */
@@ -1133,8 +1190,10 @@ export default class Review extends View {
   async loadCommitted(st, head, done, cx) {
     const base = await this.branchBase(st, head);
     if (!base) return [];
-    const r = await this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, "HEAD"]);
+    const [r, n] = await Promise.all([this.git(st, [...READ, "diff", "--name-status", "-z", "--no-renames", base, "HEAD"]),
+      this.git(st, [...READ, "diff", "--numstat", "-z", "--no-renames", base, "HEAD"])]);
     if (r.code !== 0) return [];
+    const counts = parseNumstat(n.code === 0 ? n.stdout : "");
     const parts = r.stdout.split("\0").filter(Boolean), out = [];
     for (let i = 0; i + 1 < parts.length && out.length < MAX_FILES; i += 2) {
       const letter = parts[i][0] === "A" ? "A" : parts[i][0] === "D" ? "D" : "M", rel = parts[i + 1];
@@ -1144,7 +1203,8 @@ export default class Review extends View {
         const [b, c] = await Promise.all([st.blobAt(base, rel), st.blobAt("HEAD", rel)]);
         if ((b ?? "").includes("\0") || (c ?? "").includes("\0")) { out.push({ ...f, error: "binary file" }); continue; }
         const hunks = await diffHunks(b ?? "", c ?? "");
-        out.push(await this.withTokens({ ...f, Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx));
+        const k = counts.get(rel);
+        out.push(await this.withTokens({ ...f, ...(k && !k.binary ? { add: k.add, del: k.del } : {}), Btext: b ?? "", Ctext: c, B: splitLines(b ?? ""), C: splitLines(c ?? ""), hunks }, cx));
       } catch (e) { out.push({ ...f, error: String(e.message ?? e) }); }
     }
     return out;
@@ -1153,11 +1213,11 @@ export default class Review extends View {
   /** Every 2 s: reloads when git status or HEAD changed, or a listed file's text did. */
   async refreshChanges(cx) {
     // One check at a time: WSL git on a Windows drive takes over a second per status.
-    if (this.refreshing || this.loadingChanges || this.committing || !this.stores.length) return;
+    if (this.refreshing || this.loadingChanges || this.committing || !this.repos().length) return;
     this.refreshing = true;
     try {
       const sig = [];
-      for (const st of this.stores) { const { out, head } = await this.statusOf(st); sig.push(st.root, head, out, await st.stamp()); }
+      for (const st of this.repos()) { const { out, head } = await this.statusOf(st); sig.push(st.root, head, out, await st.stamp()); }
       let stale = sig.join("\0") !== this.changeSig;
       for (const f of this.files) { if (stale) break; if (!f.error && (await readTextFile(f.path)) !== f.Ctext) stale = true; }
       if (stale) await this.loadChanges(cx);
@@ -1184,7 +1244,7 @@ export default class Review extends View {
 
   /** The repo the commit box commits to: the one picked, else the first with changes. */
   commitStore() {
-    const withChanges = this.stores.filter((st) => this.files.some((f) => f.store === st));
+    const withChanges = this.repos().filter((st) => this.files.some((f) => f.store === st));
     return withChanges.find((st) => st.root === this.commitRoot) ?? withChanges[0] ?? null;
   }
 
@@ -1215,7 +1275,7 @@ export default class Review extends View {
   }
 
   renderChanges(t) {
-    const review = shared(REVIEW), st = this.commitStore(), multi = this.stores.length > 1;
+    const review = shared(REVIEW), st = this.commitStore(), multi = this.repos().length > 1;
     const checked = st ? this.checkedIn(st) : [], open = checked.filter((f) => (review?.[f.key] ?? 0) > 0).length;
     const box = (on) => div().w(14).h(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.border).bg(on ? t.accent : t.background)
       .flex().items_center().justify_center().text_size(10).text_color(t.background).child(on ? "✓" : "");
@@ -1231,21 +1291,26 @@ export default class Review extends View {
         .child(h_flex().flex_1().min_w(0).gap(6).items_center()
           .child(div().flex_none().text_size(12.5).when(!!f.error, (e) => e.text_color(t.dim)).child(f.rel.slice(cut)))
           .child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child((multi ? base(f.store.root) + (cut ? "/" : "") : "") + f.rel.slice(0, Math.max(0, cut - 1)))))
+        .when(f.add != null, (e) => e.child(h_flex().flex_none().gap(4).text_size(10)
+          .child(div().text_color(t.ansi2).child(`+${f.add}`)).child(div().text_color(t.ansi1).child(`−${f.del}`))))
         .when(!!f.ai, (e) => e.child(div().flex_none().px(4).rounded(3).bg(t.accent + "33").text_size(9.5).text_color(t.accent).child("AI")))
         .when(!!tag, (e) => e.child(div().flex_none().text_size(10).text_color(tag === "reviewed" ? t.dim : t.ansi3).child(tag)));
     };
     const done = this.committed ?? [];
+    const adds = this.files.reduce((n, f) => n + (f.add ?? 0), 0), dels = this.files.reduce((n, f) => n + (f.del ?? 0), 0);
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
       .child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); cx.notify(); }).child(box(all)))
-        .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`)))
+        .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`))
+        .when(adds + dels > 0, (e) => e.child(h_flex().flex_none().gap(4).text_size(11)
+          .child(div().text_color(t.ansi2).child(`+${adds}`)).child(div().text_color(t.ansi1).child(`−${dels}`)))))
       .child(v_flex().id("chg-list").flex_1().min_h(0).p(4).overflow_y_scrollbar().children(this.files.map(row))
         .when(done.length > 0, (e) => e.child(div().px(8).pt(10).pb(4).text_size(11).font_semibold().text_color(t.muted)
           .child(`Committed on this branch · ${done.length} file${done.length === 1 ? "" : "s"}${done.some((f) => f.ai) ? ` · ${done.filter((f) => f.ai).length} by AI` : ""}`))
           .children(done.map(row))))
       .child(v_flex().flex_none().p(8).gap(6).border_t(1).border_color(t.border)
-        .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.stores.filter((s) => this.files.some((f) => f.store === s)).map((s) =>
+        .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.repos().filter((s) => this.files.some((f) => f.store === s)).map((s) =>
           div().id(`repo-${s.root}`).h(22).px(8).flex().items_center().rounded(5).text_size(11).cursor_pointer()
             .bg(s === st ? t.accent + "77" : t.raised).on_click((_e, cx) => { this.commitRoot = s.root; cx.notify(); }).child(base(s.root))))))
         .child(Textarea.new(this.commitInput).h(72).px(8).py(6).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12))
@@ -1262,32 +1327,142 @@ export default class Review extends View {
     cx.notify();
   }
 
-  toggleDir(k, cx) { if (!this.expanded.delete(k)) this.expanded.add(k); cx.notify(); }
+  // ---- D1: the Explorer tree ------------------------------------------------------
+  // One lazy tree per root (filetree.js). A repo's folders come from its file list and one
+  // `git status` (ignored paths), never from disk, except inside an ignored folder. A plain root
+  // is listed from disk a folder at a time (fsx.listDir: about 1 s per call on a Windows drive).
 
-  revealInTree(key) {
-    const i = key.indexOf("|"), root = key.slice(0, i), rel = key.slice(i + 1);
-    for (const p of parents(rel)) this.expanded.add(`${root}|${p}`);
+  /** A root's tree state, kept per copy across spaces (as the open folders were). */
+  rootTree(st) {
+    const m = (this.ftrees ??= new Map());
+    let R = m.get(st.root);
+    if (!R || R.plain !== !!st.plain) {
+      R = { plain: !!st.plain, tree: createTree(), ver: 0, index: null, marks: null, match: null, statOut: null, listedAt: new Map(), listSig: new Map(), errors: new Map(), pending: new Set() };
+      m.set(st.root, R);
+    }
+    return R;
   }
 
-  /** Each repo's files: tracked and untracked, without ignored ones. */
+  /** Whether a repo folder's entries come from disk: inside an ignored folder, or unknown to git. */
+  onDisk(R, rel) { return !!rel && (!!R.match?.(rel) || !R.index?.has(rel)); }
+
+  /** Fills a folder's listing: from the repo's index when it can, else a disk listing (queued). */
+  loadFolder(st, R, rel, cx, refresh = false) {
+    if (!st.plain) {
+      if (!R.index) return; // the index fills it when it arrives
+      if (!this.onDisk(R, rel)) { setFolder(R.tree, rel, R.index.get(rel) ?? []); R.ver++; return; }
+    }
+    if (refresh || !R.tree.entries.has(rel)) this.queueList(st, rel, cx);
+  }
+
+  /** Disk listings run one at a time, never as a burst of slow calls. */
+  queueList(st, rel, cx) {
+    const jobs = (this.listJobs ??= []), R = this.rootTree(st);
+    if (!R.pending.has(rel)) { R.pending.add(rel); jobs.push({ st, rel }); }
+    if (this.listing) return;
+    this.listing = true;
+    cx.spawn(async (cx) => {
+      try {
+        while (jobs.length) {
+          const { st, rel } = jobs.shift(), R = this.rootTree(st);
+          let res, error = null;
+          try { res = await listDir(pjoin(st.root, rel), { limit: PER_FOLDER }); }
+          catch (e) { res = { entries: [], more: false }; error = String(e.message ?? e); }
+          R.pending.delete(rel); R.listedAt.set(rel, Date.now());
+          if (rel && !R.tree.open.has(rel)) continue; // closed meanwhile
+          const sig = JSON.stringify([res, error]);
+          if (R.listSig.get(rel) === sig && R.tree.entries.has(rel)) continue;
+          R.listSig.set(rel, sig);
+          if (error) R.errors.set(rel, error); else R.errors.delete(rel);
+          setFolder(R.tree, rel, res.entries, res.more); R.ver++;
+          cx.notify();
+        }
+      } finally { this.listing = false; }
+    });
+  }
+
+  toggleDir(st, rel, cx) {
+    const R = this.rootTree(st);
+    toggle(R.tree, rel); R.ver++;
+    // Opening a disk-listed folder lists it again (its old listing shows meanwhile).
+    if (R.tree.open.has(rel)) this.loadFolder(st, R, rel, cx, true);
+    cx.notify();
+  }
+
+  /** Opens the folders above a file, loading those that have no listing yet. */
+  revealInTree(key, cx) {
+    const i = key.indexOf("|"), root = key.slice(0, i), rel = key.slice(i + 1), st = this.stores.find((x) => x.root === root);
+    if (!st) return;
+    const R = this.rootTree(st), was = R.tree.open.size, need = reveal(R.tree, rel);
+    if (R.tree.open.size !== was) R.ver++;
+    for (const d of need) this.loadFolder(st, R, d, cx);
+  }
+
+  /** Whether a root's header is collapsed: by the user, or a plain root by default beside a repo. */
+  rootShut(st) {
+    if (this.repoShut?.has(st.root)) return true;
+    return !!st.plain && !this.repoOpen?.has(st.root) && this.stores.some((x) => !x.plain);
+  }
+
+  /** The plain root's refresh button: lists its loaded folders again, one at a time. */
+  refreshPlain(st, cx) {
+    const R = this.rootTree(st);
+    for (const rel of loaded(R.tree)) this.queueList(st, rel, cx);
+    if (!R.tree.entries.has("")) this.queueList(st, "", cx);
+  }
+
+  /**
+   * Each repo's file list (tracked and untracked, for the tree and Quick Open) and one status call
+   * (letters and ignored paths), where the repo lives. A folder index is rebuilt only when either
+   * output changed, and the view redraws only then. Plain roots: the root's first listing, then
+   * their stalest open folder every 30 s at most, one per pass.
+   */
   refreshTrees(cx) {
     if (this.treeBusy) return;
     this.treeBusy = true;
     cx.spawn(async (cx) => {
+      let changed = false;
       try {
         for (const st of this.stores) {
-          const r = await git(["ls-files", "--cached", "--others", "--exclude-standard", "-z"], { cwd: st.root });
-          if (r.code !== 0) { this.trees.set(st.root, { error: (r.stderr || r.stdout).trim() }); continue; }
-          if (this.trees.get(st.root)?.list === r.stdout) continue;
-          const paths = [...new Set(r.stdout.split("\0").filter(Boolean))];
-          this.trees.set(st.root, { list: r.stdout, paths, set: new Set(paths) });
+          const R = this.rootTree(st);
+          if (st.plain) {
+            if (this.rootShut(st)) continue;
+            if (!R.tree.entries.has("")) { this.queueList(st, "", cx); continue; }
+            if (this.listJobs?.length) continue;
+            const stale = loaded(R.tree).map((rel) => [rel, R.listedAt.get(rel) ?? 0]).sort((a, b) => a[1] - b[1])[0];
+            if (stale && Date.now() - stale[1] > 30000) this.queueList(st, stale[0], cx);
+            continue;
+          }
+          const [r, s] = await Promise.all([this.git(st, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]), this.git(st, STATUS_TREE)]);
+          if (r.code !== 0) {
+            const error = (r.stderr || r.stdout).trim();
+            if (this.trees.get(st.root)?.error !== error) { this.trees.set(st.root, { error }); changed = true; }
+            continue;
+          }
+          if (this.trees.get(st.root)?.list !== r.stdout) {
+            const paths = [...new Set(r.stdout.split("\0").filter(Boolean))];
+            this.trees.set(st.root, { list: r.stdout, paths, set: new Set(paths) });
+          }
+          const out = s.code === 0 ? s.stdout : "";
+          if (R.statOut !== out) {
+            const { marks, ignored } = parseTreeStatus(out);
+            R.statOut = out; R.marks = marks; R.ignored = ignored; R.match = ignoredMatcher(ignored); changed = true;
+          }
+          const tr = this.trees.get(st.root);
+          if (R.indexFor === tr && R.indexIgnored === R.ignored) continue;
+          R.indexFor = tr; R.indexIgnored = R.ignored; R.index = folderIndex(tr.paths, R.ignored); changed = true;
+          for (const rel of ["", ...R.tree.open]) {
+            if (!this.onDisk(R, rel)) setFolder(R.tree, rel, R.index.get(rel) ?? []);
+            else if (!R.tree.entries.has(rel)) this.queueList(st, rel, cx);
+          }
+          R.ver++;
         }
       } catch (e) { log(`tree: ${e.message ?? e}`); }
-      finally { this.treeBusy = false; if (this.qo) this.rankQuick(); cx.notify(); }
+      finally { this.treeBusy = false; if (changed) { if (this.qo) this.rankQuick(); cx.notify(); } }
     });
   }
 
-  /** Change counts and unsaved marks per file and folder of one repo. */
+  /** Change counts and unsaved marks per file and folder of one root (folder keys without a trailing "/"). */
   treeCounts(st) {
     const counts = new Map(), add = (rel, n, dirty) => {
       const c = counts.get(rel) ?? { n: 0, dirty: false };
@@ -1297,51 +1472,62 @@ export default class Review extends View {
       const n = f.hunks.length, d = this.dirty(f);
       if (!n && !d) continue;
       add(f.rel, n, d);
-      for (const p of parents(f.rel)) add(p, n, d);
+      for (let i = f.rel.lastIndexOf("/"); i > 0; i = f.rel.lastIndexOf("/", i - 1)) add(f.rel.slice(0, i), n, d);
     }
     return counts;
   }
 
-  /** A repo's folder tree; changed files the listing lacks (deleted ones) are added. */
-  treeOf(st) {
-    const tr = this.trees.get(st.root);
-    if (!tr?.paths) return null;
-    const extra = this.files.filter((f) => f.store === st && !f.plain && !tr.set.has(f.rel)).map((f) => f.rel).sort().join("\n");
-    if (tr.node && tr.extra === extra) return tr.node;
-    tr.extra = extra; tr.node = buildTree(extra ? [...tr.paths, ...extra.split("\n")] : tr.paths);
-    return tr.node;
+  /** A root's visible rows, rebuilt only when its tree, status or counts changed. */
+  rootRows(st, R) {
+    const counts = this.treeCounts(st), sig = JSON.stringify([...counts]), c = R.rowsCache;
+    if (c && c.ver === R.ver && c.marks === R.marks && c.sig === sig) return c.rows;
+    const rows = treeRows(R.tree, { marks: R.marks ?? new Map(), ignored: R.match ?? (() => false), counts });
+    R.rowsCache = { ver: R.ver, marks: R.marks, sig, rows };
+    return rows;
   }
 
   renderTree(t, full = false) {
     const multi = this.stores.length > 1, out = [], picked = full ? this.treeSel : this.sel;
-    const note = (id, text, color = t.dim) => div().id(id).px(10).py(4).text_size(11).text_color(color).child(text);
+    const note = (id, text, color = t.dim, depth = 0) => div().id(id).pl(10 + depth * 12).pr(10).py(4).text_size(11).text_color(color).child(text);
+    const letterColor = { A: t.ansi2, M: t.ansi4, D: t.ansi1, U: t.ansi1 };
     if (full && this.error) out.push(note("tree-error", this.error, t.ansi1));
     if (!this.stores.length) out.push(note("tree-none", "No repo in this space yet"));
     for (const st of this.stores) {
-      const tr = this.trees.get(st.root), node = this.treeOf(st), counts = this.treeCounts(st);
-      if (multi) {
-        const n = this.files.filter((f) => f.store === st && !f.plain).reduce((k, f) => k + f.hunks.length, 0);
-        const shut = this.repoShut?.has(st.root);
+      const R = this.rootTree(st), shut = this.rootShut(st);
+      // A plain root always has a header, for its refresh button.
+      if (multi || st.plain) {
+        const n = st.plain ? 0 : this.files.filter((f) => f.store === st && !f.plain).reduce((k, f) => k + f.hunks.length, 0);
         out.push(h_flex().id(`tree-repo-${st.root}`).pl(8).pr(6).pt(8).pb(2).gap(4).items_center().text_size(11).cursor_pointer()
-          .on_click((_e, cx) => this.toggleRepo(st.root, cx))
+          .on_click((_e, cx) => this.toggleRepo(st, cx))
           .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(shut ? "▸" : "▾"))
           .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(t.muted).child(this.repoName(st)))
           .when(n > 0, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(n))))
+          .when(!!st.plain && !shut, (e) => e.child(div().id(`tree-repo-r-${st.root}`).flex_none().w(16).h(16).flex().items_center().justify_center().rounded(3).text_color(t.dim).cursor_pointer()
+            .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { cx.stop_propagation(); this.refreshPlain(st, cx); }).child("⟳")))
           .child(div().id(`tree-repo-x-${st.root}`).flex_none().w(16).h(16).flex().items_center().justify_center().rounded(3).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click((_e, cx) => { cx.stop_propagation(); this.askRemove(st, cx); }).child("×")));
+        if (shut) continue;
       }
-      if (multi && this.repoShut?.has(st.root)) continue;
+      const tr = st.plain ? null : this.trees.get(st.root);
       if (tr?.error) { out.push(note(`tree-err-${st.root}`, tr.error, t.ansi1)); continue; }
-      if (!node) { out.push(note(`tree-load-${st.root}`, "Loading…")); continue; }
-      for (const row of flatten(node, (rel) => this.expanded.has(`${st.root}|${rel}`))) {
-        const k = `${st.root}|${row.rel}`, c = counts.get(row.rel), open = this.expanded.has(k);
+      if (R.errors.get("")) { out.push(note(`tree-err-${st.root}`, R.errors.get(""), t.ansi1)); continue; }
+      if (st.plain ? !R.tree.entries.has("") : !R.index) { out.push(note(`tree-load-${st.root}`, "Loading…")); continue; }
+      for (const row of this.rootRows(st, R)) {
+        const k = `${st.root}|${row.rel}`;
+        if (row.more) { out.push(note(`tree-more-${k}`, "… more files not shown", t.dim, row.depth)); continue; }
+        const gone = !row.dir && (row.deleted || row.mark === "D");
         out.push(h_flex().id(`tree-${k}`).h(22).flex_none().pl(8 + row.depth * 12).pr(8).gap(4).items_center().cursor_pointer()
           .when(!row.dir && k === picked, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => (row.dir ? this.toggleDir(k, cx) : cx.spawn(async (cx) => this.openFile(st, row.rel, cx))))
-          .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(row.dir ? (open ? "▾" : "▸") : ""))
-          .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(row.dir ? t.muted : t.foreground).child(row.name))
-          .when(!!c?.dirty, (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child("●")))
-          .when(!!c?.n, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(c.n)))));
+          .on_click((_e, cx) => (row.dir ? this.toggleDir(st, row.rel, cx) : cx.spawn(async (cx) => this.openFile(st, row.rel, cx))))
+          .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(row.dir ? (row.open ? "▾" : "▸") : ""))
+          .child(div().flex_1().min_w(0).truncate().text_size(12)
+            .text_color(row.ignored || gone ? t.dim : row.dir ? t.muted : t.foreground)
+            .when(row.ignored, (e) => e.opacity(0.7)).when(gone, (e) => e.line_through()).child(row.name))
+          .when(!!row.dirty, (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child("●")))
+          .when(!!row.n, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(row.n))))
+          .when(!!row.mark, (e) => e.child(div().w(10).flex_none().text_size(10).font_semibold().text_color(letterColor[row.mark] ?? t.muted).child(row.mark))));
+        if (row.dir && row.open && R.errors.get(row.rel)) out.push(note(`tree-err-${k}`, R.errors.get(row.rel), t.ansi1, row.depth + 1));
+        else if (row.dir && row.loading) out.push(note(`tree-load-${k}`, "Loading…", t.dim, row.depth + 1));
       }
     }
     out.push(div().id("tree-open-folder").mx(8).mt(6).px(6).h(22).flex().items_center().rounded(4).text_size(11).text_color(t.dim).cursor_pointer()
@@ -1488,7 +1674,7 @@ export default class Review extends View {
 
   pick(key, cx) {
     if (!this.visible().some((f) => f.key === key)) return;
-    if (this.mode === "edit") this.revealInTree(key);
+    if (this.mode === "edit") this.revealInTree(key, cx);
     if (key !== this.sel) {
       const old = this.file();
       if (old && this.settings.autosave && this.dirty(old) && !old.conflict) this.save(cx, old);

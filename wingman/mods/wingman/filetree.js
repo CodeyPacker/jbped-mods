@@ -96,6 +96,31 @@ export function rows(tree, deco = {}) {
   return out;
 }
 
+/**
+ * Every folder's entries in a repo, from its file list (`git ls-files`: files, so empty folders are
+ * absent) and parseStatus's ignored list (an ignored folder, "node_modules/", is one entry whose
+ * content isn't known). Map<folderRel, [{ name, dir }]>, unsorted; "" is the root and always present.
+ */
+export function folderIndex(paths, ignored = []) {
+  const kids = new Map([["", new Map()]]);
+  const add = (p, isDir) => {
+    const parts = p.split("/").filter(Boolean);
+    let dir = "";
+    for (let i = 0; i < parts.length; i++) {
+      const name = parts[i], d = isDir || i < parts.length - 1;
+      let m = kids.get(dir);
+      if (!m) kids.set(dir, (m = new Map()));
+      if (d) m.set(name, true); else if (!m.has(name)) m.set(name, false);
+      dir = join(dir, name);
+    }
+  };
+  for (const p of paths) add(p, false);
+  for (const p of ignored) add(p, p.endsWith("/"));
+  const out = new Map();
+  for (const [dir, m] of kids) out.set(dir, [...m].map(([name, d]) => ({ name, dir: d })));
+  return out;
+}
+
 /** git arguments for one status call: untracked files one by one, ignored paths collapsed to the topmost ignored folder. */
 export const STATUS_TREE = [...READ, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignored=matching"];
 

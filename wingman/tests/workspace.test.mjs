@@ -1,4 +1,4 @@
-import { parseJsonc, withFolders, pickFile, joinPath, relTo, foldersOf, sharedBranch, worktreeDest, scanRepos, repoInfo, addWorktree, removeWorktree } from "../mods/wingman/workspace.js";
+import { parseJsonc, withFolders, pickFile, joinPath, relTo, foldersOf, sharedBranch, worktreeDest, isHome, scanRepos, repoInfo, addWorktree, removeWorktree } from "../mods/wingman/workspace.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
@@ -48,6 +48,13 @@ assert.equal(sharedBranch([]), null);
 assert.equal(worktreeDest(["/w/t1/api", "/w/t1/web/"], "lib"), "/w/t1/lib");
 assert.equal(worktreeDest(["/w/t1/api", "/x/web"], "lib"), null);
 assert.equal(worktreeDest([], "lib"), null);
+
+// Home folders are never searched for a repo.
+// This machine's home is appHome() less "/.config/herdr-app" (the test home has no such suffix).
+assert.equal(isHome(process.env.WINGMAN_TEST_HOME), true);
+assert.equal(isHome(`${process.env.WINGMAN_TEST_HOME}/x`), false);
+for (const p of ["/home/me", "/home/me/", "/Users/me", "/root", "C:/Users/me", "c:\\Users\\me", "//wsl.localhost/Ubuntu/home/me", "//wsl$/Debian/root"]) assert.equal(isHome(p), true, p);
+for (const p of ["/home/me/src", "C:/Users/me/dev", "/", "", null, "//wsl.localhost/Ubuntu/home/me/x"]) assert.equal(isHome(p), false, String(p));
 
 // Real repos: scan, worktree info, add and remove.
 const dir = mkdtempSync(`${tmpdir()}/ws-`), g = (cwd, ...a) => execFileSync("git", a, { cwd, encoding: "utf8" });
