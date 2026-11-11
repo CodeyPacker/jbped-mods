@@ -522,6 +522,7 @@ export default class Wayfinder extends View {
   // Opens the detail panel on a Ticket, or switches it to another.
   openTicket(b, summary, cx) {
     this.selected = { boardId: b.id, summary };
+    this.moveOpen = null;
     this.handle.focus(); // a card's click stops the root's, which would focus: keys need it (#20)
     // One comment draft per Ticket: the box keeps the old Ticket's text aside and shows this one's.
     if (summary.key !== this.draftKey) {
@@ -1592,7 +1593,8 @@ export default class Wayfinder extends View {
     const t = theme();
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
-      .on_mouse_down("left", () => this.handle.focus())
+      // A press anywhere in Wayfinder closes the Move dropdown; its trigger and list stop their own.
+      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
           // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
