@@ -53,7 +53,7 @@ const agent = (address, space, status, app = "claude-code") => ({ address, space
 function fakeCapture(disk, counts) {
   let n = 0;
   return {
-    store: { on: null },
+    store: { on: null, branch: async () => "main" },
     state: async () => ({ ...disk.state }),
     setState: async (next) => { disk.state = { ...next }; if (next.tree) counts.saved++; else counts.cleared++; },
     snapshot: async () => `tree${n++ % 2 ? "b" : "a"}`.padEnd(40, "0"),

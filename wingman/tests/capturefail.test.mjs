@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 function fakeCapture(root, fails = 0) {
   const disk = { tree: "a".repeat(40) }; // a saved snapshot: every pass snapshots and adopts
   const f = {
-    store: { root, on: null }, snaps: 0,
+    store: { root, on: null, branch: async () => "main" }, snaps: 0,
     state: async () => ({ ...disk }),
     setState: async (next) => { Object.assign(disk, next); },
     snapshot: async () => {

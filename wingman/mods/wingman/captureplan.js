@@ -53,16 +53,23 @@ export function applyPlan(c, p) {
  * adopt files changed since it, and clear it once nobody works on the repo. The snapshot lives in
  * capture.json, so a new leader or a reloaded pane carries on where it was. On another machine a
  * pass whose snapshot is the last one's adopts nothing new: skipped (c.last).
+ * W2: the snapshot keeps its branch. A pass that finds the repo on another branch adopts nothing
+ * (what the switch changed isn't the agent's, and changes made before it stay with the branch they
+ * were made on): the working tree as it is now is the snapshot from then on.
  */
 export async function capturePass(c, starting = false, log = () => {}) {
   const remote = !!c.capture.store?.on;
   const st = await c.capture.state();
   if (!st.tree) {
-    if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now() }); c.last = tree; log(`snapshot ${tree}`); }
+    if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now(), branch: await c.capture.store.branch() }); c.last = tree; log(`snapshot ${tree}`); }
     else c.after = false;
   } else if (!starting) {
     const now = await c.capture.snapshot();
-    if (!(remote && now === c.last)) {
+    const branch = st.branch != null && now !== st.tree ? await c.capture.store.branch() : st.branch;
+    if (branch !== st.branch) {
+      if (c.active) await c.capture.setState({ tree: now, since: Date.now(), branch });
+      log(`${c.capture.store.root}: now on ${branch} (snapshot on ${st.branch}): nothing adopted, ${c.active ? `snapshot ${now}` : "done"}`);
+    } else if (!(remote && now === c.last)) {
       const added = await c.capture.adopt(st.tree, now, c.by, c.space);
       if (added) log(`adopted ${added} files${remote ? ` on ${c.capture.store.on}` : ""}`);
     }

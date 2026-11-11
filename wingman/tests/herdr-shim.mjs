@@ -60,6 +60,16 @@ export const appHome = () => {
   if (!process.env.WINGMAN_TEST_HOME) throw new Error("WINGMAN_TEST_HOME is not set; run the tests with wingman/tests/run.sh");
   return process.env.WINGMAN_TEST_HOME;
 };
-export const terminals = () => [];
+// Herdr's live state, which a test sets: spaces(), agents(), panes(), terminals(), layout(), and
+// the shared() values. hc() calls are recorded in `hcCalls` and answer code 0.
+export const world = { spaces: [], agents: [], panes: [], terminals: [], layout: null, shared: new Map() };
+export const hcCalls = [];
+export const terminals = () => world.terminals;
 export const run = () => null;
-export const agents = () => [];
+export const agents = () => world.agents;
+export const spaces = () => world.spaces;
+export const panes = () => world.panes;
+export const layout = () => world.layout;
+export const shared = (k) => world.shared.get(k);
+export const setShared = (k, v) => { world.shared.set(k, v); return null; };
+export const hc = async (args) => { hcCalls.push(args); return { code: 0, stdout: "", stderr: "" }; };

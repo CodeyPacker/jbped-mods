@@ -6,7 +6,11 @@ Run all: `sh wingman/tests/run.sh`. Run some: `sh wingman/tests/run.sh git chang
 
 `herdr-shim.mjs` stands in for the `"herdr"` module (exec, file IO, `appHome()`). `register.mjs` and `hooks.mjs` map the import to it. Like Herdr, its local `readTextFile` rejects a file over 1 MiB. Every `exec` is recorded in `execCalls`, and a test can answer calls itself with `fake.exec` / `fake.read` (return undefined to fall through), for example a call that never settles (`routes.test.mjs`).
 
-`main.js` imports UI modules and is not covered.
+`main.js` imports UI modules and is not covered. Its capture loop is in `captureloop.js`, which is.
+
+The shim's `world` holds Herdr's live state for a test to set (`spaces`, `agents`, `panes`, `terminals`, `layout`, the `shared()` values); `hc()` calls are recorded in `hcCalls`. Mod code's `"fs/promises"` maps to `fs-shim.mjs` (node's, plus Herdr's `exists`).
+
+`captureloop.test.mjs` drives the real capture loop (lease, lead, collectAll) over temp repos with real stores, snapshots and workspace files, and a fake clock and agents: scenarios S1-S11 (repos added and dropped mid-turn, shared repos, two spellings of a repo, no agent, a deleted space or folder, branch switches, a leader change, linked worktrees). `WINGMAN_LOOP_CASES=S1,S9` runs only some.
 
 To add a test: create `<name>.test.mjs`, import `../mods/wingman/<file>.js`, use `node:assert`, throw on failure, and keep temp repos in your own `mkdtemp` dirs.
 
