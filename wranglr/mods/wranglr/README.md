@@ -78,9 +78,11 @@ Every command is also in the palette (the `palette` mod).
 - `sort`: `recent`, `kind`, `az` or `manual`. The header button changes it and writes it here.
 - `plus`: what "+" does on a Repo group. `open` starts in the main checkout. `worktree` asks for a branch and makes a git worktree.
 - `worktrees`: where a new worktree goes. `{branch}` is the branch and `{repo}` is the Repo's name. A relative path is relative to the Repo's main checkout.
-  - A Repo can set its own: `"repos": { "<identity>": { "worktrees": "wt/{branch}" } }`, relative to its main checkout.
-  - A Workspace can set one for its Repos: `"worktrees": ".worktrees/{branch}/{repo}"` on the Workspace, relative to the Workspace home.
-  - The Repo's own pattern wins, then the first Workspace that lists the Repo and sets one, then this setting.
+- A Repo can set its own worktree rules under `repos`. A Workspace does not set them for its Repos.
+  - `"worktrees"`: that Repo's own location pattern, used in place of the setting.
+  - `"from"`: the ref a new branch starts from, such as `"origin/staging"` or a local branch. A ref on a remote is fetched first. With no `from`, a new branch starts from the remote's default branch, else `main` or `master`, else what the main checkout has checked out.
+  - Example: `"repos": { "github.com/org/repo": { "worktrees": "../wt/{branch}", "from": "origin/staging" } }`
+- A branch that already exists is checked out as it is. A branch that is only on the remote is tracked. `from` only applies to a new branch.
 - `autoname`: name new spaces from their branch.
 - `ticket`: a regular expression matched against the branch. Its first group is the ticket id at the start of the name.
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.

@@ -83,13 +83,13 @@ test("saveSetting leaves a file that is not JSON alone", async () => {
   assert.equal(readFileSync(configPath(), "utf8"), "{ broken");
 });
 
-test("a worktrees pattern on a Workspace or a Repo is kept, and dropped with an error when it is not a string", () => {
-  const good = parseConfig(JSON.stringify({ workspaces: [{ name: "A", worktrees: ".wt/{branch}/{repo}" }], repos: { "h/r": { worktrees: "/x/{branch}" } } }));
+test("a Repo's worktrees pattern and from ref are kept, and dropped with an error when not a string", () => {
+  const good = parseConfig(JSON.stringify({ repos: { "h/r": { worktrees: "/x/{branch}", from: "origin/staging" } } }));
   assert.deepEqual(good.errors, []);
-  assert.equal(good.config.workspaces[0].worktrees, ".wt/{branch}/{repo}");
   assert.equal(good.config.repos["h/r"].worktrees, "/x/{branch}");
-  const bad = parseConfig(JSON.stringify({ workspaces: [{ name: "A", worktrees: 3 }], repos: { "h/r": { worktrees: "" } } }));
+  assert.equal(good.config.repos["h/r"].from, "origin/staging");
+  const bad = parseConfig(JSON.stringify({ repos: { "h/r": { worktrees: "", from: 3 } } }));
   assert.equal(bad.errors.length, 2);
-  assert.equal("worktrees" in bad.config.workspaces[0], false);
   assert.equal("worktrees" in bad.config.repos["h/r"], false);
+  assert.equal("from" in bad.config.repos["h/r"], false);
 });

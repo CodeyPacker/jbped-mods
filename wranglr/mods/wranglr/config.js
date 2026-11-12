@@ -35,11 +35,14 @@ function parseSettings(raw, errors) {
 // on: { [mkey]: object }, keeping only object entries.
 const parseOn = (on) => (isObj(on) ? Object.fromEntries(Object.entries(on).filter(([, v]) => isObj(v))) : {});
 
-// An optional worktrees pattern on a Workspace or a Repo: dropped, and named, when it is not a path pattern.
+// A Repo's own worktree settings: where they go (`worktrees`) and the ref a new branch starts from (`from`).
+// One that is not a non-empty string is dropped and named.
 function pattern(entry, where, errors) {
-  if ("worktrees" in entry && (typeof entry.worktrees !== "string" || !entry.worktrees)) {
-    errors.push(`${where}.worktrees: must be a path pattern`);
-    delete entry.worktrees;
+  for (const [key, what] of [["worktrees", "a path pattern"], ["from", "a git ref"]]) {
+    if (key in entry && (typeof entry[key] !== "string" || !entry[key])) {
+      errors.push(`${where}.${key}: must be ${what}`);
+      delete entry[key];
+    }
   }
   return entry;
 }
@@ -52,7 +55,7 @@ function parseWorkspaces(raw, errors) {
     if (!isObj(w) || typeof w.name !== "string" || !w.name.trim()) { errors.push(`workspaces[${i}]: has no name`); return; }
     if (names.has(w.name)) { errors.push(`workspaces[${i}]: duplicate name "${w.name}"`); return; }
     names.add(w.name);
-    out.push(pattern({ ...w, repos: strings(w.repos), machines: strings(w.machines), on: parseOn(w.on) }, `workspaces[${i}]`, errors));
+    out.push({ ...w, repos: strings(w.repos), machines: strings(w.machines), on: parseOn(w.on) });
   });
   return out;
 }

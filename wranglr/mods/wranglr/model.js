@@ -677,17 +677,9 @@ function plusCustom(a, c) {
   addPending(c, a, { machine: null, folder: "" });
 }
 
-// Where a Repo's new worktrees go, and what a relative pattern is joined to: the Repo's own pattern
-// (its main root), else the pattern of the first Workspace that has the Repo and sets one (that
-// Workspace's home on the Machine, else the main root), else the setting (the main root).
-function worktreeRule(c, ctx, identity, mk, main) {
-  const own = c.config.repos?.[identity]?.worktrees;
-  if (own) return { pattern: own, base: main };
-  for (const ws of c.config.workspaces || []) {
-    if (!ws.worktrees || !ws.repos.includes(identity)) continue;
-    return { pattern: ws.worktrees, base: workspaceHome(ws, mk, ctx.cloned, c.world.local) || main };
-  }
-  return { pattern: c.config.settings.worktrees, base: main };
+// Where a Repo's new worktrees go: the Repo's own pattern, else the setting. A relative one is under the main root.
+function worktreePattern(c, identity) {
+  return c.config.repos?.[identity]?.worktrees || c.config.settings.worktrees;
 }
 
 function plusRepo(a, c, group, mode) {
@@ -702,10 +694,9 @@ function plusRepo(a, c, group, mode) {
   let worktree = null;
   if (mode === "worktree") {
     if (!a.branch) return toast(c.effects, "A worktree needs a branch name.");
-    const rule = worktreeRule(c, ctx, identity, mk, main);
-    const rel = rule.pattern.replaceAll("{branch}", a.branch).replaceAll("{repo}", identity.split("/").pop());
-    folder = isAbsolutePath(rel) ? rel : joinPath(rule.base, rel);
-    worktree = { main, branch: a.branch, path: folder };
+    const rel = worktreePattern(c, identity).replaceAll("{branch}", a.branch).replaceAll("{repo}", identity.split("/").pop());
+    folder = isAbsolutePath(rel) ? rel : joinPath(main, rel);
+    worktree = { main, branch: a.branch, path: folder, from: c.config.repos?.[identity]?.from || null };
   }
   c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
   // Always remembered, so the new space shows in this Group at once instead of loose until git answers.

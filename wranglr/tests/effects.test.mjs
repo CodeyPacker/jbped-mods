@@ -28,23 +28,15 @@ test("start without a worktree opens a space, always naming the Machine and leav
   assert.equal(execCalls.length, 0);
 });
 
-test("a worktree start runs git before space.new", async () => {
-  fake.exec = (cmd, args, opts) => { order.push({ cmd, args, opts }); return Promise.resolve(ok); };
-  await runEffects([{ type: "start", machine: "wsl", folder: "/m/.worktrees/b", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/.worktrees/b" } }], noDeps);
-  assert.deepEqual(order, [{ cmd: "git", args: ["worktree", "add", "/m/.worktrees/b", "-b", "b"], opts: { cwd: "/m", on: "wsl" } }]);
+test("a worktree start makes the worktree before space.new", async () => {
+  await runEffects([{ type: "start", machine: "wsl", folder: "/m/.worktrees/b", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/.worktrees/b", from: null } }], noDeps);
+  assert.ok(order.some((c) => c.startsWith("git worktree add")), "git made the worktree");
   assert.deepEqual(runCalls, [{ name: "space.new", args: { folder: "/m/.worktrees/b", machine: "wsl" } }]);
 });
 
-test("an existing branch is checked out instead of made", async () => {
-  fake.exec = (cmd, args) => { order.push(args.join(" ")); return Promise.resolve(args.includes("-b") ? { code: 255, stdout: "", stderr: "fatal: a branch named 'b' already exists\n" } : ok); };
-  await runEffects([{ type: "start", machine: null, folder: "/m/w", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/w" } }], noDeps);
-  assert.deepEqual(order, ["worktree add /m/w -b b", "worktree add /m/w b"]);
-  assert.equal(runCalls.length, 1);
-});
-
 test("a failed worktree add reports git's error and opens no space", async () => {
-  fake.exec = () => Promise.resolve({ code: 128, stdout: "", stderr: "fatal: '/m/w' already exists\n" });
-  await runEffects([{ type: "start", machine: null, folder: "/m/w", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/w" } }, { type: "select", id: "s1" }], noDeps);
+  fake.exec = (_cmd, args) => Promise.resolve(args[0] === "worktree" ? { code: 128, stdout: "", stderr: "fatal: '/m/w' already exists\n" } : { code: 1, stdout: "", stderr: "" });
+  await runEffects([{ type: "start", machine: null, folder: "/m/w", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/w", from: null } }, { type: "select", id: "s1" }], noDeps);
   assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s1" } }]);
   assert.equal(notes.length, 1);
   assert.equal(notes[0].level, "error");

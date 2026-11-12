@@ -475,29 +475,23 @@ test("plus in worktree mode starts in a new worktree under the Repo, and needs a
   const r = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: null, machine: null, branch: "feature/46382-x" }, w, c, s);
   assert.deepEqual(r.effects, [{
     type: "start", machine: null, folder: "/home/me/front/.worktrees/feature/46382-x", argv: null, name: null,
-    worktree: { main: "/home/me/front", branch: "feature/46382-x", path: "/home/me/front/.worktrees/feature/46382-x" },
+    worktree: { main: "/home/me/front", branch: "feature/46382-x", path: "/home/me/front/.worktrees/feature/46382-x", from: null },
   }]);
   const abs = config({ repos: MULTI, settings: { worktrees: "/wt/{branch}" } });
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: null, branch: "b" }, w, abs, s).effects[0].folder, "/wt/b");
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: null }, w, c, s).effects[0].type, "toast");
 });
 
-test("a worktree goes where the Repo says, else its Workspace, else the setting", () => {
-  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} }, [BACK]: { name: "backend", on: {} } } };
+test("a worktree goes where the Repo says, else the setting, and carries the Repo's from ref", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: { "": "/d/front" } }, [BACK]: { name: "backend", on: { "": "/d/back" } } } };
   const w = world([]);
-  const on = { "": { home: "/d", paths: { [FRONT]: "/d/front", [BACK]: "/d/back" } } };
-  const folder = (c, id) => run({ type: "plus", group: "repo:" + id, sub: null, mode: "worktree", machine: null, branch: "b" }, w, c, s).effects[0];
-  const ws = config({ workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on, worktrees: ".worktrees/{branch}/{repo}" }] });
-  assert.deepEqual(folder(ws, FRONT).worktree, { main: "/d/front", branch: "b", path: "/d/.worktrees/b/frontend" });
-  assert.equal(folder(ws, BACK).folder, "/d/.worktrees/b/backend");
-  const both = config({
-    workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on, worktrees: ".worktrees/{branch}/{repo}" }],
-    repos: { [FRONT]: { machines: [], on: {}, worktrees: "wt/{branch}" } },
+  const start = (c, id) => run({ type: "plus", group: "repo:" + id, sub: null, mode: "worktree", machine: null, branch: "b" }, w, c, s).effects[0];
+  const c = config({
+    workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on: { "": { home: "/d" } }, worktrees: "/ignored/{branch}" }],
+    repos: { [FRONT]: { machines: [], on: {}, worktrees: "../wt/{branch}/{repo}", from: "origin/staging" } },
   });
-  assert.equal(folder(both, FRONT).folder, "/d/front/wt/b", "the Repo's own pattern wins and is relative to its main root");
-  assert.equal(folder(both, BACK).folder, "/d/.worktrees/b/backend");
-  const none = config({ workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on }] });
-  assert.equal(folder(none, FRONT).folder, "/d/front/.worktrees/b", "no override: the setting, under the main root");
+  assert.deepEqual(start(c, FRONT).worktree, { main: "/d/front", branch: "b", path: "/d/front/../wt/b/frontend", from: "origin/staging" });
+  assert.deepEqual(start(c, BACK).worktree, { main: "/d/back", branch: "b", path: "/d/back/.worktrees/b", from: null }, "a Workspace does not set a Repo's worktrees");
 });
 
 test("plus on a Workspace passes Repos outside the home to Claude as added directories", () => {
