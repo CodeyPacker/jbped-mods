@@ -5,7 +5,7 @@ import { appHome, readTextFile, writeTextFile } from "herdr";
 export const DEFAULT_SETTINGS = {
   sort: "kind",
   plus: "open",
-  worktrees: ".worktrees/{branch}",
+  worktrees: "{clone}/.worktrees/{branch}",
   autoname: true,
   ticket: "^(?:[a-z]+/)?#?(\\d{2,})",
   agent: null,
@@ -22,7 +22,7 @@ function parseSettings(raw, errors) {
   const fall = (key, why) => { errors.push(`settings.${key}: ${why}`); s[key] = DEFAULT_SETTINGS[key]; };
   if (!("sort" in s)) s.sort = DEFAULT_SETTINGS.sort; else if (!SORTS.includes(s.sort)) fall("sort", `must be one of ${SORTS.join(", ")}`);
   if (!("plus" in s)) s.plus = DEFAULT_SETTINGS.plus; else if (!PLUS.includes(s.plus)) fall("plus", `must be one of ${PLUS.join(", ")}`);
-  if (!("worktrees" in s)) s.worktrees = DEFAULT_SETTINGS.worktrees; else if (typeof s.worktrees !== "string" || !s.worktrees) fall("worktrees", "must be a path pattern");
+  if (!("worktrees" in s)) s.worktrees = DEFAULT_SETTINGS.worktrees; else if (!anchored(s.worktrees)) fall("worktrees", ANCHOR);
   if (!("autoname" in s)) s.autoname = DEFAULT_SETTINGS.autoname; else if (typeof s.autoname !== "boolean") fall("autoname", "must be true or false");
   if (!("ticket" in s)) s.ticket = DEFAULT_SETTINGS.ticket;
   else if (typeof s.ticket !== "string") fall("ticket", "must be a regular expression");
@@ -35,15 +35,15 @@ function parseSettings(raw, errors) {
 // on: { [mkey]: object }, keeping only object entries.
 const parseOn = (on) => (isObj(on) ? Object.fromEntries(Object.entries(on).filter(([, v]) => isObj(v))) : {});
 
+// A worktrees pattern says where it starts: at the Repo's clone on that Machine ({clone}), or at an absolute path.
+const ANCHOR = "must start with {clone} or be an absolute path";
+const anchored = (p) => typeof p === "string" && (p.startsWith("{clone}") || /^([\/\\]|[A-Za-z]:[\/\\])/.test(p));
+
 // A Repo's own worktree settings: where they go (`worktrees`) and the ref a new branch starts from (`from`).
 // One that is not a non-empty string is dropped and named.
 function pattern(entry, where, errors) {
-  for (const [key, what] of [["worktrees", "a path pattern"], ["from", "a git ref"]]) {
-    if (key in entry && (typeof entry[key] !== "string" || !entry[key])) {
-      errors.push(`${where}.${key}: must be ${what}`);
-      delete entry[key];
-    }
-  }
+  if ("worktrees" in entry && !anchored(entry.worktrees)) { errors.push(`${where}.worktrees: ${ANCHOR}`); delete entry.worktrees; }
+  if ("from" in entry && (typeof entry.from !== "string" || !entry.from)) { errors.push(`${where}.from: must be a git ref`); delete entry.from; }
   return entry;
 }
 

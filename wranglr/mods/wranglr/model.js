@@ -81,6 +81,19 @@ function joinPath(base, rel) {
   return base.replace(/[\/\\]+$/, "") + sep + rel.replace(/^\.[\/\\]/, "");
 }
 
+// "." and ".." resolved, so a path names one place however it was written. Keeps the path's own separator.
+function cleanPath(path) {
+  const sep = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  const lead = path.match(/^([A-Za-z]:)?[\/\\]*/)[0];
+  const out = [];
+  for (const part of path.slice(lead.length).split(/[\/\\]+/)) {
+    if (!part || part === ".") continue;
+    if (part === "..") out.pop();
+    else out.push(part);
+  }
+  return lead.replace(/[\/\\]+/g, sep) + out.join(sep);
+}
+
 function isHomeShaped(dir) {
   return /^\/(home\/[^/]+|root|Users\/[^/]+)$/.test(dir);
 }
@@ -677,7 +690,7 @@ function plusCustom(a, c) {
   addPending(c, a, { machine: null, folder: "" });
 }
 
-// Where a Repo's new worktrees go: the Repo's own pattern, else the setting. A relative one is under the main root.
+// Where a Repo's new worktrees go: the Repo's own pattern, else the setting. {clone} is the main root on that Machine.
 function worktreePattern(c, identity) {
   return c.config.repos?.[identity]?.worktrees || c.config.settings.worktrees;
 }
@@ -694,8 +707,8 @@ function plusRepo(a, c, group, mode) {
   let worktree = null;
   if (mode === "worktree") {
     if (!a.branch) return toast(c.effects, "A worktree needs a branch name.");
-    const rel = worktreePattern(c, identity).replaceAll("{branch}", a.branch).replaceAll("{repo}", identity.split("/").pop());
-    folder = isAbsolutePath(rel) ? rel : joinPath(main, rel);
+    const filled = worktreePattern(c, identity).replaceAll("{clone}", main).replaceAll("{branch}", a.branch).replaceAll("{repo}", identity.split("/").pop());
+    folder = cleanPath(isAbsolutePath(filled) ? filled : joinPath(main, filled));
     worktree = { main, branch: a.branch, path: folder, from: c.config.repos?.[identity]?.from || null };
   }
   c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });

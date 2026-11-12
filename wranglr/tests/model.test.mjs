@@ -18,7 +18,7 @@ function deepFreeze(x) {
 
 function config({ settings = {}, workspaces = [], repos = {} } = {}) {
   return {
-    settings: { sort: "kind", plus: "open", worktrees: ".worktrees/{branch}", autoname: false, ticket: TICKET, agent: null, ...settings },
+    settings: { sort: "kind", plus: "open", worktrees: "{clone}/.worktrees/{branch}", autoname: false, ticket: TICKET, agent: null, ...settings },
     workspaces, repos,
   };
 }
@@ -488,10 +488,19 @@ test("a worktree goes where the Repo says, else the setting, and carries the Rep
   const start = (c, id) => run({ type: "plus", group: "repo:" + id, sub: null, mode: "worktree", machine: null, branch: "b" }, w, c, s).effects[0];
   const c = config({
     workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on: { "": { home: "/d" } }, worktrees: "/ignored/{branch}" }],
-    repos: { [FRONT]: { machines: [], on: {}, worktrees: "../wt/{branch}/{repo}", from: "origin/staging" } },
+    repos: { [FRONT]: { machines: [], on: {}, worktrees: "{clone}/../wt/{branch}/{repo}", from: "origin/staging" } },
   });
-  assert.deepEqual(start(c, FRONT).worktree, { main: "/d/front", branch: "b", path: "/d/front/../wt/b/frontend", from: "origin/staging" });
+  assert.deepEqual(start(c, FRONT).worktree, { main: "/d/front", branch: "b", path: "/d/wt/b/frontend", from: "origin/staging" }, "{clone} is the main root and .. is resolved");
   assert.deepEqual(start(c, BACK).worktree, { main: "/d/back", branch: "b", path: "/d/back/.worktrees/b", from: null }, "a Workspace does not set a Repo's worktrees");
+});
+
+test("{clone} expands to the Repo's clone on each Machine, so one pattern works on all of them", () => {
+  const c = config({ repos: { [FRONT]: { machines: [], on: { wsl: { path: "/mnt/c/dev/arden/front" }, "": { path: "C:/dev/arden/front" } }, worktrees: "{clone}/../.worktrees/{branch}/{repo}" } } });
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const w = world([], { local: { home: "C:\\Users\\me", windows: true } });
+  const at = (machine) => run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine, branch: "foo" }, w, c, s).effects[0].folder;
+  assert.equal(at("wsl"), "/mnt/c/dev/arden/.worktrees/foo/frontend");
+  assert.equal(at(null), "C:/dev/arden/.worktrees/foo/frontend");
 });
 
 test("plus on a Workspace passes Repos outside the home to Claude as added directories", () => {

@@ -88,8 +88,20 @@ test("a Repo's worktrees pattern and from ref are kept, and dropped with an erro
   assert.deepEqual(good.errors, []);
   assert.equal(good.config.repos["h/r"].worktrees, "/x/{branch}");
   assert.equal(good.config.repos["h/r"].from, "origin/staging");
-  const bad = parseConfig(JSON.stringify({ repos: { "h/r": { worktrees: "", from: 3 } } }));
+  const bad = parseConfig(JSON.stringify({ repos: { "h/r": { worktrees: ".worktrees/{branch}", from: 3 } } }));
   assert.equal(bad.errors.length, 2);
   assert.equal("worktrees" in bad.config.repos["h/r"], false);
   assert.equal("from" in bad.config.repos["h/r"], false);
+});
+
+test("a worktrees pattern must start with {clone} or be absolute", () => {
+  for (const ok of ["{clone}/.worktrees/{branch}", "{clone}/../wt/{branch}/{repo}", "/srv/wt/{branch}", "C:/wt/{branch}", "C:\\wt\\{branch}"])
+    assert.deepEqual(parseConfig(JSON.stringify({ settings: { worktrees: ok } })).errors, [], ok);
+  for (const no of [".worktrees/{branch}", "../wt/{branch}", "wt", "", 3]) {
+    const r = parseConfig(JSON.stringify({ settings: { worktrees: no } }));
+    assert.equal(r.errors.length, 1, String(no));
+    assert.match(r.errors[0], /must start with \{clone\} or be an absolute path/);
+    assert.equal(r.config.settings.worktrees, DEFAULT_SETTINGS.worktrees);
+  }
+  assert.equal(DEFAULT_SETTINGS.worktrees, "{clone}/.worktrees/{branch}");
 });
