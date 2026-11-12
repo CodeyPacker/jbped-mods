@@ -341,10 +341,10 @@ export default class Wranglr extends View {
 
   plusMenu(g, sub) {
     const action = { type: "plus", group: g.id, sub };
-    const items = [{ label: "Open here", action: { ...action, mode: "open" } }];
-    if (g.kind === "repo") items.push({ label: "New worktree…", input: { title: "New worktree", value: "", action: { ...action, mode: "worktree" } } });
-    if (g.machines.length > 1)
-      for (const m of g.machines) items.push({ label: `Open on ${m || "this computer"}`, action: { ...action, mode: "open", machine: m === "" ? null : m } });
+    // Machines in priority order, picked with 1, 2, 3…; W makes a worktree.
+    const items = g.machines.map((m, i) => ({ label: `Open on ${m || "this computer"}`, key: i < 9 ? String(i + 1) : undefined, action: { ...action, mode: "open", machine: m === "" ? null : m } }));
+    if (!items.length) items.push({ label: "Open on this computer", key: "1", action: { ...action, mode: "open" } });
+    if (g.kind === "repo") items.push({ label: "New worktree…", key: "w", input: { title: "New worktree", value: "", action: { ...action, mode: "worktree" } } });
     openMenu(items);
   }
 
@@ -955,7 +955,12 @@ export default class Wranglr extends View {
         else if (e.key === "up" && list.length) this.at = (this.at + list.length - 1) % list.length;
         else if (e.key === "enter") this.choose(list[this.at]);
         else if (e.key === "escape") closeOverlay(props().overlay);
-        else return;
+        else {
+          const hit = list.find((it) => it.key && it.key === String(e.key ?? "").toLowerCase());
+          if (!hit) return;
+          this.choose(hit);
+        }
+        cx.stop_propagation();
         cx.notify();
       })
       .children(list.map((it, i) => h_flex().id(`wmi-${i}`).h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
@@ -963,7 +968,8 @@ export default class Wranglr extends View {
         .hover((s) => s.bg(t.hover))
         .on_click(() => this.choose(it))
         .child(svg(icon(this.menuIcon(it))).size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().truncate().child(it.label))));
+        .child(div().flex_1().truncate().child(it.label))
+        .when(Boolean(it.key), (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.raised).text_size(11).text_color(t.muted).child(String(it.key).toUpperCase())))));
   }
 
   render(cx) {
