@@ -57,6 +57,10 @@ _Avoid_: whitelist, blacklist, allow list, block list
 A local clone the Profile lists, with its folder and, once known, the Pull Request repo it clones. A Board names the Repos a Launch makes worktrees from, and a Review uses the Repo whose Pull Request repo matches.
 _Avoid_: repository, checkout, project
 
+**Checkout Mode**:
+How a Review puts the Pull Request's branch into a Repo: Worktree (a detached worktree under Herdr's worktrees folder, the default) or Branch (the branch checked out in the Repo's own folder, created from origin when new).
+_Avoid_: review mode, clone mode, checkout type
+
 **Template**:
 The agent, model, extra arguments and opening prompt a Launch or Review starts with. A Launch Template is the file's default, then the Board's; a Review Template is the default, then the Repo's.
 _Avoid_: preset, agent profile
