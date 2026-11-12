@@ -4,13 +4,13 @@ Mods and layouts for the Herdr desktop app. Each top-level folder is one share.
 
 ## Language
 
-### Wayfinder
+### Wayfindr
 
-**Wayfinder**:
+**Wayfindr**:
 The mod that shows a Board and the user's open Pull Requests, and starts Herdr spaces from Tickets and Pull Requests. It lives outside any space.
 
 **Profile**:
-A named, separate set of Accounts, such as Work or Personal. Wayfinder shows exactly one Profile at a time.
+A named, separate set of Accounts, such as Work or Personal. Wayfindr shows exactly one Profile at a time.
 _Avoid_: workspace, environment, context
 
 **Account**:
@@ -18,7 +18,7 @@ One signed-in identity on one Provider, belonging to one Profile.
 _Avoid_: login, connection, credential
 
 **Provider**:
-An external work-tracking or code-hosting service Wayfinder reads from: GitHub, Azure DevOps, or ClickUp. Each Provider plugs into one shared Wayfinder flow and never owns its own end-to-end path.
+An external work-tracking or code-hosting service Wayfindr reads from: GitHub, Azure DevOps, or ClickUp. Each Provider plugs into one shared Wayfindr flow and never owns its own end-to-end path.
 _Avoid_: integration, service, source
 
 **Board**:
@@ -26,7 +26,7 @@ A Provider's view of active work, shown as the Provider shows it today: a GitHub
 _Avoid_: project, kanban, backlog
 
 **Followed Board**:
-A Board the Profile lists, so Wayfinder shows it. Settings ticks a Board to follow it and unticks it to stop.
+A Board the Profile lists, so Wayfindr shows it. Settings ticks a Board to follow it and unticks it to stop.
 _Avoid_: active board, selected board, subscribed board
 
 **Column**:
@@ -42,7 +42,7 @@ One work item on a Board, whatever the Provider calls it (issue, work item, task
 _Avoid_: item, card, task, issue, work item
 
 **Move**:
-Changing the Column a Ticket is in. It was the first write Wayfinder supported; title edits and comments followed.
+Changing the Column a Ticket is in. It was the first write Wayfindr supported; title edits and comments followed.
 _Avoid_: transition, status change
 
 **Pull Request**:

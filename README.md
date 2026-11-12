@@ -31,9 +31,9 @@ Herdr's Agents list with Claude Code's in-process subagents nested under the ses
 
 Modified from Herdr's `agents` mod (Apache-2.0, see `agents-plus/LICENSE`).
 
-## wayfinder
+## wayfindr
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, shown in place of the work area: start a space from a Ticket, or a review from a Pull Request. Work in progress. See [`wayfinder/mods/wayfinder/README.md`](wayfinder/mods/wayfinder/README.md).
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, shown in place of the work area: start a space from a Ticket, or a review from a Pull Request. Work in progress. See [`wayfindr/mods/wayfindr/README.md`](wayfindr/mods/wayfindr/README.md).
 
 ## Install
 
