@@ -1175,7 +1175,7 @@ export default class Wayfinder extends View {
     const trigger = button("wf-move-trigger", h_flex().gap(6).items_center().child(name).child(svg("mods/workspace-chrome/chevron-down.svg").size(12)), t,
       (cx) => { this.moveOpen = open ? null : sum.key; cx.notify(); }, { on: open });
     // The current Column shows selected and is not a target.
-    const list = v_flex().id("wf-move-list").min_w(180).p(4).rounded(6).bg(t.popover).border_1().border_color(t.border).on_mouse_down("left", stop)
+    const list = v_flex().id("wf-move-list").min_w(180).p(4).rounded(6).bg(t.popover).border_1().border_color(t.border).on_mouse_down("left", stop).on_scroll_wheel(stop)
       .children(cols.map((c) => {
         const here = c.id === cur;
         return h_flex().id(`wf-move-${c.id}`).px(10).h(26).items_center().rounded(4).text_size(12)
@@ -1483,7 +1483,8 @@ export default class Wayfinder extends View {
           .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
           .child(rich(`c${i}`, c.body))));
     }
-    return v_flex().id("wf-ticket").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border)
+    // Wheel events end here: the panel's own scroll area has had them, the Board under it must not.
+    return v_flex().id("wf-ticket").w(PANEL_W).flex_none().h_full().bg(t.chrome).border_l(1).border_color(t.border).on_scroll_wheel(stop)
       .child(head).child(body);
   }
 
@@ -1657,8 +1658,9 @@ export default class Wayfinder extends View {
     const grip = div().id("wf-pr-grip").absolute().top(0).bottom(0).left(0).w(6).cursor_col_resize()
       .hover((s) => s.bg(t.accent)).when(Boolean(this.prDrag), (el) => el.bg(t.accent))
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.prDrag = { x: e.position.x, from: this.prFrac, frac: this.prFrac }; cx.notify(); });
+    // Wheel events end here: the body has had them, the list under the overlay must not.
     return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0).w(`${Math.round(this.prFrac * 1000) / 10}%`)
-      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg()
+      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg().on_scroll_wheel(stop)
       .child(head).child(body).child(grip);
   }
 
