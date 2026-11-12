@@ -1,0 +1,13 @@
+{
+  "place": "none",
+  "title": "Wranglr",
+  "palette": [
+    { "title": "Wranglr: Move space to group", "command": "wranglr.move", "about": "Pick a Group or Subgroup for the focused space" },
+    { "title": "Wranglr: Next space", "command": "wranglr.next", "about": "The next space in the order the sidebar shows" },
+    { "title": "Wranglr: Previous space", "command": "wranglr.prev", "about": "The previous space in the order the sidebar shows" },
+    { "title": "Wranglr: New space in this group", "command": "wranglr.new", "about": "Start a space in the focused space's Group, as its + does" },
+    { "title": "Wranglr: Name space again", "command": "wranglr.name", "about": "Redo the automatic name of the focused space" },
+    { "title": "Wranglr: Fold group", "command": "wranglr.fold", "about": "Fold or unfold the focused space's Group" },
+    { "title": "Wranglr: Next sort", "command": "wranglr.sort", "about": "Recent, Kind, A-Z, Manual" }
+  ]
+}

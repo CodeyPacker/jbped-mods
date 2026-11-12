@@ -31,6 +31,12 @@ Herdr's Agents list with Claude Code's in-process subagents nested under the ses
 
 Modified from Herdr's `agents` mod (Apache-2.0, see `agents-plus/LICENSE`).
 
+## wranglr
+
+A spaces sidebar that sorts spaces into Groups: Workspaces (named lists of Repos, from a config file), Repos (every clone and worktree of a Repo on any Machine together) and Custom groups, each with optional Subgroups. Drag spaces and Groups, move a space with a keyboard dialog, pick the sort, and have spaces named `<ticket id> <words>` from their branch. Its own select, next and previous keys follow the list's order. See [`wranglr/mods/wranglr/README.md`](wranglr/mods/wranglr/README.md) for install (it replaces the `spaces` block in your layout and rebinds `alt-1` to `alt-9`) and the config file.
+
+Started from Herdr's `spaces` mod.
+
 ## Install
 
 ### Tell your agent

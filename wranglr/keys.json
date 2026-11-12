@@ -1,0 +1,16 @@
+{
+  "global": {
+    "alt-1": "wranglr.select1",
+    "alt-2": "wranglr.select2",
+    "alt-3": "wranglr.select3",
+    "alt-4": "wranglr.select4",
+    "alt-5": "wranglr.select5",
+    "alt-6": "wranglr.select6",
+    "alt-7": "wranglr.select7",
+    "alt-8": "wranglr.select8",
+    "alt-9": "wranglr.select9",
+    "ctrl-shift-pagedown": "wranglr.next",
+    "ctrl-shift-pageup": "wranglr.prev",
+    "ctrl-shift-m": "wranglr.move"
+  }
+}
