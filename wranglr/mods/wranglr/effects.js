@@ -23,7 +23,8 @@ async function runOne(e, { dispatch, askName, saveSetting }) {
       if (e.worktree && !(await addWorktree(e.worktree, e.machine ?? null))) return;
       const args = {};
       if (e.folder) args.folder = e.folder;
-      if (e.machine != null) args.machine = e.machine;
+      // Always say which Machine: without it Herdr starts the space on the focused space's Machine. "" is this computer.
+      args.machine = e.machine ?? "";
       if (e.argv != null) args.argv = e.argv;
       if (e.name != null) args.name = e.name;
       run("space.new", args);

@@ -16,13 +16,13 @@ test("select and rename run the space commands", async () => {
   assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s1" } }, { name: "space.rename", args: { id: "s2", name: "123 Fix login" } }]);
 });
 
-test("start without a worktree opens a space, leaving out null fields", async () => {
+test("start without a worktree opens a space, always naming the Machine and leaving out null fields", async () => {
   await runEffects([
     { type: "start", machine: null, folder: "/r", argv: null, name: null, worktree: null },
     { type: "start", machine: "wsl", folder: "/w", argv: ["claude", "--add-dir", "/x"], name: "Arden", worktree: null },
   ], noDeps);
   assert.deepEqual(runCalls, [
-    { name: "space.new", args: { folder: "/r" } },
+    { name: "space.new", args: { folder: "/r", machine: "" } },
     { name: "space.new", args: { folder: "/w", machine: "wsl", argv: ["claude", "--add-dir", "/x"], name: "Arden" } },
   ]);
   assert.equal(execCalls.length, 0);
