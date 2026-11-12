@@ -97,69 +97,106 @@ export function reviewPrompt(pr, info, worktree, template) {
 // root (C: becomes C:/) and UNC paths (\\wsl.localhost\..., \\wsl$\...). Fails with "can't convert <path>"
 // when wslpath fails or prints nothing. Shared by the scripts.
 const TO_LOCAL = String.raw`loc() { case "$1" in [A-Za-z]:) p="$1/";; *) p="$1";; esac
-  case "$p" in [A-Za-z]:*|'\\'*) r=$(wslpath -u "$p" 2>/dev/null); if [ $? -ne 0 ] || [ -z "$r" ]; then echo "can't convert $1" >&2; return 1; fi; printf %s "$r";;
+  case "$p" in [A-Za-z]:*|'\\'*) r=$(wslpath -u "$p" 2>/dev/null); if [ $? -ne 0 ] || [ -z "$r" ]; then printf "can't convert %s\n" "$1" >&2; return 1; fi; printf %s "$r";;
   *) printf %s "$1";; esac; }`;
 // Prints the folder for space.new: the Windows form under WSL, else the path itself.
 const TO_SPACE = 'out() { if command -v wslpath >/dev/null 2>&1; then wslpath -w "$1"; else printf %s "$1"; fi; }';
-// Sets d to the first folder under ~/.herdr/worktrees starting with the prefix ($1), else the wanted
-// folder ($2). An unmatched glob stays literal, so each match is checked to be a folder.
-const PICK = 'pick() { d=""; for e in "$HOME/.herdr/worktrees/$1"*; do if [ -d "$e" ]; then d="$e"; break; fi; done; [ -n "$d" ] || d="$HOME/.herdr/worktrees/$2"; }';
+// Worktree Placement: "herdr", "beside" or a host folder. place <clone> <name> <placement> <folder> sets dest
+// to where that Repo's worktree for the folder name goes: herdr: ~/.herdr/worktrees/<folder>/<name>,
+// beside: <clone>-<folder> next to the clone, a folder F: F/<folder>/<name>. Fails when F can't be converted.
+const PLACE = `place() { case "$3" in
+  herdr) dest="$HOME/.herdr/worktrees/$4/$2";;
+  beside) c="\${1%/}"; dest="$(dirname "$c")/$(basename "$c")-$4";;
+  *) base=$(loc "$3") || return 1; [ -n "$base" ] || { printf "can't convert %s\\n" "$3" >&2; return 1; }; dest="\${base%/}/$4/$2";; esac; }`;
+// Finds an earlier Launch's folder name by the Ticket prefix. found <prefix> <clone> <placement> sets f to
+// the first existing folder's name: herdr and a folder F look for <base>/<prefix>*, beside for
+// <clone>-<prefix>* next to the clone. An unmatched glob stays literal, so each match is checked to be a
+// folder. pick <prefix> then triples (clone path, name, placement): the first match across the Repos in
+// order, else fails. A clone or folder that can't be converted is skipped.
+const PICK = `found() { case "$3" in
+  beside) c="\${2%/}"; pre="$(dirname "$c")/$(basename "$c")-"; for e in "$pre$1"*; do if [ -d "$e" ]; then f="\${e#"$pre"}"; return 0; fi; done; return 1;;
+  herdr) base="$HOME/.herdr/worktrees";;
+  *) base=$(loc "$3" 2>/dev/null) || return 1; [ -n "$base" ] || return 1; base="\${base%/}";; esac
+  for e in "$base/$1"*; do if [ -d "$e" ]; then f=$(basename "$e"); return 0; fi; done; return 1; }
+pick() { p="$1"; shift; while [ $# -ge 3 ]; do c=$(loc "$1" 2>/dev/null) && [ -n "$c" ] && found "$p" "$c" "$3" && return 0; shift 3; done; return 1; }`;
 
-// Which worktrees exist already. argv: Ticket prefix, wanted folder (relative), then repo names. Prints
-// one name per line.
-// First "folder <name>": the folder a Launch would use (an existing one by prefix, else the wanted one).
-export const EXISTS_SH = `${PICK}; pick "$1" "$2"; shift 2; echo "folder $(basename "$d")"; for r in "$@"; do [ -e "$d/$r/.git" ] && echo "$r"; done; exit 0`;
-
-// Makes a Ticket's worktrees (D18). argv: Ticket prefix, wanted folder, then pairs of repo path and name.
-// The folder is the first existing one with the prefix, else the wanted one, and the branch is its name.
-// A worktree that exists is reused. Prints "space <folder>" for space.new, "path <folder>", "branch <name>",
-// and "made <name>" or "reused <name>" per repo.
-export const LAUNCH_SH = `${TO_LOCAL}; ${TO_SPACE}; ${PICK}
-pick "$1" "$2"; b=$(basename "$d"); shift 2; mkdir -p "$d" || exit 1
-while [ $# -ge 2 ]; do
-  x="$1"; name="$2"; shift 2; dest="$d/$name"
-  repo=$(loc "$x") || exit 1; [ -n "$repo" ] || { echo "can't convert $x" >&2; exit 1; }
-  if [ -e "$dest/.git" ]; then echo "reused $name"; continue; fi
-  git -C "$repo" fetch --quiet origin || { echo "git fetch failed in $repo" >&2; exit 1; }
-  def=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || {
-    git -C "$repo" remote set-head origin -a >/dev/null 2>&1
-    def=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || def=origin/main; }
-  if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then git -C "$repo" worktree add --quiet "$dest" "$b" || exit 1
-  else git -C "$repo" worktree add --quiet -b "$b" "$dest" "$def" || exit 1; fi
-  echo "made $name"
+// Which worktrees exist already. argv: Ticket prefix, wanted folder name, then triples of clone path, repo
+// name and Worktree Placement. First "folder <name>": the folder name a Launch would use (an existing one by
+// prefix, else the wanted one). Then one repo name per line whose worktree exists at its place.
+export const EXISTS_SH = `${TO_LOCAL}; ${PLACE}; ${PICK}
+w="$2"; x="$1"; shift 2; pick "$x" "$@" || f="$w"; printf 'folder %s\\n' "$f"
+while [ $# -ge 3 ]; do
+  c=$(loc "$1" 2>/dev/null) && [ -n "$c" ] && place "$c" "$2" "$3" "$f" 2>/dev/null && [ -e "$dest/.git" ] && printf '%s\\n' "$2"
+  shift 3
 done
+exit 0`;
+
+// Makes a Ticket's worktrees (D18). argv: Ticket prefix, wanted folder name, then triples of clone path,
+// repo name and Worktree Placement. The folder name is an earlier Launch's (by prefix), else the wanted one,
+// and the branch is that name. Each worktree goes at its place, and one that exists is reused. Prints
+// "made <name>" or "reused <name>" and "worktree <name>\t<path>" per repo, then "space <folder>" for
+// space.new, "path <folder>" and "branch <name>". The folder is the worktrees' shared parent when that is
+// the Launch's own folder (named <folder name>, so never a "beside" clone's parent), else the first repo's
+// worktree, else (no repos) ~/.herdr/worktrees/<folder name>.
+export const LAUNCH_SH = `${TO_LOCAL}; ${TO_SPACE}; ${PLACE}; ${PICK}
+w="$2"; x="$1"; shift 2; pick "$x" "$@" || f="$w"; b="$f"; first=""; par=""; same=1
+while [ $# -ge 3 ]; do
+  x="$1"; name="$2"; pl="$3"; shift 3
+  repo=$(loc "$x") || exit 1; [ -n "$repo" ] || { printf "can't convert %s\\n" "$x" >&2; exit 1; }
+  place "$repo" "$name" "$pl" "$f" || exit 1
+  up=$(dirname "$dest"); [ -n "$first" ] || { first="$dest"; par="$up"; }; [ "$up" = "$par" ] || same=0
+  if [ -e "$dest/.git" ]; then echo "reused $name"
+  else
+    mkdir -p "$up" || exit 1
+    git -C "$repo" fetch --quiet origin || { printf "git fetch failed in %s\\n" "$repo" >&2; exit 1; }
+    def=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || {
+      git -C "$repo" remote set-head origin -a >/dev/null 2>&1
+      def=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || def=origin/main; }
+    if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then git -C "$repo" worktree add --quiet "$dest" "$b" || exit 1
+    else git -C "$repo" worktree add --quiet -b "$b" "$dest" "$def" || exit 1; fi
+    echo "made $name"
+  fi
+  printf 'worktree %s\\t%s\\n' "$name" "$dest"
+done
+if [ -z "$first" ]; then d="$HOME/.herdr/worktrees/$f"; mkdir -p "$d" || exit 1
+elif [ "$same" = 1 ] && [ "$(basename "$par")" = "$f" ]; then d="$par"; else d="$first"; fi
 printf 'space %s\\npath %s\\nbranch %s\\n' "$(out "$d")" "$d" "$b"`;
 
-// Starts a Review (D15, D18). argv: folder, repo path, repo name, branch, Checkout mode.
-// "worktree": a detached worktree on the PR branch, so no local branch is touched; one that exists is
-// moved to the branch's newest commit. "branch": the branch checked out in the clone itself (made tracking
-// origin when new; an existing one is fast-forwarded when it can be, else left with a "note" line). A
-// failed checkout (a dirty tree) exits with git's message.
-export const REVIEW_SH = `${TO_LOCAL}; ${TO_SPACE}
+// Starts a Review (D15, D18). argv: folder name, repo path, repo name, branch, Checkout mode, Worktree
+// Placement ("herdr" when empty).
+// "worktree": a detached worktree on the PR branch at its place for the folder name, so no local branch is
+// touched; one that exists is moved to the branch's newest commit. "branch": the branch checked out in the
+// clone itself (made tracking origin when new; an existing one is fast-forwarded when it can be, else left
+// with a "note" line), and the placement is ignored. A failed checkout (a dirty tree) exits with git's
+// message. Worktree mode also prints "worktree <name>\t<path>".
+export const REVIEW_SH = `${TO_LOCAL}; ${TO_SPACE}; ${PLACE}
 case "$5" in worktree|branch) ;; *) echo "unknown checkout mode $5" >&2; exit 1;; esac
-d="$HOME/.herdr/worktrees/$1"; repo=$(loc "$2") || exit 1; [ -n "$repo" ] || { echo "can't convert $2" >&2; exit 1; }
-name="$3"; b="$4"; dest="$d/$name"
-git -C "$repo" fetch --quiet origin "+refs/heads/$b:refs/remotes/origin/$b" || { echo "git fetch of $b failed in $repo" >&2; exit 1; }
+repo=$(loc "$2") || exit 1; [ -n "$repo" ] || { printf "can't convert %s\\n" "$2" >&2; exit 1; }
+name="$3"; b="$4"
+git -C "$repo" fetch --quiet origin "+refs/heads/$b:refs/remotes/origin/$b" || { printf "git fetch of %s failed in %s\\n" "$b" "$repo" >&2; exit 1; }
 if [ "$5" = branch ]; then
   if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then
     git -C "$repo" checkout --quiet "$b" || exit 1
     git -C "$repo" merge --quiet --ff-only "origin/$b" || echo "note local branch $b is behind or has diverged from origin/$b; left as it was"
   else git -C "$repo" checkout --quiet -b "$b" --track "origin/$b" || exit 1; fi
-  printf 'reused %s\nspace %s\npath %s\nbranch %s\n' "$name" "$(out "$repo")" "$repo" "$b"; exit 0
+  printf 'reused %s\\nspace %s\\npath %s\\nbranch %s\\n' "$name" "$(out "$repo")" "$repo" "$b"; exit 0
 fi
+place "$repo" "$name" "\${6:-herdr}" "$1" || exit 1
 if [ -e "$dest/.git" ]; then git -C "$dest" checkout --quiet --detach "origin/$b" || exit 1; echo "reused $name"
-else mkdir -p "$d" && git -C "$repo" worktree add --quiet --detach "$dest" "origin/$b" || exit 1; echo "made $name"; fi
-printf 'space %s\\npath %s\\n' "$(out "$dest")" "$dest"`;
+else mkdir -p "$(dirname "$dest")" && git -C "$repo" worktree add --quiet --detach "$dest" "origin/$b" || exit 1; echo "made $name"; fi
+printf 'worktree %s\\t%s\\nspace %s\\npath %s\\n' "$name" "$dest" "$(out "$dest")" "$dest"`;
 
 // Lists the git clones on this machine. argv: host folders to scan besides $HOME (0 or more; one that
 // can't be converted or isn't a folder is skipped). Looks four levels deep for ".git" (a folder, or a
-// file in a linked worktree), skipping tool and cache folders and ~/.herdr. Prints "<folder>\t<origin url>"
-// per clone with an origin, the folder in the host's form. Always exits 0.
+// file in a linked worktree), skipping tool and cache folders and ~/.herdr. Prints "<folder>\t<origin url>\t<kind>"
+// per clone with an origin, the folder in the host's form, the kind "clone" (.git is a folder) or "worktree"
+// (.git is a file: a linked worktree). Always exits 0.
 export const SCAN_SH = `${TO_LOCAL}; ${TO_SPACE}
 scan() { find "$1" -maxdepth 4 \\( -name node_modules -o -name .cache -o -name .npm -o -name .nvm -o -name .cargo -o -name .rustup -o -name .vscode-server -o -name AppData -o -name Library -o -name snap -o -name .herdr \\) -prune -o -name .git -prune -print 2>/dev/null; }
 { scan "$HOME"; for r in "$@"; do x=$(loc "$r" 2>/dev/null) || continue; [ -n "$x" ] && [ -d "$x" ] || continue; scan "$x"; done; } | sort -u | while IFS= read -r g; do
   dir=$(dirname "$g"); url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null)
-  [ -n "$url" ] && printf '%s\\t%s\\n' "$(out "$dir")" "$url"
+  if [ -d "$g" ]; then k=clone; else k=worktree; fi
+  [ -n "$url" ] && printf '%s\\t%s\\t%s\\n' "$(out "$dir")" "$url" "$k"
 done | sort -u
 exit 0`;
 
@@ -177,10 +214,13 @@ export function spaceArgv(runner, platform, folder, argv) {
   return [inv.command, ...inv.args];
 }
 
-// "space <x>", "path <y>", "branch <b>", "made <r>", "reused <r>" and "note <text>" lines from the scripts.
+// "space <x>", "path <y>", "branch <b>", "made <r>", "reused <r>", "note <text>" and "worktree <r>\t<path>"
+// lines from the scripts. worktrees: { [repo name]: local path }.
 export function parseScript(stdout) {
-  const out = { space: null, path: null, branch: null, made: [], reused: [], notes: [] };
+  const out = { space: null, path: null, branch: null, made: [], reused: [], notes: [], worktrees: {} };
   for (const line of String(stdout).split(/\r?\n/)) {
+    const wt = /^worktree ([^\t]+)\t(.+)$/.exec(line.trim());
+    if (wt) { out.worktrees[wt[1]] = wt[2]; continue; }
     const m = /^(space|path|branch|made|reused|note) (.+)$/.exec(line.trim());
     if (!m) continue;
     if (m[1] === "space" || m[1] === "path" || m[1] === "branch") out[m[1]] = m[2];

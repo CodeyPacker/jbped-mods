@@ -81,6 +81,7 @@ function checkProfile(name, p, platform, errors) {
     if (!isStr(r.path)) errors.push(`${at}.repos[${i}].path: the local clone's folder`);
     if (r.prRepo != null && !(isStr(r.prRepo) && r.prRepo.includes("/"))) errors.push(`${at}.repos[${i}].prRepo: the Pull Request repo it clones, "owner/name" or "project/repo"`);
     if (r.checkout != null && !CHECKOUTS.includes(r.checkout)) errors.push(`${at}.repos[${i}].checkout: "worktree" (a detached worktree, the default) or "branch" (the branch in the clone itself)`);
+    if (r.worktrees != null && !isStr(r.worktrees)) errors.push(`${at}.repos[${i}].worktrees: "herdr" (Herdr's worktrees folder, the default), "beside" (next to the clone) or a folder`);
     errors.push(...templateErrors(r.review, `${at}.repos[${i}].review`));
   });
   boards.forEach((b, i) => {
@@ -104,8 +105,8 @@ function checkProfile(name, p, platform, errors) {
     errors.push(`${at}.notifications: { "enabled": true | false, "minutes": 1..60 }`);
   }
   const notifications = { enabled: isObj(n) && typeof n.enabled === "boolean" ? n.enabled : true, minutes: isObj(n) && Number.isInteger(n.minutes) && n.minutes >= 1 && n.minutes <= 60 ? n.minutes : 5 };
-  // Each Repo carries its Checkout mode, "worktree" by default.
-  const withCheckout = repos.map((r) => (isObj(r) ? { ...r, checkout: r.checkout ?? "worktree" } : r));
+  // Each Repo carries its Checkout mode, "worktree" by default, and its Worktree Placement, "herdr" by default.
+  const withCheckout = repos.map((r) => (isObj(r) ? { ...r, checkout: r.checkout ?? "worktree", worktrees: r.worktrees ?? "herdr" } : r));
   return { name, runner, accounts, repos: withCheckout, boards, notifications };
 }
 

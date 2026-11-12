@@ -252,6 +252,17 @@ export function setRepoCheckout(raw, profileName, repoId, mode) {
   });
 }
 
+// A Repo's Worktree Placement: "herdr" (the default, so the field goes), "beside" or a host folder.
+export function setRepoWorktrees(raw, profileName, repoId, value) {
+  if (typeof value !== "string" || !value.trim()) throw new Error("Pick a folder for the worktrees");
+  const v = value.trim();
+  return edit(raw, profileName, (p) => {
+    const r = (p.repos ?? []).find((x) => x.id === repoId);
+    if (!r) throw new Error(`No repo "${repoId}"`);
+    if (v === "herdr") delete r.worktrees; else r.worktrees = v;
+  });
+}
+
 // Removes a Repo, and its id from every Board's repos.
 export function removeRepo(raw, profileName, repoId) {
   return edit(raw, profileName, (p) => {

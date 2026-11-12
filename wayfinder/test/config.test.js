@@ -110,3 +110,12 @@ test("a Repo's checkout is worktree by default, branch when set, and anything el
   assert.equal(p({ checkout: "branch" }).config.profiles.p.repos[0].checkout, "branch");
   assert.equal(p({}).config.profiles.p.repos[0].checkout, undefined); // the raw config is left as read
 });
+
+test("a Repo's worktrees is herdr by default, beside or a folder when set, and empty or not text is an error", () => {
+  const p = (c) => parse({ profiles: { p: { repos: [{ id: "r", path: "/x", ...c }] } } });
+  assert.equal(p({}).profile.repos[0].worktrees, "herdr");
+  assert.equal(p({ worktrees: "beside" }).profile.repos[0].worktrees, "beside");
+  assert.equal(p({ worktrees: "D:\\wt" }).profile.repos[0].worktrees, "D:\\wt");
+  for (const bad of ["", 3, ["/x"]]) assert.deepEqual(p({ worktrees: bad }).errors, ['profiles.p.repos[0].worktrees: "herdr" (Herdr\'s worktrees folder, the default), "beside" (next to the clone) or a folder'], JSON.stringify(bad));
+  assert.equal(p({}).config.profiles.p.repos[0].worktrees, undefined); // the raw config is left as read
+});

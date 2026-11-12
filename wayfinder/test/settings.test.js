@@ -179,6 +179,18 @@ test("setRepoCheckout writes branch and removes the field for worktree, the defa
   assert.throws(() => e.setRepoCheckout(r0, "p", "nope", "branch"), /No repo "nope"/);
 });
 
+test("setRepoWorktrees writes beside or a folder and removes the field for herdr, the default", () => {
+  const r0 = { profiles: { p: { accounts: [], repos: [{ id: "fe", path: "/fe" }], boards: [] } } };
+  const r1 = e.setRepoWorktrees(r0, "p", "fe", "beside");
+  assert.equal(r1.profiles.p.repos[0].worktrees, "beside");
+  assert.equal(r0.profiles.p.repos[0].worktrees, undefined);
+  valid(r1);
+  assert.equal(e.setRepoWorktrees(r1, "p", "fe", "D:\\wt").profiles.p.repos[0].worktrees, "D:\\wt");
+  assert.ok(!("worktrees" in e.setRepoWorktrees(r1, "p", "fe", "herdr").profiles.p.repos[0]));
+  for (const bad of ["", "  ", null, 3]) assert.throws(() => e.setRepoWorktrees(r0, "p", "fe", bad), /Pick a folder/);
+  assert.throws(() => e.setRepoWorktrees(r0, "p", "nope", "beside"), /No repo "nope"/);
+});
+
 test("removeRepo removes the Repo and its id from every Board", () => {
   const r0 = { profiles: { p: { accounts: [{ id: "gh", provider: "github", login: "a" }], repos: [{ id: "fe", path: "/fe" }, { id: "be", path: "/be" }],
     boards: [{ id: "b1", account: "gh", ref: { owner: "o", number: 1 }, repos: ["fe", "be"] }, { id: "b2", account: "gh", ref: { owner: "o", number: 2 }, repos: ["fe"] }, { id: "b3", account: "gh", ref: { owner: "o", number: 3 } }] } } };

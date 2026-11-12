@@ -37,10 +37,15 @@ test("sameRepo compares names ignoring case, and never matches empty ones", () =
 test("parseClones reads path and url lines, skipping malformed ones and repeated paths", () => {
   const out = parseClones("C:\\src\\fe\tgit@github.com:o/fe.git\r\n\nno tab here\n\tgit@github.com:o/x.git\n/x\t\nC:\\src\\fe\thttps://github.com/o/other\n/home/me/gl\thttps://gitlab.com/a/b\n");
   assert.deepEqual(out, [
-    { path: "C:\\src\\fe", url: "git@github.com:o/fe.git", repo: "o/fe" },
-    { path: "/home/me/gl", url: "https://gitlab.com/a/b", repo: null },
+    { path: "C:\\src\\fe", url: "git@github.com:o/fe.git", repo: "o/fe", kind: "clone" },
+    { path: "/home/me/gl", url: "https://gitlab.com/a/b", repo: null, kind: "clone" },
   ]);
   assert.deepEqual(parseClones(""), []);
+});
+
+test("parseClones reads the kind column: worktree for a linked worktree, else clone", () => {
+  assert.deepEqual(parseClones("/a\thttps://github.com/o/n\tworktree\n/b\thttps://github.com/o/n\tclone\r\n/c\thttps://github.com/o/n\tother\n/d\thttps://github.com/o/n\n/e\tu\tworktree\textra\n").map((c) => [c.path, c.kind]),
+    [["/a", "worktree"], ["/b", "clone"], ["/c", "clone"], ["/d", "clone"]]);
 });
 
 test("scanRoots gives each folder's parent once, ignoring case, without roots, up to 20", () => {

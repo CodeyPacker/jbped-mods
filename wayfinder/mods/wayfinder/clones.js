@@ -44,16 +44,17 @@ export function remoteRepo(url) {
 
 export const sameRepo = (a, b) => typeof a === "string" && typeof b === "string" && a.length > 0 && b.length > 0 && a.toLowerCase() === b.toLowerCase();
 
-// "<path>\t<url>" lines from the scan script: [{ path, url, repo }], one per path.
+// "<path>\t<url>\t<kind>" lines from the scan script: [{ path, url, repo, kind }], one per path. kind is
+// "worktree" for a linked worktree, else "clone" (also when the column is missing or unknown).
 export function parseClones(stdout) {
   const out = [], seen = new Set();
   for (const line of String(stdout ?? "").split(/\r?\n/)) {
-    const i = line.indexOf("\t");
-    if (i < 0) continue;
-    const path = line.slice(0, i).trim(), url = line.slice(i + 1).trim();
-    if (!path || !url || url.includes("\t") || seen.has(path)) continue;
+    const cols = line.split("\t");
+    if (cols.length < 2 || cols.length > 3) continue;
+    const path = cols[0].trim(), url = cols[1].trim(), kind = cols[2]?.trim() === "worktree" ? "worktree" : "clone";
+    if (!path || !url || seen.has(path)) continue;
     seen.add(path);
-    out.push({ path, url, repo: remoteRepo(url) });
+    out.push({ path, url, repo: remoteRepo(url), kind });
   }
   return out;
 }

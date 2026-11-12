@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH, REVIEW_SH, SCAN_SH } from "../mods/wayfinder/launch.js";
+import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfinder/launch.js";
 import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin } from "../mods/wayfinder/flow.js";
 import { addRepo } from "../mods/wayfinder/settings.js";
 import { parseConfig } from "../mods/wayfinder/config.js";
@@ -57,7 +57,7 @@ test("prompts carry the Ticket, the repos and the criteria", () => {
 
 test("spaceArgv runs the agent in the folder through the runner, as argv", () => {
   assert.deepEqual(spaceArgv("wsl:Ubuntu", "windows", "/h/w", ["claude"]), ["wsl.exe", "-d", "Ubuntu", "--exec", "bash", "-lc", 'cd "$0" && exec "$@"', "/h/w", "claude"]);
-  assert.deepEqual(parseScript("made a\nreused b\nspace C:\\x\npath /x\nbranch 1-t\n"), { space: "C:\\x", path: "/x", branch: "1-t", made: ["a"], reused: ["b"], notes: [] });
+  assert.deepEqual(parseScript("made a\nreused b\nspace C:\\x\npath /x\nbranch 1-t\n"), { space: "C:\\x", path: "/x", branch: "1-t", made: ["a"], reused: ["b"], notes: [], worktrees: {} });
 });
 
 test("addRepo adds a clone once and lists it on the Board", () => {
@@ -83,13 +83,14 @@ function fixture(def = "main", setHead = true) {
 
 test("Launch makes a worktree per repo on a new branch, and reuses it after", async () => {
   const { home, io, clone } = fixture();
-  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe"], io), { folder: "1-t", names: [] });
+  assert.deepEqual(await existingWorktrees("1-", "1-t", [{ path: clone, name: "fe" }], io), { folder: "1-t", names: [] });
   const first = await makeLaunchWorktrees("1-", "1-t", [{ path: clone, name: "fe" }], io);
   assert.deepEqual(first.made, ["fe"]); assert.equal(first.branch, "1-t");
   assert.equal(first.path, join(home, ".herdr/worktrees/1-t"));
   assert.ok(existsSync(join(first.path, "fe/.git")));
+  assert.deepEqual(first.worktrees, { fe: join(home, ".herdr/worktrees/1-t/fe") });
   assert.equal(sh("git branch --show-current", join(first.path, "fe")).stdout.trim(), "1-t");
-  assert.deepEqual(await existingWorktrees("1-", "1-t", ["fe", "be"], io), { folder: "1-t", names: ["fe"] });
+  assert.deepEqual(await existingWorktrees("1-", "1-t", [{ path: clone, name: "fe" }, { path: clone, name: "be" }], io), { folder: "1-t", names: ["fe"] });
   const again = await makeLaunchWorktrees("1-", "1-t", [{ path: clone, name: "fe" }], io);
   assert.deepEqual(again.reused, ["fe"]); assert.deepEqual(again.made, []);
 });
@@ -98,7 +99,7 @@ test("a second Launch after a title edit reuses the Ticket's folder and branch",
   const { home, io, clone } = fixture();
   assert.equal(sh("git clone -q origin.git clone2", home).status, 0);
   await makeLaunchWorktrees("1-", "1-old-title", [{ path: clone, name: "fe" }], io);
-  assert.deepEqual(await existingWorktrees("1-", "1-new-title", ["fe"], io), { folder: "1-old-title", names: ["fe"] }); // the dialog names the reused folder
+  assert.deepEqual(await existingWorktrees("1-", "1-new-title", [{ path: clone, name: "fe" }], io), { folder: "1-old-title", names: ["fe"] }); // the dialog names the reused folder
   const again = await makeLaunchWorktrees("1-", "1-new-title", [{ path: clone, name: "fe" }, { path: join(home, "clone2"), name: "be" }], io);
   assert.equal(again.path, join(home, ".herdr/worktrees/1-old-title")); assert.equal(again.branch, "1-old-title");
   assert.deepEqual(again.reused, ["fe"]); assert.deepEqual(again.made, ["be"]);
@@ -135,6 +136,16 @@ test("parseScript collects note lines; the Review script has the branch mode's g
   assert.deepEqual(parseScript("note local branch b is behind\nreused fe\nnote two\n").notes, ["local branch b is behind", "two"]);
   for (const t of ["show-ref", "--ff-only", "--track"]) assert.ok(REVIEW_SH.includes(t), t);
   for (const t of ["node_modules", ".herdr", "-maxdepth 4"]) assert.ok(SCAN_SH.includes(t), t);
+});
+
+test("parseScript reads worktree lines; the scripts take each Repo's Worktree Placement", () => {
+  const r = parseScript("made a\nworktree a\t/x/a\nreused b\nworktree b\t/y/b-f\r\nworktree bad\nspace /x\npath /x\nbranch f\n");
+  assert.deepEqual(r.worktrees, { a: "/x/a", b: "/y/b-f" });
+  assert.deepEqual([r.made, r.reused, r.branch], [["a"], ["b"], "f"]);
+  for (const s of [EXISTS_SH, LAUNCH_SH]) for (const t of ["place()", "pick()", "beside)", "herdr)", "shift 3"]) assert.ok(s.includes(t), t);
+  for (const t of ["place()", "${6:-herdr}", "worktree %s"]) assert.ok(REVIEW_SH.includes(t), t);
+  assert.ok(LAUNCH_SH.includes("worktree %s"));
+  for (const t of ["k=clone", "k=worktree"]) assert.ok(SCAN_SH.includes(t), t);
 });
 
 // Pushes a commit to origin's branch `b` (made from origin/main when new) from a second clone, so the
@@ -190,7 +201,59 @@ test("the scan lists clones with an origin under home and the roots, once each; 
   assert.ok(!paths.some((p) => p.includes("node_modules")));
   assert.equal(new Set(paths).size, paths.length);
   assert.equal(list.find((c) => c.path === hostForm(join(extra, "a"))).repo, "P/a");
+  assert.equal(list.find((c) => c.path === hostForm(clone)).kind, "clone");
   assert.deepEqual(await cloneOrigin(join(extra, "a"), io), { url: "https://dev.azure.com/o/P/_git/a", repo: "P/a" });
   assert.deepEqual(await cloneOrigin(join(extra, "b"), io), { url: "", repo: null });
   await assert.rejects(cloneOrigin(home, io), /not a git repository/);
+});
+
+test("Launch places each Repo's worktree by its placement; the space opens at the shared parent, else the first worktree", async () => {
+  const { home, io, clone } = fixture();
+  assert.equal(sh("git clone -q origin.git be", home).status, 0);
+  const be = join(home, "be"), own = join(home, "own");
+  const mixed = await makeLaunchWorktrees("4-", "4-t", [{ path: clone, name: "fe", worktrees: "herdr" }, { path: be, name: "be", worktrees: "beside" }], io);
+  assert.deepEqual(mixed.worktrees, { fe: join(home, ".herdr/worktrees/4-t/fe"), be: join(home, "be-4-t") });
+  assert.equal(mixed.path, join(home, ".herdr/worktrees/4-t/fe")); // different parents: the first worktree
+  assert.equal(sh("git branch --show-current", join(home, "be-4-t")).stdout.trim(), "4-t");
+  const shared = await makeLaunchWorktrees("5-", "5-t", [{ path: clone, name: "fe", worktrees: own }, { path: be, name: "be", worktrees: own + "/" }], io);
+  assert.deepEqual(shared.worktrees, { fe: join(own, "5-t/fe"), be: join(own, "5-t/be") });
+  assert.equal(shared.path, join(own, "5-t"));
+  assert.deepEqual(await existingWorktrees("5-", "5-t", [{ path: clone, name: "fe", worktrees: own }, { path: be, name: "be" }], io), { folder: "5-t", names: ["fe"] });
+  const none = await makeLaunchWorktrees("6-", "6-t", [], io);
+  assert.equal(none.path, join(home, ".herdr/worktrees/6-t")); assert.ok(existsSync(none.path));
+});
+
+test("a Launch under beside finds an earlier one by the Ticket prefix, for every Repo", async () => {
+  const { home, io, clone } = fixture();
+  assert.equal(sh("git clone -q origin.git be", home).status, 0);
+  const be = join(home, "be");
+  await makeLaunchWorktrees("7-", "7-old", [{ path: be, name: "be", worktrees: "beside" }], io);
+  assert.deepEqual(await existingWorktrees("7-", "7-new", [{ path: clone, name: "fe" }, { path: be, name: "be", worktrees: "beside" }], io), { folder: "7-old", names: ["be"] });
+  const again = await makeLaunchWorktrees("7-", "7-new", [{ path: clone, name: "fe" }, { path: be, name: "be", worktrees: "beside" }], io);
+  assert.equal(again.branch, "7-old"); assert.deepEqual(again.made, ["fe"]); assert.deepEqual(again.reused, ["be"]);
+  assert.deepEqual(again.worktrees, { fe: join(home, ".herdr/worktrees/7-old/fe"), be: join(home, "be-7-old") });
+  assert.ok(!existsSync(join(home, "be-7-new")));
+});
+
+test("a Review worktree goes beside the clone or under a folder; branch mode ignores the placement", async () => {
+  const { home, io, clone } = fixture();
+  const beside = await makeReviewWorktree("review-o-n-1", { path: clone, name: "fe", worktrees: "beside" }, "feat", io);
+  assert.equal(beside.path, join(home, "clone-review-o-n-1")); assert.deepEqual(beside.worktrees, { fe: beside.path });
+  assert.equal(readFileSync(join(beside.path, "f"), "utf8"), "x\n");
+  const own = join(home, "own");
+  const folder = await makeReviewWorktree("review-o-n-1", { path: clone, name: "fe", worktrees: own }, "feat", io);
+  assert.equal(folder.path, join(own, "review-o-n-1/fe")); assert.deepEqual(folder.made, ["fe"]);
+  const again = await makeReviewWorktree("review-o-n-1", { path: clone, name: "fe", worktrees: "beside" }, "feat", io);
+  assert.deepEqual(again.reused, ["fe"]);
+  const branch = await makeReviewWorktree("review-o-n-1", { path: clone, name: "fe", worktrees: "beside" }, "feat", io, "branch");
+  assert.equal(branch.path, clone); assert.deepEqual(branch.worktrees, {});
+});
+
+test("the scan says which hits are linked worktrees", async () => {
+  const { io, clone } = fixture();
+  const root = mkdtempSync(join(tmpdir(), "wf-scan-"));
+  assert.equal(sh(`git clone -q "${join(clone, "..", "origin.git")}" c 2>/dev/null && git -C c worktree add -q ../c-wt -b wt`, root, gitEnv).status, 0);
+  const list = await listClones([root], io);
+  assert.equal(list.find((c) => c.path === hostForm(join(root, "c"))).kind, "clone");
+  assert.equal(list.find((c) => c.path === hostForm(join(root, "c-wt"))).kind, "worktree");
 });

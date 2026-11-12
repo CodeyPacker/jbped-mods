@@ -121,30 +121,36 @@ const script = async (io, text, name, args, timeout = 300000) => {
   return r.stdout;
 };
 
-// The repo names that already have a worktree, under the Ticket's existing folder (found by prefix) or
-// ~/.herdr/worktrees/<folder>.
-// Returns { folder, names }: the folder a Launch would use (existing by prefix, else `folder`) and the
-// repo names that already have a worktree in it.
-export async function existingWorktrees(prefix, folder, names, io) {
-  const lines = (await script(io, EXISTS_SH, "wayfinder-exists", [prefix, folder, ...names], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+// A Repo's Worktree Placement for the scripts: "herdr" when it has none.
+const placed = (r) => r.worktrees || "herdr";
+const triples = (repos) => repos.flatMap((r) => [r.path, r.name, placed(r)]);
+
+// repos: [{ path, name, worktrees }], worktrees the Repo's Worktree Placement ("herdr", "beside" or a host
+// folder; "herdr" when absent). Returns { folder, names }: the folder name a Launch would use (an earlier
+// Launch's, found by prefix at each Repo's place, else `folder`) and the repo names whose worktree exists
+// at its place for it.
+export async function existingWorktrees(prefix, folder, repos, io) {
+  const lines = (await script(io, EXISTS_SH, "wayfinder-exists", [prefix, folder, ...triples(repos)], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const first = /^folder (.+)$/.exec(lines[0] ?? "");
   return { folder: first ? first[1] : folder, names: lines.filter((l) => !l.startsWith("folder ")) };
 }
 
-// repos: [{ path, name }]. Reuses the Ticket's existing folder (by prefix), else makes `folder`; the branch
-// is the folder's name. Returns { space, path, branch, made, reused }.
+// repos: as for existingWorktrees. Reuses an earlier Launch's folder name (by prefix), else `folder`; the
+// branch is that name. Each worktree goes at its Repo's place. Returns { space, path, branch, made, reused,
+// notes, worktrees }, worktrees: { [name]: local path }.
 export async function makeLaunchWorktrees(prefix, folder, repos, io) {
-  return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [prefix, folder, ...repos.flatMap((r) => [r.path, r.name])]));
+  return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [prefix, folder, ...triples(repos)]));
 }
 
-// checkout: the Repo's Checkout mode, "worktree" (a detached worktree under `folder`) or "branch" (the
-// branch in the clone itself). Returns { space, path, branch, made, reused, notes }.
+// repo: { path, name, worktrees }. checkout: the Repo's Checkout mode, "worktree" (a detached worktree at
+// the Repo's place for `folder`) or "branch" (the branch in the clone itself; the placement is ignored).
+// Returns { space, path, branch, made, reused, notes, worktrees }.
 export async function makeReviewWorktree(folder, repo, branch, io, checkout = "worktree") {
-  return parseScript(await script(io, REVIEW_SH, "wayfinder-review", [folder, repo.path, repo.name, branch, checkout]));
+  return parseScript(await script(io, REVIEW_SH, "wayfinder-review", [folder, repo.path, repo.name, branch, checkout, placed(repo)]));
 }
 
 // The git clones on this machine: home and each of `roots` (host folders, from scanRoots), four levels
-// deep. Returns [{ path, url, repo }].
+// deep. Returns [{ path, url, repo, kind }], kind "clone" or "worktree" (a linked worktree).
 export async function listClones(roots, io) {
   return parseClones(await script(io, SCAN_SH, "wayfinder-scan", roots, 120000));
 }

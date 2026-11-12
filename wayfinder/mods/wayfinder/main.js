@@ -129,14 +129,31 @@ function card(tk, t, selected, onClick, cursor = false) {
 const prAge = (pr) => pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}`
   : pr.createdAt ? ` · opened ${formatAge(Date.now() - Date.parse(pr.createdAt))}` : "";
 
-// A path's last two segments, to tell clones apart.
-const lastTwo = (path) => String(path).split(/[\\/]+/).filter(Boolean).slice(-2).join("/");
+// A scanned clone as a button label: its full path, then a `worktree` tag when it is a worktree.
+function hitLabel(h, t) {
+  return h_flex().gap(6).items_center().child(div().child(h.path))
+    .when(h.kind === "worktree", (el) => el.child(div().text_size(11).text_color(t.muted).child("worktree")));
+}
+
+// The one hit to save without asking: exactly one, and a clone. A worktree never counts as the one.
+const soleClone = (hits) => hits.length === 1 && hits[0].kind === "clone" ? hits[0] : null;
+
+// A clone state (cloneState) as a coloured dot, or a spinner while searching.
+const STATE_TEXT = { unscanned: "not looked for", searching: "searching…", none: "no clone found", several: "several found", one: "found, not saved" };
+const stateColor = (status, t) => status === "found" ? t.done : status === "unscanned" ? t.dim : status === "none" ? t.blocked : t.working;
+function stateMark(status, t) {
+  if (status === "searching") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+  return div().w(8).h(8).flex_none().rounded(4).bg(stateColor(status, t));
+}
+
+// Where a Repo's worktrees go, as the Launch card says it.
+const placementText = (w) => w === "herdr" ? "Herdr's worktrees folder" : w === "beside" ? "beside the clone" : w;
 
 // Several clones of the Pull Request's repo: one button per clone, then Cancel. `review` as in prRow.
 function cloneChooser(id, review, t) {
   return v_flex().id(id).gap(4).items_start()
     .child(div().text_size(11).text_color(t.dim).child("Several clones found. Review in:"))
-    .children(review.state.hits.map((h, i) => button(`${id}-${i}`, lastTwo(h.path), t, (cx) => review.choose(h.path, cx))))
+    .children(review.state.hits.map((h, i) => button(`${id}-${i}`, hitLabel(h, t), t, (cx) => review.choose(h.path, cx))))
     .child(button(`${id}-cancel`, "Cancel", t, (cx) => review.cancel(cx)));
 }
 
@@ -1044,32 +1061,40 @@ export default class Wayfinder extends View {
       ]));
     }
 
-    // Local clones: the Profile's Pull Request Repos, then the Selected repos without one.
-    const prRepos = p.repos.filter((r) => r.prRepo);
-    const hasClone = (name) => prRepos.some((r) => sameRepo(r.prRepo, name));
-    const missing = p.accounts.filter((a) => can(providerFor(a), "repos") && repoFilter(a).mode === "selected")
-      .flatMap((a) => repoFilter(a).selected.filter((name) => !hasClone(name)).map((name, i) => ({ a, name, i })));
+    // Local clones: every Repo, then the Selected repos without one.
+    const missing = this.missingClones(p);
     const c = this.clones;
-    out.push(heading("Local clones"), note("A Review starts in the clone of the Pull Request's repo. Worktree: a new worktree beside it. Branch: the branch checked out in the clone itself."));
+    out.push(heading("Local clones"), note("A Review starts in the clone of the Pull Request's repo. Worktree: a new worktree. Branch: the branch checked out in the clone itself. Herdr, Beside or Folder: where the worktrees go."));
     out.push(card("wf-set-clones", [
-      ...(prRepos.length ? [] : [note("No clones yet.")]),
-      ...prRepos.map((r) => h_flex().id(`wf-clone-${r.id}`).gap(8).items_center()
-        .child(v_flex().flex_1().min_w(0)
-          .child(div().truncate().text_size(12).text_color(t.foreground).child(r.prRepo))
-          .child(div().truncate().text_size(11).text_color(t.dim).child(r.path)))
-        .child(segmented(`wf-co-${r.id}`, [["worktree", "Worktree"], ["branch", "Branch"]], r.checkout, t,
-          (mode, cx) => this.saveConfig((raw) => edits.setRepoCheckout(raw, p.name, r.id, mode), cx)))
-        .child(button(`wf-clone-rm-${r.id}`, "Remove", t, (cx) => this.saveConfig((raw) => edits.removeRepo(raw, p.name, r.id), cx)))),
+      ...(p.repos.length || missing.length ? [] : [note("No clones yet.")]),
+      ...p.repos.map((r) => {
+        const placement = r.worktrees === "herdr" || r.worktrees === "beside" ? r.worktrees : "folder";
+        return v_flex().id(`wf-clone-${r.id}`).gap(4)
+          .child(h_flex().gap(8).items_center()
+            .child(stateMark("found", t))
+            .child(v_flex().flex_1().min_w(0)
+              .child(div().truncate().text_size(12).text_color(r.prRepo ? t.foreground : t.muted).child(r.prRepo ?? "Board clone"))
+              .child(div().truncate().text_size(11).text_color(t.dim).child(r.path)))
+            .child(segmented(`wf-co-${r.id}`, [["worktree", "Worktree"], ["branch", "Branch"]], r.checkout, t,
+              (mode, cx) => this.saveConfig((raw) => edits.setRepoCheckout(raw, p.name, r.id, mode), cx)))
+            .child(segmented(`wf-wp-${r.id}`, [["herdr", "Herdr"], ["beside", "Beside"], ["folder", "Folder…"]], placement, t,
+              (key, cx) => this.setPlacement(r.id, key, cx)))
+            .child(button(`wf-clone-rm-${r.id}`, "Remove", t, (cx) => this.saveConfig((raw) => edits.removeRepo(raw, p.name, r.id), cx))))
+          .when(placement === "folder", (el) => el.child(div().pl(16).truncate().text_size(11).text_color(t.dim).child(`Worktrees in ${r.worktrees}`)));
+      }),
       ...missing.flatMap(({ a, name, i }) => {
         const f = this.cloneFind[`${a.id}:${name}`];
+        const st = this.cloneState(name);
         return [
           h_flex().id(`wf-nc-${a.id}-${i}`).gap(8).items_center()
-            .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground)
-              .child(`${name} · ${f?.status === "loading" ? "looking…" : f?.status === "none" ? "no clone found" : "no clone"}`))
+            .child(stateMark(st.status, t))
+            .child(h_flex().flex_1().min_w(0).gap(6).items_center()
+              .child(div().min_w(0).truncate().text_size(12).text_color(t.foreground).child(name))
+              .child(div().flex_none().text_size(12).text_color(st.status === "searching" ? t.working : stateColor(st.status, t)).child(STATE_TEXT[st.status] ?? "")))
             .child(button(`wf-find-${a.id}-${i}`, "Find", t, (cx) => this.findClone(a.id, name, cx)))
             .child(button(`wf-pick-${a.id}-${i}`, "Pick…", t, (cx) => this.pickClone(a.id, name, cx))),
-          ...(f?.status === "choose" ? [v_flex().id(`wf-hits-${a.id}-${i}`).gap(4).items_start()
-            .children(f.hits.map((h, j) => button(`wf-hit-${a.id}-${i}-${j}`, `Use ${lastTwo(h.path)}`, t, (cx) => {
+          ...(st.status === "several" || st.status === "one" ? [v_flex().id(`wf-hits-${a.id}-${i}`).gap(4).items_start()
+            .children(st.hits.map((h, j) => button(`wf-hit-${a.id}-${i}-${j}`, hitLabel(h, t), t, (cx) => {
               delete this.cloneFind[`${a.id}:${name}`];
               this.saveConfig((raw) => edits.addRepo(raw, p.name, { path: h.path, prRepo: name }).raw, cx);
             })))] : []),
@@ -1081,9 +1106,58 @@ export default class Wayfinder extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(c?.status === "error" ? t.blocked : t.dim)
           .child(!c ? "Not scanned yet." : c.status === "loading" ? "Scanning…"
             : c.status === "error" ? c.error : `Scanned ${c.list.length} clones ${formatAge(Date.now() - c.at)}`))
-        .child(button("wf-clones-scan", "Scan again", t, (cx) => { this.scanClones(cx, { force: true }); })),
+        .child(button("wf-clones-scan", "Search all", t, (cx) => this.searchAll(cx))),
     ]));
     return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);
+  }
+
+  // The Selected repos without a Repo: [{ a, name, i }], `i` the index within the account's list.
+  missingClones(p) {
+    const hasClone = (name) => p.repos.some((r) => r.prRepo && sameRepo(r.prRepo, name));
+    return p.accounts.filter((a) => can(providerFor(a), "repos") && repoFilter(a).mode === "selected")
+      .flatMap((a) => repoFilter(a).selected.filter((name) => !hasClone(name)).map((name, i) => ({ a, name, i })));
+  }
+
+  // A repo name's clone state in Settings: { status, hits }, status found | searching | unscanned | several | none | one.
+  cloneState(name) {
+    const p = this.profile;
+    if (p?.repos.some((r) => r.prRepo && sameRepo(r.prRepo, name))) return { status: "found", hits: [] };
+    const finding = Object.entries(this.cloneFind).some(([k, f]) => f?.status === "loading" && k.endsWith(`:${name}`));
+    if (this.clones?.status === "loading" || finding) return { status: "searching", hits: [] };
+    if (!this.clones || this.clones.status === "error") return { status: "unscanned", hits: [] };
+    const hits = this.clonesOf(name);
+    return { status: hits.length > 1 ? "several" : hits.length ? "one" : "none", hits };
+  }
+
+  // Settings' Worktree Placement: herdr or beside saves at once; folder asks for one (cancel keeps the old value).
+  setPlacement(repoId, key, cx) {
+    const pName = this.profile?.name;
+    if (!pName) return;
+    if (key !== "folder") { this.saveConfig((raw) => edits.setRepoWorktrees(raw, pName, repoId, key), cx); return; }
+    cx.spawn(async (cx) => {
+      const folder = await pickFolder({ prompt: `Worktrees folder for ${repoId}` });
+      if (!folder || this.profile?.name !== pName) return;
+      this.saveConfig((raw) => edits.setRepoWorktrees(raw, pName, repoId, folder), cx);
+      cx.notify();
+    });
+  }
+
+  // Settings' Search all: scans again, then saves each Selected repo's one clone, one save per name in sequence.
+  searchAll(cx) {
+    const pName = this.profile?.name;
+    if (!pName) return;
+    cx.spawn(async (cx) => {
+      await this.scanClones(cx, { force: true });
+      const p = this.profile;
+      if (p?.name !== pName || this.clones?.status !== "ok") { cx.notify(); return; }
+      for (const name of new Set(this.missingClones(p).map((m) => m.name))) {
+        if (this.profile?.name !== pName) break;
+        const hit = soleClone(this.clonesOf(name));
+        if (!hit || this.cloneState(name).status === "found") continue;
+        this.saveConfig((raw) => edits.addRepo(raw, pName, { path: hit.path, prRepo: name }).raw, cx);
+      }
+      cx.notify();
+    });
   }
 
   // Settings' Find: scans again, then saves the one clone of `name`, or lists several.
@@ -1096,8 +1170,8 @@ export default class Wayfinder extends View {
       if (this.profile?.name !== pName) return;
       const hits = this.clonesOf(name);
       if (this.clones?.status === "error") this.cloneFind[key] = { status: "error", error: `Couldn't scan for clones: ${this.clones.error}` };
-      else if (hits.length > 1) this.cloneFind[key] = { status: "choose", hits };
       else if (!hits.length) this.cloneFind[key] = { status: "none" };
+      else if (!soleClone(hits)) this.cloneFind[key] = { status: "choose", hits };
       else {
         delete this.cloneFind[key];
         const failed = this.saveConfig((raw) => edits.addRepo(raw, pName, { path: hits[0].path, prRepo: name }).raw, cx);
@@ -1134,7 +1208,7 @@ export default class Wayfinder extends View {
       const p = this.profile;
       if (p?.name !== pName) return;
       const hits = this.clonesOf(name);
-      if (hits.length !== 1 || p.repos.some((r) => r.prRepo && sameRepo(r.prRepo, name))) { cx.notify(); return; }
+      if (!soleClone(hits) || p.repos.some((r) => r.prRepo && sameRepo(r.prRepo, name))) { cx.notify(); return; }
       this.saveConfig((raw) => edits.addRepo(raw, pName, { path: hits[0].path, prRepo: name }).raw, cx);
       cx.notify();
     });
@@ -1385,7 +1459,7 @@ export default class Wayfinder extends View {
     cx.spawn(async (cx) => {
       let exists = [];
       let folder = null;
-      try { ({ names: exists, folder } = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map(repoName), io)); } catch { /* shown as not made */ }
+      try { ({ names: exists, folder } = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io)); } catch { /* shown as not made */ }
       if (this.launch?.key !== key) return;
       this.launch.exists = exists; this.launch.folder = folder;
       cx.notify();
@@ -1421,8 +1495,8 @@ export default class Wayfinder extends View {
     cx.spawn(async (cx) => {
       try {
         // An earlier Launch's folder and branch are reused when the title has changed since.
-        const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r) })), io);
-        const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: `${made.path}/${repoName(r)}` }));
+        const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io);
+        const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: made.worktrees?.[repoName(r)] ?? `${made.path}/${repoName(r)}` }));
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
       } catch (e) {
@@ -1440,12 +1514,13 @@ export default class Wayfinder extends View {
     return v_flex().id("wf-launch-card").p(12).gap(8).rounded(8).bg(t.surface).border_1().border_color(t.accent)
       .child(div().text_size(13).font_semibold().text_color(t.foreground).child("Launch"))
       .child(note(open ? `The space "${open.name}" is open. Launch selects it.`
-        : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} in ~/.herdr/worktrees/${L.folder ?? ticketFolder(tk)}, on branch ${L.folder ?? ticketFolder(tk)}.`))
+        : `A space with ${tpl.agent}${tpl.model ? ` (${tpl.model})` : ""} on branch ${L.folder ?? ticketFolder(tk)}.`))
       .children(repos.length ? repos.map((r) => h_flex().gap(8).items_center()
         .child(checkRow(`wf-launch-r-${r.id}`, L.selected.includes(r.id), r.id, t, (cx) => {
           L.selected = L.selected.includes(r.id) ? L.selected.filter((x) => x !== r.id) : [...L.selected, r.id]; cx.notify();
         }))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(r.path))
+        .child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).child(placementText(r.worktrees)))
         .child(note(L.exists == null ? "" : exists(r) ? "worktree exists" : ""))) : [note("No repos for this Board yet. Add a local clone, or launch without one.")])
       .child(h_flex().gap(8).items_center()
         .child(button("wf-launch-add", "Add repo…", t, (cx) => this.addLaunchRepo(cx)))
@@ -1489,7 +1564,7 @@ export default class Wayfinder extends View {
   rememberClone(profileName, folder, prRepo, cx) {
     let id = null;
     const failed = this.saveConfig((raw) => { const r = edits.addRepo(raw, profileName, { path: folder, prRepo }); id = r.id; return r.raw; }, cx);
-    return { failed, repo: { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo, checkout: "worktree" } };
+    return { failed, repo: { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo, checkout: "worktree", worktrees: "herdr" } };
   }
 
   // A picked folder's origin must be `prRepo`. Returns the error text, else null.
@@ -1544,7 +1619,7 @@ export default class Wayfinder extends View {
           await this.scanClones(cx);
           if (changed(cx)) return;
           const hits = this.clonesOf(pr.repo);
-          if (hits.length > 1) { this.reviews[pr.key] = { status: "choose", hits }; cx.notify(); return; }
+          if (hits.length && !soleClone(hits)) { this.reviews[pr.key] = { status: "choose", hits }; cx.notify(); return; }
           let folder = hits[0]?.path;
           if (!folder) {
             st.message = "Pick its clone…"; cx.notify();
@@ -1565,7 +1640,7 @@ export default class Wayfinder extends View {
         const info = await loadReviewInfo(p, accountId, pr, io);
         st.message = "Making the worktree…"; cx.notify();
         const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
-        const made = await makeReviewWorktree(reviewFolder(pr), { path: repo.path, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree");
+        const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree");
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
