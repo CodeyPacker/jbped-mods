@@ -61,6 +61,10 @@ _Avoid_: repository, checkout, project
 How a Review puts the Pull Request's branch into a Repo: Worktree (a detached worktree under Herdr's worktrees folder, the default) or Branch (the branch checked out in the Repo's own folder, created from origin when new).
 _Avoid_: review mode, clone mode, checkout type
 
+**Worktree Placement**:
+Where a Repo's worktrees go: Herdr's worktrees folder (the default), beside the clone, or a folder the user chose. A Launch and a Worktree-mode Review place each Repo's worktree by it.
+_Avoid_: worktree root, worktree dir, checkout location
+
 **Template**:
 The agent, model, extra arguments and opening prompt a Launch or Review starts with. A Launch Template is the file's default, then the Board's; a Review Template is the default, then the Repo's.
 _Avoid_: preset, agent profile
