@@ -482,6 +482,24 @@ test("plus in worktree mode starts in a new worktree under the Repo, and needs a
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: null }, w, c, s).effects[0].type, "toast");
 });
 
+test("a worktree goes where the Repo says, else its Workspace, else the setting", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} }, [BACK]: { name: "backend", on: {} } } };
+  const w = world([]);
+  const on = { "": { home: "/d", paths: { [FRONT]: "/d/front", [BACK]: "/d/back" } } };
+  const folder = (c, id) => run({ type: "plus", group: "repo:" + id, sub: null, mode: "worktree", machine: null, branch: "b" }, w, c, s).effects[0];
+  const ws = config({ workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on, worktrees: ".worktrees/{branch}/{repo}" }] });
+  assert.deepEqual(folder(ws, FRONT).worktree, { main: "/d/front", branch: "b", path: "/d/.worktrees/b/frontend" });
+  assert.equal(folder(ws, BACK).folder, "/d/.worktrees/b/backend");
+  const both = config({
+    workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on, worktrees: ".worktrees/{branch}/{repo}" }],
+    repos: { [FRONT]: { machines: [], on: {}, worktrees: "wt/{branch}" } },
+  });
+  assert.equal(folder(both, FRONT).folder, "/d/front/wt/b", "the Repo's own pattern wins and is relative to its main root");
+  assert.equal(folder(both, BACK).folder, "/d/.worktrees/b/backend");
+  const none = config({ workspaces: [{ name: "Arden", repos: [FRONT, BACK], machines: [], on }] });
+  assert.equal(folder(none, FRONT).folder, "/d/front/.worktrees/b", "no override: the setting, under the main root");
+});
+
 test("plus on a Workspace passes Repos outside the home to Claude as added directories", () => {
   const ws = { name: "Mix", repos: [FRONT, BACK], machines: ["wsl"], on: { wsl: { home: "/srv/mix", paths: { [FRONT]: "/srv/mix/front", [BACK]: "/opt/back" } } } };
   const c = config({ workspaces: [ws], settings: { agent: ["/usr/bin/claude", "--x"] } });

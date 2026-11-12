@@ -77,7 +77,10 @@ Every command is also in the palette (the `palette` mod).
 
 - `sort`: `recent`, `kind`, `az` or `manual`. The header button changes it and writes it here.
 - `plus`: what "+" does on a Repo group. `open` starts in the main checkout. `worktree` asks for a branch and makes a git worktree.
-- `worktrees`: where a new worktree goes. `{branch}` is the branch. A relative path is relative to the Repo's main checkout.
+- `worktrees`: where a new worktree goes. `{branch}` is the branch and `{repo}` is the Repo's name. A relative path is relative to the Repo's main checkout.
+  - A Repo can set its own: `"repos": { "<identity>": { "worktrees": "wt/{branch}" } }`, relative to its main checkout.
+  - A Workspace can set one for its Repos: `"worktrees": ".worktrees/{branch}/{repo}"` on the Workspace, relative to the Workspace home.
+  - The Repo's own pattern wins, then the first Workspace that lists the Repo and sets one, then this setting.
 - `autoname`: name new spaces from their branch.
 - `ticket`: a regular expression matched against the branch. Its first group is the ticket id at the start of the name.
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.

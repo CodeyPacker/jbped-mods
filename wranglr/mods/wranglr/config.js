@@ -35,6 +35,15 @@ function parseSettings(raw, errors) {
 // on: { [mkey]: object }, keeping only object entries.
 const parseOn = (on) => (isObj(on) ? Object.fromEntries(Object.entries(on).filter(([, v]) => isObj(v))) : {});
 
+// An optional worktrees pattern on a Workspace or a Repo: dropped, and named, when it is not a path pattern.
+function pattern(entry, where, errors) {
+  if ("worktrees" in entry && (typeof entry.worktrees !== "string" || !entry.worktrees)) {
+    errors.push(`${where}.worktrees: must be a path pattern`);
+    delete entry.worktrees;
+  }
+  return entry;
+}
+
 function parseWorkspaces(raw, errors) {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) { errors.push("workspaces: not a list"); return []; }
@@ -43,7 +52,7 @@ function parseWorkspaces(raw, errors) {
     if (!isObj(w) || typeof w.name !== "string" || !w.name.trim()) { errors.push(`workspaces[${i}]: has no name`); return; }
     if (names.has(w.name)) { errors.push(`workspaces[${i}]: duplicate name "${w.name}"`); return; }
     names.add(w.name);
-    out.push({ ...w, repos: strings(w.repos), machines: strings(w.machines), on: parseOn(w.on) });
+    out.push(pattern({ ...w, repos: strings(w.repos), machines: strings(w.machines), on: parseOn(w.on) }, `workspaces[${i}]`, errors));
   });
   return out;
 }
@@ -54,7 +63,7 @@ function parseRepos(raw, errors) {
   const out = {};
   for (const [id, r] of Object.entries(raw)) {
     if (!isObj(r)) { errors.push(`repos["${id}"]: not an object`); continue; }
-    out[id] = { ...r, machines: strings(r.machines), on: parseOn(r.on) };
+    out[id] = pattern({ ...r, machines: strings(r.machines), on: parseOn(r.on) }, `repos["${id}"]`, errors);
   }
   return out;
 }
