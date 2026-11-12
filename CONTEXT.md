@@ -58,11 +58,11 @@ A local clone the Profile lists, with its folder and, once known, the Pull Reque
 _Avoid_: repository, checkout, project
 
 **Checkout Mode**:
-How a Review puts the Pull Request's branch into a Repo: Worktree (a detached worktree under Herdr's worktrees folder, the default) or Branch (the branch checked out in the Repo's own folder, created from origin when new).
+How a Review puts the Pull Request's branch into a Repo: Worktree (a detached worktree at the Repo's Worktree Placement, the default) or Branch (the branch checked out in the Repo's own folder, created from origin when new).
 _Avoid_: review mode, clone mode, checkout type
 
 **Worktree Placement**:
-Where a Repo's worktrees go: Herdr's worktrees folder (the default), beside the clone, or a folder the user chose. A Launch and a Worktree-mode Review place each Repo's worktree by it.
+Where a Repo's worktrees go: Wranglr's rule for that Repo (the default; Herdr's worktrees folder when Wranglr is not set up), Herdr's worktrees folder, beside the clone, or a folder the user chose. A Launch and a Worktree-mode Review place each Repo's worktree by it.
 _Avoid_: worktree root, worktree dir, checkout location
 
 **Template**:
