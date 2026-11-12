@@ -4,8 +4,8 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH } from "../mods/wayfinder/launch.js";
-import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees } from "../mods/wayfinder/flow.js";
+import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH, REVIEW_SH, SCAN_SH } from "../mods/wayfinder/launch.js";
+import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin } from "../mods/wayfinder/flow.js";
 import { addRepo } from "../mods/wayfinder/settings.js";
 import { parseConfig } from "../mods/wayfinder/config.js";
 
@@ -57,7 +57,7 @@ test("prompts carry the Ticket, the repos and the criteria", () => {
 
 test("spaceArgv runs the agent in the folder through the runner, as argv", () => {
   assert.deepEqual(spaceArgv("wsl:Ubuntu", "windows", "/h/w", ["claude"]), ["wsl.exe", "-d", "Ubuntu", "--exec", "bash", "-lc", 'cd "$0" && exec "$@"', "/h/w", "claude"]);
-  assert.deepEqual(parseScript("made a\nreused b\nspace C:\\x\npath /x\nbranch 1-t\n"), { space: "C:\\x", path: "/x", branch: "1-t", made: ["a"], reused: ["b"] });
+  assert.deepEqual(parseScript("made a\nreused b\nspace C:\\x\npath /x\nbranch 1-t\n"), { space: "C:\\x", path: "/x", branch: "1-t", made: ["a"], reused: ["b"], notes: [] });
 });
 
 test("addRepo adds a clone once and lists it on the Board", () => {
@@ -129,4 +129,68 @@ test("Review checks out the PR branch detached, and a missing branch fails with 
   assert.equal(readFileSync(join(r.path, "f"), "utf8"), "x\n");
   assert.equal(sh("git branch --show-current", r.path).stdout.trim(), ""); // detached
   await assert.rejects(makeReviewWorktree("review-pr-2", { path: clone, name: "fe" }, "nope", io), /fetch of nope failed/);
+});
+
+test("parseScript collects note lines; the Review script has the branch mode's git steps", () => {
+  assert.deepEqual(parseScript("note local branch b is behind\nreused fe\nnote two\n").notes, ["local branch b is behind", "two"]);
+  for (const t of ["show-ref", "--ff-only", "--track"]) assert.ok(REVIEW_SH.includes(t), t);
+  for (const t of ["node_modules", ".herdr", "-maxdepth 4"]) assert.ok(SCAN_SH.includes(t), t);
+});
+
+// Pushes a commit to origin's branch `b` (made from origin/main when new) from a second clone, so the
+// fixture's clone doesn't have it yet.
+const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
+const pushBranch = (home, b, file) => {
+  const r = sh(`(test -d other || git clone -q origin.git other 2>/dev/null) && cd other && git fetch -q && { git checkout -q -B ${b} origin/${b} 2>/dev/null || git checkout -q -B ${b} origin/main; } && echo ${b} > ${file} && git add ${file} && git commit -q -m ${b}-${file} && git push -q origin ${b}`, home, gitEnv);
+  assert.equal(r.status, 0, r.stderr);
+};
+// The scan prints folders in the host's form: the Windows form under WSL.
+const hostForm = (p) => spawnSync("sh", ["-c", 'if command -v wslpath >/dev/null 2>&1; then wslpath -w "$0"; else printf %s "$0"; fi', p], { encoding: "utf8" }).stdout.trim();
+
+test("Review in branch mode checks out a new branch in the clone, tracking origin", async () => {
+  const { home, io, clone } = fixture();
+  pushBranch(home, "pr1");
+  const r = await makeReviewWorktree("review-pr-1", { path: clone, name: "fe" }, "pr1", io, "branch");
+  assert.deepEqual([r.path, r.branch, r.reused, r.made, r.notes], [clone, "pr1", ["fe"], [], []]);
+  assert.equal(sh("git branch --show-current", clone).stdout.trim(), "pr1");
+  assert.equal(sh("git rev-parse --abbrev-ref pr1@{upstream}", clone).stdout.trim(), "origin/pr1");
+  assert.ok(!existsSync(join(home, ".herdr/worktrees/review-pr-1")));
+});
+
+test("Review in branch mode fast-forwards an existing branch, and notes one that has diverged", async () => {
+  const { home, io, clone } = fixture();
+  pushBranch(home, "feat", "h"); // origin/feat moves ahead of the local feat
+  const ff = await makeReviewWorktree("review-pr-1", { path: clone, name: "fe" }, "feat", io, "branch");
+  assert.deepEqual(ff.notes, []);
+  assert.equal(sh("git rev-parse HEAD", clone).stdout, sh("git rev-parse origin/feat", clone).stdout);
+  assert.equal(sh("echo l > l && git add l && git commit -q -m local && git checkout -q main", clone, gitEnv).status, 0);
+  pushBranch(home, "feat", "k");
+  const div = await makeReviewWorktree("review-pr-1", { path: clone, name: "fe" }, "feat", io, "branch");
+  assert.equal(div.notes.length, 1); assert.match(div.notes[0], /feat is behind or has diverged/);
+  assert.equal(sh("git log -1 --format=%s", clone).stdout.trim(), "local"); // left as it was
+});
+
+test("Review in branch mode stops on a dirty tree with git's message; an unknown mode fails", async () => {
+  const { home, io, clone } = fixture();
+  pushBranch(home, "pr2", "f"); // main has no f; pr2 adds it
+  assert.equal(sh("echo dirty > f", clone).status, 0);
+  await assert.rejects(makeReviewWorktree("review-pr-2", { path: clone, name: "fe" }, "pr2", io, "branch"), /before you switch branches/);
+  assert.equal(sh("git branch --show-current", clone).stdout.trim(), "main");
+  await assert.rejects(makeReviewWorktree("review-pr-2", { path: clone, name: "fe" }, "pr2", io, "bogus"), /unknown checkout mode bogus/);
+});
+
+test("the scan lists clones with an origin under home and the roots, once each; origin reads a folder", async () => {
+  const { home, io, clone } = fixture();
+  const extra = mkdtempSync(join(tmpdir(), "wf-scan-"));
+  assert.equal(sh("git init -q a && git -C a remote add origin https://dev.azure.com/o/P/_git/a && git init -q b && mkdir -p node_modules/x && git init -q node_modules/x/c && git -C node_modules/x/c remote add origin https://github.com/n/m", extra).status, 0);
+  const list = await listClones([extra, extra, "/nonexistent"], io);
+  const paths = list.map((c) => c.path).sort();
+  assert.ok(paths.includes(hostForm(clone))); assert.ok(paths.includes(hostForm(join(extra, "a"))));
+  assert.ok(!paths.includes(hostForm(join(extra, "b")))); // no origin
+  assert.ok(!paths.some((p) => p.includes("node_modules")));
+  assert.equal(new Set(paths).size, paths.length);
+  assert.equal(list.find((c) => c.path === hostForm(join(extra, "a"))).repo, "P/a");
+  assert.deepEqual(await cloneOrigin(join(extra, "a"), io), { url: "https://dev.azure.com/o/P/_git/a", repo: "P/a" });
+  assert.deepEqual(await cloneOrigin(join(extra, "b"), io), { url: "", repo: null });
+  await assert.rejects(cloneOrigin(home, io), /not a git repository/);
 });

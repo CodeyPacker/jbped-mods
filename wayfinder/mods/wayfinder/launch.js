@@ -128,17 +128,47 @@ while [ $# -ge 2 ]; do
   else git -C "$repo" worktree add --quiet -b "$b" "$dest" "$def" || exit 1; fi
   echo "made $name"
 done
-echo "space $(out "$d")"; echo "path $d"; echo "branch $b"`;
+printf 'space %s\\npath %s\\nbranch %s\\n' "$(out "$d")" "$d" "$b"`;
 
-// Makes a Review worktree on the PR branch, detached so no local branch is touched (D15, D18).
-// argv: folder, repo path, repo name, branch. A worktree that exists is moved to the branch's newest commit.
+// Starts a Review (D15, D18). argv: folder, repo path, repo name, branch, Checkout mode.
+// "worktree": a detached worktree on the PR branch, so no local branch is touched; one that exists is
+// moved to the branch's newest commit. "branch": the branch checked out in the clone itself (made tracking
+// origin when new; an existing one is fast-forwarded when it can be, else left with a "note" line). A
+// failed checkout (a dirty tree) exits with git's message.
 export const REVIEW_SH = `${TO_LOCAL}; ${TO_SPACE}
+case "$5" in worktree|branch) ;; *) echo "unknown checkout mode $5" >&2; exit 1;; esac
 d="$HOME/.herdr/worktrees/$1"; repo=$(loc "$2") || exit 1; [ -n "$repo" ] || { echo "can't convert $2" >&2; exit 1; }
 name="$3"; b="$4"; dest="$d/$name"
 git -C "$repo" fetch --quiet origin "+refs/heads/$b:refs/remotes/origin/$b" || { echo "git fetch of $b failed in $repo" >&2; exit 1; }
+if [ "$5" = branch ]; then
+  if git -C "$repo" show-ref --verify --quiet "refs/heads/$b"; then
+    git -C "$repo" checkout --quiet "$b" || exit 1
+    git -C "$repo" merge --quiet --ff-only "origin/$b" || echo "note local branch $b is behind or has diverged from origin/$b; left as it was"
+  else git -C "$repo" checkout --quiet -b "$b" --track "origin/$b" || exit 1; fi
+  printf 'reused %s\nspace %s\npath %s\nbranch %s\n' "$name" "$(out "$repo")" "$repo" "$b"; exit 0
+fi
 if [ -e "$dest/.git" ]; then git -C "$dest" checkout --quiet --detach "origin/$b" || exit 1; echo "reused $name"
 else mkdir -p "$d" && git -C "$repo" worktree add --quiet --detach "$dest" "origin/$b" || exit 1; echo "made $name"; fi
-echo "space $(out "$dest")"; echo "path $dest"`;
+printf 'space %s\\npath %s\\n' "$(out "$dest")" "$dest"`;
+
+// Lists the git clones on this machine. argv: host folders to scan besides $HOME (0 or more; one that
+// can't be converted or isn't a folder is skipped). Looks four levels deep for ".git" (a folder, or a
+// file in a linked worktree), skipping tool and cache folders and ~/.herdr. Prints "<folder>\t<origin url>"
+// per clone with an origin, the folder in the host's form. Always exits 0.
+export const SCAN_SH = `${TO_LOCAL}; ${TO_SPACE}
+scan() { find "$1" -maxdepth 4 \\( -name node_modules -o -name .cache -o -name .npm -o -name .nvm -o -name .cargo -o -name .rustup -o -name .vscode-server -o -name AppData -o -name Library -o -name snap -o -name .herdr \\) -prune -o -name .git -prune -print 2>/dev/null; }
+{ scan "$HOME"; for r in "$@"; do x=$(loc "$r" 2>/dev/null) || continue; [ -n "$x" ] && [ -d "$x" ] || continue; scan "$x"; done; } | sort -u | while IFS= read -r g; do
+  dir=$(dirname "$g"); url=$(git -C "$dir" config --get remote.origin.url 2>/dev/null)
+  [ -n "$url" ] && printf '%s\\t%s\\n' "$(out "$dir")" "$url"
+done | sort -u
+exit 0`;
+
+// A folder's origin. argv: one host folder. Prints "url <origin url>" ("url " with no origin), or fails
+// with "not a git repository".
+export const ORIGIN_SH = `${TO_LOCAL}
+d=$(loc "$1") || exit 1; [ -n "$d" ] || { echo "can't convert $1" >&2; exit 1; }
+git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git repository" >&2; exit 1; }
+echo "url $(git -C "$d" config --get remote.origin.url)"`;
 
 // The space's agent: started by the runner in the folder, through a login shell so the user's PATH
 // applies. The folder and agent args are argv, never shell text.
@@ -147,13 +177,14 @@ export function spaceArgv(runner, platform, folder, argv) {
   return [inv.command, ...inv.args];
 }
 
-// "space <x>", "path <y>", "branch <b>", "made <r>", "reused <r>" lines from the scripts.
+// "space <x>", "path <y>", "branch <b>", "made <r>", "reused <r>" and "note <text>" lines from the scripts.
 export function parseScript(stdout) {
-  const out = { space: null, path: null, branch: null, made: [], reused: [] };
+  const out = { space: null, path: null, branch: null, made: [], reused: [], notes: [] };
   for (const line of String(stdout).split(/\r?\n/)) {
-    const m = /^(space|path|branch|made|reused) (.+)$/.exec(line.trim());
+    const m = /^(space|path|branch|made|reused|note) (.+)$/.exec(line.trim());
     if (!m) continue;
     if (m[1] === "space" || m[1] === "path" || m[1] === "branch") out[m[1]] = m[2];
+    else if (m[1] === "note") out.notes.push(m[2]);
     else out[m[1]].push(m[2]);
   }
   return out;

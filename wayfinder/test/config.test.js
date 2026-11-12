@@ -101,3 +101,12 @@ test("notifications default to on every 5 minutes, and bad values are reported",
     assert.deepEqual(p(bad).errors, ['profiles.p.notifications: { "enabled": true | false, "minutes": 1..60 }'], JSON.stringify(bad));
   }
 });
+
+test("a Repo's checkout is worktree by default, branch when set, and anything else is an error", () => {
+  const p = (c) => parse({ profiles: { p: { repos: [{ id: "r", path: "/x", ...c }] } } });
+  assert.equal(p({}).profile.repos[0].checkout, "worktree");
+  assert.equal(p({ checkout: "branch" }).profile.repos[0].checkout, "branch");
+  assert.deepEqual(p({ checkout: "x" }).errors, ['profiles.p.repos[0].checkout: "worktree" (a detached worktree, the default) or "branch" (the branch in the clone itself)']);
+  assert.equal(p({ checkout: "branch" }).config.profiles.p.repos[0].checkout, "branch");
+  assert.equal(p({}).config.profiles.p.repos[0].checkout, undefined); // the raw config is left as read
+});

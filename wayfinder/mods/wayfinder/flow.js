@@ -2,7 +2,8 @@
 // It never branches on which Provider it's talking to.
 import { PROVIDERS } from "./providers/index.js";
 import { can, keepsRepo, moveTarget } from "./providers/contract.js";
-import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, parseScript } from "./launch.js";
+import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH, ORIGIN_SH, parseScript } from "./launch.js";
+import { parseClones, remoteRepo } from "./clones.js";
 
 export function accountFor(profile, boardCfg) {
   return profile.accounts.find((a) => a.id === boardCfg.account) ?? null;
@@ -136,8 +137,23 @@ export async function makeLaunchWorktrees(prefix, folder, repos, io) {
   return parseScript(await script(io, LAUNCH_SH, "wayfinder-launch", [prefix, folder, ...repos.flatMap((r) => [r.path, r.name])]));
 }
 
-export async function makeReviewWorktree(folder, repo, branch, io) {
-  return parseScript(await script(io, REVIEW_SH, "wayfinder-review", [folder, repo.path, repo.name, branch]));
+// checkout: the Repo's Checkout mode, "worktree" (a detached worktree under `folder`) or "branch" (the
+// branch in the clone itself). Returns { space, path, branch, made, reused, notes }.
+export async function makeReviewWorktree(folder, repo, branch, io, checkout = "worktree") {
+  return parseScript(await script(io, REVIEW_SH, "wayfinder-review", [folder, repo.path, repo.name, branch, checkout]));
+}
+
+// The git clones on this machine: home and each of `roots` (host folders, from scanRoots), four levels
+// deep. Returns [{ path, url, repo }].
+export async function listClones(roots, io) {
+  return parseClones(await script(io, SCAN_SH, "wayfinder-scan", roots, 120000));
+}
+
+// A picked folder's origin: { url, repo }, url "" when it has none. Rejects when it isn't a git repository.
+export async function cloneOrigin(folder, io) {
+  const line = (await script(io, ORIGIN_SH, "wayfinder-origin", [folder], 30000)).split(/\r?\n/).find((l) => /^url( |$)/.test(l)) ?? "";
+  const url = line.slice(4).trim();
+  return { url, repo: remoteRepo(url) };
 }
 
 // What a Review needs from the Provider: the branch, its description and linked Tickets' criteria (D16).

@@ -3,6 +3,8 @@ import { validOrg, ENV_NAME } from "./providers/azure.js";
 import { templateErrors } from "./launch.js";
 
 export const PROVIDERS = ["github", "azure", "clickup"];
+// A Repo's Checkout mode for a Review: a detached worktree (the default) or the branch in the clone itself.
+export const CHECKOUTS = ["worktree", "branch"];
 // Wayfinder never stores secrets (ADR 0002). A field whose name ends in one of these is an error,
 // except the two that hold a variable's name.
 const SECRET_KEY = /(^|_|-)?(token|pat|password|secret|access_?token|api_?key)$/i;
@@ -78,6 +80,7 @@ function checkProfile(name, p, platform, errors) {
     if (!isObj(r)) return;
     if (!isStr(r.path)) errors.push(`${at}.repos[${i}].path: the local clone's folder`);
     if (r.prRepo != null && !(isStr(r.prRepo) && r.prRepo.includes("/"))) errors.push(`${at}.repos[${i}].prRepo: the Pull Request repo it clones, "owner/name" or "project/repo"`);
+    if (r.checkout != null && !CHECKOUTS.includes(r.checkout)) errors.push(`${at}.repos[${i}].checkout: "worktree" (a detached worktree, the default) or "branch" (the branch in the clone itself)`);
     errors.push(...templateErrors(r.review, `${at}.repos[${i}].review`));
   });
   boards.forEach((b, i) => {
@@ -101,7 +104,9 @@ function checkProfile(name, p, platform, errors) {
     errors.push(`${at}.notifications: { "enabled": true | false, "minutes": 1..60 }`);
   }
   const notifications = { enabled: isObj(n) && typeof n.enabled === "boolean" ? n.enabled : true, minutes: isObj(n) && Number.isInteger(n.minutes) && n.minutes >= 1 && n.minutes <= 60 ? n.minutes : 5 };
-  return { name, runner, accounts, repos, boards, notifications };
+  // Each Repo carries its Checkout mode, "worktree" by default.
+  const withCheckout = repos.map((r) => (isObj(r) ? { ...r, checkout: r.checkout ?? "worktree" } : r));
+  return { name, runner, accounts, repos: withCheckout, boards, notifications };
 }
 
 // Returns { config, profile, errors }. `profile` is the active one, normalized; null when errors.

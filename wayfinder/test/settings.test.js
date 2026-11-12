@@ -167,3 +167,25 @@ test("setNotifications writes only the given fields and drops the object at the 
   assert.equal(parseConfig(JSON.stringify(e.setNotifications(raw(), "work", { minutes: 0 })), "linux").errors.length, 1);
   assert.throws(() => e.setNotifications(raw(), "nope", { enabled: false }), /No profile/);
 });
+
+test("setRepoCheckout writes branch and removes the field for worktree, the default", () => {
+  const r0 = { profiles: { p: { accounts: [], repos: [{ id: "fe", path: "/fe" }], boards: [] } } };
+  const r1 = e.setRepoCheckout(r0, "p", "fe", "branch");
+  assert.equal(r1.profiles.p.repos[0].checkout, "branch");
+  assert.equal(r0.profiles.p.repos[0].checkout, undefined);
+  valid(r1);
+  assert.ok(!("checkout" in e.setRepoCheckout(r1, "p", "fe", "worktree").profiles.p.repos[0]));
+  assert.throws(() => e.setRepoCheckout(r0, "p", "fe", "detached"), /Unknown checkout mode/);
+  assert.throws(() => e.setRepoCheckout(r0, "p", "nope", "branch"), /No repo "nope"/);
+});
+
+test("removeRepo removes the Repo and its id from every Board", () => {
+  const r0 = { profiles: { p: { accounts: [{ id: "gh", provider: "github", login: "a" }], repos: [{ id: "fe", path: "/fe" }, { id: "be", path: "/be" }],
+    boards: [{ id: "b1", account: "gh", ref: { owner: "o", number: 1 }, repos: ["fe", "be"] }, { id: "b2", account: "gh", ref: { owner: "o", number: 2 }, repos: ["fe"] }, { id: "b3", account: "gh", ref: { owner: "o", number: 3 } }] } } };
+  const r1 = e.removeRepo(r0, "p", "fe");
+  assert.deepEqual(r1.profiles.p.repos.map((r) => r.id), ["be"]);
+  assert.deepEqual(r1.profiles.p.boards.map((b) => b.repos), [["be"], [], undefined]);
+  valid(r1);
+  assert.equal(r0.profiles.p.repos.length, 2);
+  assert.throws(() => e.removeRepo(r0, "p", "nope"), /No repo "nope"/);
+});

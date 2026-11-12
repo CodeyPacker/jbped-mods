@@ -241,3 +241,22 @@ export function addRepo(raw, profileName, { path, prRepo = null, boardId = null 
   });
   return { raw: out, id };
 }
+
+// A Repo's Checkout mode for Reviews: "worktree" (the default, so the field goes) or "branch".
+export function setRepoCheckout(raw, profileName, repoId, mode) {
+  if (!["worktree", "branch"].includes(mode)) throw new Error(`Unknown checkout mode "${mode}"`);
+  return edit(raw, profileName, (p) => {
+    const r = (p.repos ?? []).find((x) => x.id === repoId);
+    if (!r) throw new Error(`No repo "${repoId}"`);
+    if (mode === "worktree") delete r.checkout; else r.checkout = mode;
+  });
+}
+
+// Removes a Repo, and its id from every Board's repos.
+export function removeRepo(raw, profileName, repoId) {
+  return edit(raw, profileName, (p) => {
+    if (!(p.repos ?? []).some((x) => x.id === repoId)) throw new Error(`No repo "${repoId}"`);
+    p.repos = p.repos.filter((x) => x.id !== repoId);
+    for (const b of p.boards ?? []) if (Array.isArray(b.repos)) b.repos = b.repos.filter((id) => id !== repoId);
+  });
+}

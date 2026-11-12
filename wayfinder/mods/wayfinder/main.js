@@ -6,13 +6,14 @@
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
-import { run, layout, shared, setShared, theme, settings, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
+import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
+import { sameRepo, scanRoots } from "./clones.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -128,6 +129,18 @@ function card(tk, t, selected, onClick, cursor = false) {
 const prAge = (pr) => pr.updatedAt ? ` · updated ${formatAge(Date.now() - Date.parse(pr.updatedAt))}`
   : pr.createdAt ? ` · opened ${formatAge(Date.now() - Date.parse(pr.createdAt))}` : "";
 
+// A path's last two segments, to tell clones apart.
+const lastTwo = (path) => String(path).split(/[\\/]+/).filter(Boolean).slice(-2).join("/");
+
+// Several clones of the Pull Request's repo: one button per clone, then Cancel. `review` as in prRow.
+function cloneChooser(id, review, t) {
+  return v_flex().id(id).gap(4).items_start()
+    .child(div().text_size(11).text_color(t.dim).child("Several clones found. Review in:"))
+    .children(review.state.hits.map((h, i) => button(`${id}-${i}`, lastTwo(h.path), t, (cx) => review.choose(h.path, cx))))
+    .child(button(`${id}-cancel`, "Cancel", t, (cx) => review.cancel(cx)));
+}
+
+// `review`: { state, start, choose, cancel } from reviewActions.
 // `select`: { selected, onClick }, the row opens the Pull Request panel.
 function prRow(pr, t, review = null, select = null) {
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
@@ -139,7 +152,8 @@ function prRow(pr, t, review = null, select = null) {
         .when(pr.draft, (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
       .child(div().text_size(11).text_color(t.dim).truncate()
-        .child(`${pr.id} · ${pr.author.name}${prAge(pr)}`)))
+        .child(`${pr.id} · ${pr.author.name}${prAge(pr)}`))
+      .when(review?.state?.status === "choose", (el) => el.child(cloneChooser(`wf-pr-choose-${pr.key}`, review, t))))
     .when(Boolean(review?.state?.status === "error"), (el) => el.child(div().max_w(260).flex_none().text_size(11).text_color(t.blocked).child(review.state.error)))
     .when(Boolean(review), (el) => el.child(button(`wf-pr-review-${pr.key}`, review.state?.status === "busy" ? (review.state.message ?? "Starting…") : "Review", t,
       (cx) => review.start(cx), { on: review.state?.status === "busy" })))
@@ -206,7 +220,9 @@ export default class Wayfinder extends View {
     this.tickets = {}; // ticket key -> { status, data, error }
     this.images = {}; // image url -> { status, file, error }: saved files stay across reloads
     this.launch = null; // the Launch dialog: { key, selected: repo ids, exists: names | null, status, error, message }
-    this.reviews = {}; // pr key -> { status: "busy" | "error", message, error }
+    this.reviews = {}; // pr key -> { status: "busy" | "error" | "choose", message, error, hits }
+    this.clones = null; // the clone index, scanned once per session: { status: "loading" | "ok" | "error", list, error, at }
+    this.cloneFind = {}; // settings: "<account id>:<repo>" -> { status: "loading" | "none" | "choose" | "error", hits, error }
     this.selectedPr = null; // { account, pr }: the Pull Request in the detail panel
     this.prDetails = {}; // pr key -> { status, data, error }
     this.prFolds = {}; // pr key -> { file path -> "open" | "folded" | "all" }
@@ -408,6 +424,8 @@ export default class Wayfinder extends View {
     this.prDetails = {};
     this.prs = null;
     this.found = {};
+    this.clones = null;
+    this.cloneFind = {};
     this.statusLists = {};
     this.signIn = null; // account id -> { ok } | { ok: false, reason, command }; null until checked
     this.lastRefresh = null;
@@ -1015,15 +1033,111 @@ export default class Wayfinder extends View {
               ...(f?.status === "error" ? [note(`Couldn't list repos: ${f.error}`, t.blocked)] : []),
               ...(f?.status === "ok" && !untickedCount ? [note("All ticked.")] : []),
               ...(untickedCount && !rows.length ? [note("No match.")] : []),
-              ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, false, r, t,
-                (cx) => this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx)))),
+              ...rows.map((r) => h_flex().child(checkRow(`wf-set-r-${a.id}-${r}`, false, r, t, (cx) => {
+                const failed = this.saveConfig((raw) => edits.toggleRepo(raw, p.name, a.id, r), cx);
+                if (!failed && rf.mode === "selected") this.autoClone(r, cx);
+              }))),
               ...(hidden ? [note(`${hidden} more match. Search to narrow the list.`)] : []),
             ]),
           ]),
         ]),
       ]));
     }
+
+    // Local clones: the Profile's Pull Request Repos, then the Selected repos without one.
+    const prRepos = p.repos.filter((r) => r.prRepo);
+    const hasClone = (name) => prRepos.some((r) => sameRepo(r.prRepo, name));
+    const missing = p.accounts.filter((a) => can(providerFor(a), "repos") && repoFilter(a).mode === "selected")
+      .flatMap((a) => repoFilter(a).selected.filter((name) => !hasClone(name)).map((name, i) => ({ a, name, i })));
+    const c = this.clones;
+    out.push(heading("Local clones"), note("A Review starts in the clone of the Pull Request's repo. Worktree: a new worktree beside it. Branch: the branch checked out in the clone itself."));
+    out.push(card("wf-set-clones", [
+      ...(prRepos.length ? [] : [note("No clones yet.")]),
+      ...prRepos.map((r) => h_flex().id(`wf-clone-${r.id}`).gap(8).items_center()
+        .child(v_flex().flex_1().min_w(0)
+          .child(div().truncate().text_size(12).text_color(t.foreground).child(r.prRepo))
+          .child(div().truncate().text_size(11).text_color(t.dim).child(r.path)))
+        .child(segmented(`wf-co-${r.id}`, [["worktree", "Worktree"], ["branch", "Branch"]], r.checkout, t,
+          (mode, cx) => this.saveConfig((raw) => edits.setRepoCheckout(raw, p.name, r.id, mode), cx)))
+        .child(button(`wf-clone-rm-${r.id}`, "Remove", t, (cx) => this.saveConfig((raw) => edits.removeRepo(raw, p.name, r.id), cx)))),
+      ...missing.flatMap(({ a, name, i }) => {
+        const f = this.cloneFind[`${a.id}:${name}`];
+        return [
+          h_flex().id(`wf-nc-${a.id}-${i}`).gap(8).items_center()
+            .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground)
+              .child(`${name} · ${f?.status === "loading" ? "looking…" : f?.status === "none" ? "no clone found" : "no clone"}`))
+            .child(button(`wf-find-${a.id}-${i}`, "Find", t, (cx) => this.findClone(a.id, name, cx)))
+            .child(button(`wf-pick-${a.id}-${i}`, "Pick…", t, (cx) => this.pickClone(a.id, name, cx))),
+          ...(f?.status === "choose" ? [v_flex().id(`wf-hits-${a.id}-${i}`).gap(4).items_start()
+            .children(f.hits.map((h, j) => button(`wf-hit-${a.id}-${i}-${j}`, `Use ${lastTwo(h.path)}`, t, (cx) => {
+              delete this.cloneFind[`${a.id}:${name}`];
+              this.saveConfig((raw) => edits.addRepo(raw, p.name, { path: h.path, prRepo: name }).raw, cx);
+            })))] : []),
+          ...(f?.status === "error" ? [note(f.error, t.blocked)] : []),
+        ];
+      }),
+      line(),
+      h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(c?.status === "error" ? t.blocked : t.dim)
+          .child(!c ? "Not scanned yet." : c.status === "loading" ? "Scanning…"
+            : c.status === "error" ? c.error : `Scanned ${c.list.length} clones ${formatAge(Date.now() - c.at)}`))
+        .child(button("wf-clones-scan", "Scan again", t, (cx) => { this.scanClones(cx, { force: true }); })),
+    ]));
     return v_flex().id("wf-settings").size_full().min_h(0).p(16).gap(10).overflow_y_scrollbar().children(out);
+  }
+
+  // Settings' Find: scans again, then saves the one clone of `name`, or lists several.
+  findClone(accountId, name, cx) {
+    const pName = this.profile?.name, key = `${accountId}:${name}`;
+    if (!pName) return;
+    this.cloneFind[key] = { status: "loading" }; cx.notify();
+    cx.spawn(async (cx) => {
+      await this.scanClones(cx, { force: true });
+      if (this.profile?.name !== pName) return;
+      const hits = this.clonesOf(name);
+      if (this.clones?.status === "error") this.cloneFind[key] = { status: "error", error: `Couldn't scan for clones: ${this.clones.error}` };
+      else if (hits.length > 1) this.cloneFind[key] = { status: "choose", hits };
+      else if (!hits.length) this.cloneFind[key] = { status: "none" };
+      else {
+        delete this.cloneFind[key];
+        const failed = this.saveConfig((raw) => edits.addRepo(raw, pName, { path: hits[0].path, prRepo: name }).raw, cx);
+        if (failed) this.cloneFind[key] = { status: "error", error: `Couldn't save the clone: ${failed}` };
+      }
+      cx.notify();
+    });
+  }
+
+  // Settings' Pick…: a folder whose origin is `name`, saved as its Repo.
+  pickClone(accountId, name, cx) {
+    const pName = this.profile?.name, key = `${accountId}:${name}`;
+    if (!pName) return;
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      const folder = await pickFolder({ prompt: `Pick your local clone of ${name}` });
+      if (!folder || this.profile?.name !== pName) return;
+      const wrong = await this.checkClone(folder, name, io);
+      if (this.profile?.name !== pName) return;
+      if (wrong) { this.cloneFind[key] = { status: "error", error: wrong }; cx.notify(); return; }
+      delete this.cloneFind[key];
+      const failed = this.saveConfig((raw) => edits.addRepo(raw, pName, { path: folder, prRepo: name }).raw, cx);
+      if (failed) this.cloneFind[key] = { status: "error", error: `Couldn't save the clone: ${failed}` };
+      cx.notify();
+    });
+  }
+
+  // A repo just ticked in Selected mode: its one scanned clone becomes its Repo. Several or none wait for Settings.
+  autoClone(name, cx) {
+    const pName = this.profile?.name;
+    if (!pName) return;
+    cx.spawn(async (cx) => {
+      await this.scanClones(cx);
+      const p = this.profile;
+      if (p?.name !== pName) return;
+      const hits = this.clonesOf(name);
+      if (hits.length !== 1 || p.repos.some((r) => r.prRepo && sameRepo(r.prRepo, name))) { cx.notify(); return; }
+      this.saveConfig((raw) => edits.addRepo(raw, pName, { path: hits[0].path, prRepo: name }).raw, cx);
+      cx.notify();
+    });
   }
 
   // A Board's Tracked Statuses: ticked ones in Column order with up and down, then the rest.
@@ -1341,7 +1455,72 @@ export default class Wayfinder extends View {
       .when(L.status === "error", (el) => el.child(note(L.error, t.blocked)));
   }
 
-  // Review (#14, D15 to D17): the PR's clone from the Profile's repos, else asked for once.
+  // The clone index (#14): the git clones on this machine, scanned once per session. Resolves when the
+  // scan ends, either way. A scan in flight is shared. `force` scans again after a finished one.
+  scanClones(cx, { force = false } = {}) {
+    const c = this.clones, p = this.profile;
+    if (c?.status === "loading") return c.promise;
+    if ((c?.status === "ok" && !force) || !p) return Promise.resolve();
+    const roots = scanRoots({ folders: [...spaces().map((s) => s.folder), ...p.repos.map((r) => r.path)] });
+    // The script scans the runner's home itself; on Windows the user's home is another folder, so it is a root too.
+    const h = String(home() ?? "").replace(/[\\/]+$/, "");
+    if (h && !roots.some((r) => r.toLowerCase() === h.toLowerCase())) roots.push(h);
+    const io = this.io();
+    const entry = { status: "loading", list: c?.list ?? [], error: null, at: c?.at ?? null };
+    entry.promise = new Promise((resolve) => cx.spawn(async (cx) => {
+      let next;
+      try { next = { status: "ok", list: await listClones(roots, io), error: null, at: Date.now() }; }
+      catch (e) { next = { status: "error", list: [], error: String(e.message ?? e), at: Date.now() }; }
+      if (this.clones === entry) this.clones = next; // a reload meanwhile dropped this scan
+      resolve();
+      cx.notify();
+    }));
+    this.clones = entry;
+    cx.notify();
+    return entry.promise;
+  }
+
+  // The scanned clones of a Pull Request repo.
+  clonesOf(prRepo) {
+    return (this.clones?.list ?? []).filter((c) => c.repo && sameRepo(c.repo, prRepo));
+  }
+
+  // Saves a clone as the Profile's Repo for `prRepo`. Returns the Repo to use now and the save's refusal, if any.
+  rememberClone(profileName, folder, prRepo, cx) {
+    let id = null;
+    const failed = this.saveConfig((raw) => { const r = edits.addRepo(raw, profileName, { path: folder, prRepo }); id = r.id; return r.raw; }, cx);
+    return { failed, repo: { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo, checkout: "worktree" } };
+  }
+
+  // A picked folder's origin must be `prRepo`. Returns the error text, else null.
+  async checkClone(folder, prRepo, io) {
+    let origin;
+    try { origin = await cloneOrigin(folder, io); } catch { return `${folder} isn't a git repository`; }
+    if (!origin.repo || !sameRepo(origin.repo, prRepo)) return `${folder} clones ${origin.repo ?? origin.url ?? "nothing"}, not ${prRepo}`;
+    return null;
+  }
+
+  // What a Pull Request row and the overlay's header need to start, choose a clone for, or cancel a Review.
+  reviewActions(accountId, pr) {
+    return {
+      state: this.reviews[pr.key],
+      start: (cx) => this.startReview(accountId, pr, cx),
+      choose: (path, cx) => this.reviewWith(accountId, pr, path, cx),
+      cancel: (cx) => { delete this.reviews[pr.key]; cx.notify(); },
+    };
+  }
+
+  // The chooser's pick: saved as the Repo, then the Review starts with it.
+  reviewWith(accountId, pr, path, cx) {
+    const p = this.profile;
+    if (!p) return;
+    const failed = this.saveConfig((raw) => edits.addRepo(raw, p.name, { path, prRepo: pr.repo }).raw, cx);
+    if (failed) { this.reviews[pr.key] = { status: "error", error: `Couldn't save the clone: ${failed}` }; cx.notify(); return; }
+    delete this.reviews[pr.key];
+    this.startReview(accountId, pr, cx);
+  }
+
+  // Review (#14, D15 to D17): the PR's clone from the Profile's repos, else the scanned clone, else asked for once.
   startReview(accountId, pr, cx) {
     if (this.reviews[pr.key]?.status === "busy") return;
     const name = reviewSpaceName(pr);
@@ -1352,30 +1531,44 @@ export default class Wayfinder extends View {
     if (!p) return;
     const st = this.reviews[pr.key] = { status: "busy", message: "Starting…" };
     const io = this.io(), runner = p.runner, templates = this.state.templates;
+    const changed = (cx) => {
+      if (this.profile?.name === p.name) return false;
+      this.reviews[pr.key] = { status: "error", error: "The profile changed while finding the clone. Start the Review again." };
+      cx.notify(); return true;
+    };
     cx.spawn(async (cx) => {
       try {
-        let repo = p.repos.find((r) => r.prRepo === pr.repo);
+        let repo = p.repos.find((r) => r.prRepo && sameRepo(r.prRepo, pr.repo));
         if (!repo) {
-          st.message = "Pick its clone…"; cx.notify();
-          const folder = await pickFolder({ prompt: `Pick your local clone of ${pr.repo}` });
-          if (this.profile?.name !== p.name) {
-            this.reviews[pr.key] = { status: "error", error: "The profile changed while picking the clone. Start the Review again." };
-            cx.notify(); return;
+          st.message = "Looking for a clone…"; cx.notify();
+          await this.scanClones(cx);
+          if (changed(cx)) return;
+          const hits = this.clonesOf(pr.repo);
+          if (hits.length > 1) { this.reviews[pr.key] = { status: "choose", hits }; cx.notify(); return; }
+          let folder = hits[0]?.path;
+          if (!folder) {
+            st.message = "Pick its clone…"; cx.notify();
+            folder = await pickFolder({ prompt: `Pick your local clone of ${pr.repo}` });
+            if (changed(cx)) return;
+            if (!folder) { delete this.reviews[pr.key]; cx.notify(); return; }
+            st.message = "Checking the clone…"; cx.notify();
+            const wrong = await this.checkClone(folder, pr.repo, io);
+            if (changed(cx)) return;
+            if (wrong) { this.reviews[pr.key] = { status: "error", error: wrong }; cx.notify(); return; }
           }
-          if (!folder) { delete this.reviews[pr.key]; cx.notify(); return; }
-          let id = null;
-          const failed = this.saveConfig((raw) => { const r = edits.addRepo(raw, p.name, { path: folder, prRepo: pr.repo }); id = r.id; return r.raw; }, cx);
-          // Not remembered, but this Review still goes ahead with the picked folder.
-          if (failed) st.error = `Couldn't save the clone: ${failed}`;
-          repo = { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo: pr.repo };
+          const saved = this.rememberClone(p.name, folder, pr.repo, cx);
+          // Not remembered, but this Review still goes ahead with the folder.
+          if (saved.failed) st.error = `Couldn't save the clone: ${saved.failed}`;
+          repo = saved.repo;
         }
         st.message = "Reading the Pull Request…"; cx.notify();
         const info = await loadReviewInfo(p, accountId, pr, io);
         st.message = "Making the worktree…"; cx.notify();
         const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
-        const made = await makeReviewWorktree(reviewFolder(pr), { path: repo.path, name: repoName(repo) }, info.branch, io);
+        const made = await makeReviewWorktree(reviewFolder(pr), { path: repo.path, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree");
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
-        if (st.error) this.reviews[pr.key] = { status: "error", error: st.error };
+        const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
+        if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
         else delete this.reviews[pr.key];
       } catch (e) {
         this.reviews[pr.key] = { status: "error", error: `Review failed: ${e.message ?? e}` };
@@ -1523,7 +1716,7 @@ export default class Wayfinder extends View {
           ...(ok.length > 1 ? [div().pt(4).text_size(12).text_color(t.dim).child(`${l.account} · ${a?.login ?? a?.org ?? ""}`)] : []),
           ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
-            .children(g.prs.map((pr) => prRow(pr, t, { state: this.reviews[pr.key], start: (cx) => this.startReview(l.account, pr, cx) },
+            .children(g.prs.map((pr) => prRow(pr, t, this.reviewActions(l.account, pr),
               { selected: this.selectedPr?.pr.key === pr.key, onClick: (cx) => this.openPr(l.account, pr, cx) })))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
@@ -1615,7 +1808,7 @@ export default class Wayfinder extends View {
       .child(div().w(84).flex_none().text_color(t.dim).child(label))
       .child(div().flex_1().min_w(0).text_color(t.foreground).child(value || "—"));
     const date = (s) => String(s ?? "").slice(0, 10);
-    const rv = this.reviews[k];
+    const review = this.reviewActions(sel.account, pr), rv = review.state;
 
     const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
       .child(div().min_w(0).text_size(12).text_color(t.muted).truncate().child([cur.id, cur.repo, cur.state].filter(Boolean).join(" · ")))
@@ -1623,7 +1816,7 @@ export default class Wayfinder extends View {
       .child(div().flex_1())
       .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
       .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
-        (cx) => this.startReview(sel.account, pr, cx), { on: rv?.status === "busy" }))
+        (cx) => review.start(cx), { on: rv?.status === "busy" }))
       .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
 
     const body = v_flex().id(`wf-pr-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
@@ -1661,7 +1854,10 @@ export default class Wayfinder extends View {
     // Wheel events end here: the body has had them, the list under the overlay must not.
     return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0).w(`${Math.round(this.prFrac * 1000) / 10}%`)
       .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg().on_scroll_wheel(stop)
-      .child(head).child(body).child(grip);
+      .child(head)
+      .when(rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
+        .child(cloneChooser("wf-pr-panel-choose", review, t))))
+      .child(body).child(grip);
   }
 
   // Shown while fullscreen is wanted but off (Close, the tab bar, another panel left it): back to
