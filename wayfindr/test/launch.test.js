@@ -5,7 +5,8 @@ import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfindr/launch.js";
-import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin } from "../mods/wayfindr/flow.js";
+import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin, placementFor } from "../mods/wayfindr/flow.js";
+import { identityOf, parseWranglr } from "../mods/wayfindr/wranglr.js";
 import { addRepo } from "../mods/wayfindr/settings.js";
 import { parseConfig } from "../mods/wayfindr/config.js";
 
@@ -256,4 +257,53 @@ test("the scan says which hits are linked worktrees", async () => {
   const list = await listClones([root], io);
   assert.equal(list.find((c) => c.path === hostForm(join(root, "c"))).kind, "clone");
   assert.equal(list.find((c) => c.path === hostForm(join(root, "c-wt"))).kind, "worktree");
+});
+
+test("under wranglr a Launch follows Wranglr's setting, and a Repo's own rule with {repo} wins", async () => {
+  const { home, io, clone } = fixture();
+  const cfg = { worktrees: ".worktrees/{branch}", repos: {} };
+  const r = await makeLaunchWorktrees("8-", "8-t", [{ path: clone, name: "fe", worktrees: "wranglr" }], io, cfg);
+  assert.deepEqual(r.worktrees, { fe: join(clone, ".worktrees/8-t") });
+  assert.equal(sh("git branch --show-current", join(clone, ".worktrees/8-t")).stdout.trim(), "8-t");
+  assert.equal(r.path, join(clone, ".worktrees/8-t")); // its parent isn't the Launch's folder: the worktree
+  const id = identityOf(join(home, "origin.git"), clone);
+  const own = { worktrees: ".worktrees/{branch}", repos: { [id]: { worktrees: "../wt/{branch}/{repo}" } } };
+  assert.equal(await placementFor({ path: clone, name: "fe" }, own, io), "at:" + join(home, "wt/{branch}/origin"));
+  const r2 = await makeLaunchWorktrees("9-", "9-t", [{ path: clone, name: "fe" }], io, own);
+  assert.deepEqual(r2.worktrees, { fe: join(home, "wt/9-t/origin") });
+  assert.equal(r2.path, join(home, "wt/9-t")); // the Launch's own folder
+});
+
+test("under wranglr an earlier Launch's folder is found by the Ticket prefix", async () => {
+  const { home, io, clone } = fixture();
+  const cfg = parseWranglr(JSON.stringify({ settings: { worktrees: "../wt/{branch}/{repo}" } }));
+  await makeLaunchWorktrees("10-", "10-old", [{ path: clone, name: "fe" }], io, cfg);
+  assert.ok(existsSync(join(home, "wt/10-old/origin/.git")));
+  assert.deepEqual(await existingWorktrees("10-", "10-new", [{ path: clone, name: "fe" }], io, cfg), { folder: "10-old", names: ["fe"] });
+  assert.deepEqual(await existingWorktrees("11-", "11-new", [{ path: clone, name: "fe" }], io, cfg), { folder: "11-new", names: [] });
+  const again = await makeLaunchWorktrees("10-", "10-new", [{ path: clone, name: "fe" }], io, cfg);
+  assert.deepEqual(again.reused, ["fe"]); assert.equal(again.branch, "10-old");
+});
+
+test("a Review in worktree mode under wranglr goes at Wranglr's place", async () => {
+  const { io, clone } = fixture();
+  const cfg = parseWranglr("{}");
+  const r = await makeReviewWorktree("review-o-n-1", { path: clone, name: "fe", worktrees: "wranglr" }, "feat", io, "worktree", cfg);
+  assert.equal(r.path, join(clone, ".worktrees/review-o-n-1")); assert.deepEqual(r.made, ["fe"]);
+  assert.equal(readFileSync(join(r.path, "f"), "utf8"), "x\n");
+});
+
+test("wranglr without Wranglr set up lands in Herdr's folder", async () => {
+  const { home, io, clone } = fixture();
+  assert.equal(await placementFor({ path: clone, name: "fe" }, null, io), "herdr");
+  assert.equal(await placementFor({ path: clone, name: "fe", worktrees: "beside" }, parseWranglr("{}"), io), "beside");
+  const r = await makeLaunchWorktrees("12-", "12-t", [{ path: clone, name: "fe", worktrees: "wranglr" }], io, null);
+  assert.deepEqual(r.worktrees, { fe: join(home, ".herdr/worktrees/12-t/fe") });
+  const v = await makeReviewWorktree("review-o-n-2", { path: clone, name: "fe", worktrees: "wranglr" }, "feat", io);
+  assert.equal(v.path, join(home, ".herdr/worktrees/review-o-n-2/fe"));
+});
+
+test("PLACE and PICK handle the at: placement", () => {
+  for (const s of [EXISTS_SH, LAUNCH_SH]) for (const t of ["at:*)", "subst()", "'{branch}'", "${3#at:}"]) assert.ok(s.includes(t), t);
+  for (const t of ["at:*)", "subst()"]) assert.ok(REVIEW_SH.includes(t), t);
 });

@@ -101,20 +101,32 @@ const TO_LOCAL = String.raw`loc() { case "$1" in [A-Za-z]:) p="$1/";; *) p="$1";
   *) printf %s "$1";; esac; }`;
 // Prints the folder for space.new: the Windows form under WSL, else the path itself.
 const TO_SPACE = 'out() { if command -v wslpath >/dev/null 2>&1; then wslpath -w "$1"; else printf %s "$1"; fi; }';
-// Worktree Placement: "herdr", "beside" or a host folder. place <clone> <name> <placement> <folder> sets dest
-// to where that Repo's worktree for the folder name goes: herdr: ~/.herdr/worktrees/<folder>/<name>,
-// beside: <clone>-<folder> next to the clone, a folder F: F/<folder>/<name>. Fails when F can't be converted.
-const PLACE = `place() { case "$3" in
+// Replaces every {branch} in $1 with $2 and prints the result.
+const SUBST = `subst() { s="$1"; r=""; while :; do case "$s" in *'{branch}'*) r="$r\${s%%'{branch}'*}$2"; s="\${s#*'{branch}'}";; *) printf %s "$r$s"; return 0;; esac; done; }`;
+// Worktree Placement: "herdr", "beside", "at:<host path with {branch}>" (Wranglr's rule, from patternPath)
+// or a host folder. place <clone> <name> <placement> <folder> sets dest to where that Repo's worktree for the
+// folder name goes: herdr: ~/.herdr/worktrees/<folder>/<name>, beside: <clone>-<folder> next to the clone,
+// at:P: P with every {branch} replaced by the folder name, a folder F: F/<folder>/<name>. Fails when P or F
+// can't be converted.
+const PLACE = `${SUBST}
+place() { case "$3" in
   herdr) dest="$HOME/.herdr/worktrees/$4/$2";;
   beside) c="\${1%/}"; dest="$(dirname "$c")/$(basename "$c")-$4";;
+  at:*) q=$(loc "\${3#at:}") || return 1; [ -n "$q" ] || { printf "can't convert %s\\n" "\${3#at:}" >&2; return 1; }; dest=$(subst "$q" "$4");;
   *) base=$(loc "$3") || return 1; [ -n "$base" ] || { printf "can't convert %s\\n" "$3" >&2; return 1; }; dest="\${base%/}/$4/$2";; esac; }`;
 // Finds an earlier Launch's folder name by the Ticket prefix. found <prefix> <clone> <placement> sets f to
 // the first existing folder's name: herdr and a folder F look for <base>/<prefix>*, beside for
-// <clone>-<prefix>* next to the clone. An unmatched glob stays literal, so each match is checked to be a
+// <clone>-<prefix>* next to the clone, at:P splits P at its first {branch} into pre and post and looks for
+// <pre><prefix>*: the name is what follows pre up to the next /, and <pre><name><post> (post's {branch}
+// replaced by the name) must be a folder. An unmatched glob stays literal, so each match is checked to be a
 // folder. pick <prefix> then triples (clone path, name, placement): the first match across the Repos in
 // order, else fails. A clone or folder that can't be converted is skipped.
-const PICK = `found() { case "$3" in
+const PICK = `${SUBST}
+found() { case "$3" in
   beside) c="\${2%/}"; pre="$(dirname "$c")/$(basename "$c")-"; for e in "$pre$1"*; do if [ -d "$e" ]; then f="\${e#"$pre"}"; return 0; fi; done; return 1;;
+  at:*) q=$(loc "\${3#at:}" 2>/dev/null) || return 1; case "$q" in *'{branch}'*) ;; *) return 1;; esac
+    pre="\${q%%'{branch}'*}"; post="\${q#*'{branch}'}"
+    for e in "$pre$1"*; do n="\${e#"$pre"}"; n="\${n%%/*}"; if [ -d "$pre$n$(subst "$post" "$n")" ]; then f="$n"; return 0; fi; done; return 1;;
   herdr) base="$HOME/.herdr/worktrees";;
   *) base=$(loc "$3" 2>/dev/null) || return 1; [ -n "$base" ] || return 1; base="\${base%/}";; esac
   for e in "$base/$1"*; do if [ -d "$e" ]; then f=$(basename "$e"); return 0; fi; done; return 1; }

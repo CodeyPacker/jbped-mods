@@ -252,14 +252,14 @@ export function setRepoCheckout(raw, profileName, repoId, mode) {
   });
 }
 
-// A Repo's Worktree Placement: "herdr" (the default, so the field goes), "beside" or a host folder.
+// A Repo's Worktree Placement: "wranglr" (the default, so the field goes), "herdr", "beside" or a host folder.
 export function setRepoWorktrees(raw, profileName, repoId, value) {
   if (typeof value !== "string" || !value.trim()) throw new Error("Pick a folder for the worktrees");
   const v = value.trim();
   return edit(raw, profileName, (p) => {
     const r = (p.repos ?? []).find((x) => x.id === repoId);
     if (!r) throw new Error(`No repo "${repoId}"`);
-    if (v === "herdr") delete r.worktrees; else r.worktrees = v;
+    if (v === "wranglr") delete r.worktrees; else r.worktrees = v;
   });
 }
 

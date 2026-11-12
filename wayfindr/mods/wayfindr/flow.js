@@ -4,6 +4,7 @@ import { PROVIDERS } from "./providers/index.js";
 import { can, keepsRepo, moveTarget } from "./providers/contract.js";
 import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH, ORIGIN_SH, parseScript } from "./launch.js";
 import { parseClones, remoteRepo } from "./clones.js";
+import { identityOf, wranglrPattern, patternPath } from "./wranglr.js";
 
 export function accountFor(profile, boardCfg) {
   return profile.accounts.find((a) => a.id === boardCfg.account) ?? null;
@@ -121,32 +122,51 @@ const script = async (io, text, name, args, timeout = 300000) => {
   return r.stdout;
 };
 
-// A Repo's Worktree Placement for the scripts: "herdr" when it has none.
-const placed = (r) => r.worktrees || "herdr";
-const triples = (repos) => repos.flatMap((r) => [r.path, r.name, placed(r)]);
+const baseName = (p) => String(p ?? "").replace(/[\/\\]+$/, "").split(/[\/\\]/).pop();
 
-// repos: [{ path, name, worktrees }], worktrees the Repo's Worktree Placement ("herdr", "beside" or a host
-// folder; "herdr" when absent). Returns { folder, names }: the folder name a Launch would use (an earlier
-// Launch's, found by prefix at each Repo's place, else `folder`) and the repo names whose worktree exists
-// at its place for it.
-export async function existingWorktrees(prefix, folder, repos, io) {
-  const lines = (await script(io, EXISTS_SH, "wayfindr-exists", [prefix, folder, ...triples(repos)], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+// A Repo's Worktree Placement for the scripts. "wranglr" (the default) is Wranglr's rule for the Repo
+// ("at:<host path with {branch}>"), or "herdr" when Wranglr isn't set up (wranglr null). The origin is read
+// only when the rule can depend on it: a per-Repo pattern exists or the setting uses {repo}.
+export async function placementFor(repo, wranglr, io) {
+  const w = repo.worktrees || "wranglr";
+  if (w !== "wranglr") return w;
+  if (!wranglr) return "herdr";
+  let url = "";
+  if (Object.keys(wranglr.repos).length || wranglr.worktrees.includes("{repo}")) {
+    try { url = (await cloneOrigin(repo.path, io)).url; } catch { url = ""; }
+  }
+  const identity = url ? identityOf(url, repo.path) : null;
+  const name = identity ? identity.split("/").pop() : baseName(repo.path);
+  return "at:" + patternPath(wranglrPattern(wranglr, identity), repo.path, name);
+}
+const triples = async (repos, wranglr, io) => {
+  const placed = await Promise.all(repos.map((r) => placementFor(r, wranglr, io)));
+  return repos.flatMap((r, i) => [r.path, r.name, placed[i]]);
+};
+
+// repos: [{ path, name, worktrees }], worktrees the Repo's Worktree Placement ("wranglr", "herdr", "beside"
+// or a host folder; "wranglr" when absent). wranglr: parseWranglr's result, or null when Wranglr isn't set
+// up. Returns { folder, names }: the folder name a Launch would use (an earlier Launch's, found by prefix at
+// each Repo's place, else `folder`) and the repo names whose worktree exists at its place for it.
+export async function existingWorktrees(prefix, folder, repos, io, wranglr = null) {
+  const lines = (await script(io, EXISTS_SH, "wayfindr-exists", [prefix, folder, ...(await triples(repos, wranglr, io))], 30000)).split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
   const first = /^folder (.+)$/.exec(lines[0] ?? "");
   return { folder: first ? first[1] : folder, names: lines.filter((l) => !l.startsWith("folder ")) };
 }
 
-// repos: as for existingWorktrees. Reuses an earlier Launch's folder name (by prefix), else `folder`; the
-// branch is that name. Each worktree goes at its Repo's place. Returns { space, path, branch, made, reused,
-// notes, worktrees }, worktrees: { [name]: local path }.
-export async function makeLaunchWorktrees(prefix, folder, repos, io) {
-  return parseScript(await script(io, LAUNCH_SH, "wayfindr-launch", [prefix, folder, ...triples(repos)]));
+// repos, wranglr: as for existingWorktrees. Reuses an earlier Launch's folder name (by prefix), else
+// `folder`; the branch is that name. Each worktree goes at its Repo's place. Returns { space, path, branch,
+// made, reused, notes, worktrees }, worktrees: { [name]: local path }.
+export async function makeLaunchWorktrees(prefix, folder, repos, io, wranglr = null) {
+  return parseScript(await script(io, LAUNCH_SH, "wayfindr-launch", [prefix, folder, ...(await triples(repos, wranglr, io))]));
 }
 
 // repo: { path, name, worktrees }. checkout: the Repo's Checkout mode, "worktree" (a detached worktree at
 // the Repo's place for `folder`) or "branch" (the branch in the clone itself; the placement is ignored).
-// Returns { space, path, branch, made, reused, notes, worktrees }.
-export async function makeReviewWorktree(folder, repo, branch, io, checkout = "worktree") {
-  return parseScript(await script(io, REVIEW_SH, "wayfindr-review", [folder, repo.path, repo.name, branch, checkout, placed(repo)]));
+// wranglr: as for existingWorktrees. Returns { space, path, branch, made, reused, notes, worktrees }.
+export async function makeReviewWorktree(folder, repo, branch, io, checkout = "worktree", wranglr = null) {
+  const placement = await placementFor(repo, wranglr, io);
+  return parseScript(await script(io, REVIEW_SH, "wayfindr-review", [folder, repo.path, repo.name, branch, checkout, placement]));
 }
 
 // The git clones on this machine: home and each of `roots` (host folders, from scanRoots), four levels

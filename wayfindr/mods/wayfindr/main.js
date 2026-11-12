@@ -8,6 +8,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
 import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
+import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
@@ -37,6 +38,8 @@ function findNode(node, id) {
   return null;
 }
 const configPath = () => `${appHome()}/data/wayfindr.json`;
+// Wranglr's config: its worktree rule is the default Worktree Placement when Wranglr is set up.
+const wranglrPath = () => `${appHome()}/wranglr.json`;
 
 const EXAMPLE = `{
   "activeProfile": "work",
@@ -146,8 +149,9 @@ function stateMark(status, t) {
   return div().w(8).h(8).flex_none().rounded(4).bg(stateColor(status, t));
 }
 
-// Where a Repo's worktrees go, as the Launch card says it.
-const placementText = (w) => w === "herdr" ? "Herdr's worktrees folder" : w === "beside" ? "beside the clone" : w;
+// Where a Repo's worktrees go, as the Launch card says it. wr: Wranglr's parsed config, or null.
+const placementText = (w, wr) => w === "wranglr" ? (wr ? `Wranglr's rule (${wr.worktrees})` : "Herdr's worktrees folder (Wranglr isn't set up)")
+  : w === "herdr" ? "Herdr's worktrees folder" : w === "beside" ? "beside the clone" : w;
 
 // Several clones of the Pull Request's repo: one button per clone, then Cancel. `review` as in prRow.
 function cloneChooser(id, review, t) {
@@ -239,6 +243,7 @@ export default class Wayfindr extends View {
     this.launch = null; // the Launch dialog: { key, selected: repo ids, exists: names | null, status, error, message }
     this.reviews = {}; // pr key -> { status: "busy" | "error" | "choose", message, error, hits }
     this.clones = null; // the clone index, scanned once per session: { status: "loading" | "ok" | "error", list, error, at }
+    this.wranglr = null; // Wranglr's worktree rule (parseWranglr), read on reload and before each Launch and Review; null when Wranglr isn't set up
     this.cloneFind = {}; // settings: "<account id>:<repo>" -> { status: "loading" | "none" | "choose" | "error", hits, error }
     this.selectedPr = null; // { account, pr }: the Pull Request in the detail panel
     this.prDetails = {}; // pr key -> { status, data, error }
@@ -432,6 +437,14 @@ export default class Wayfindr extends View {
     return true;
   }
 
+  // Wranglr's worktree rule from its config file; null when Wranglr isn't set up or the file isn't readable.
+  async readWranglr() {
+    let text = null;
+    try { text = await readTextFile(wranglrPath()); } catch { /* not set up */ }
+    this.wranglr = parseWranglr(text);
+    return this.wranglr;
+  }
+
   reload(cx) {
     const before = this.profile?.name ?? this.lastProfile;
     this.state = { status: "loading" };
@@ -450,6 +463,7 @@ export default class Wayfindr extends View {
     if (this.selected) this.fetchTicketLater = true;
     if (this.selectedPr) this.fetchPrLater = true;
     cx.spawn(async (cx) => {
+      await this.readWranglr();
       const path = configPath();
       let text = null;
       try { text = await readTextFile(path); } catch (e) { this.state = { status: "invalid", path, errors: [String(e.message ?? e)] }; cx.notify(); return; }
@@ -1064,11 +1078,11 @@ export default class Wayfindr extends View {
     // Local clones: every Repo, then the Selected repos without one.
     const missing = this.missingClones(p);
     const c = this.clones;
-    out.push(heading("Local clones"), note("A Review starts in the clone of the Pull Request's repo. Worktree: a new worktree. Branch: the branch checked out in the clone itself. Herdr, Beside or Folder: where the worktrees go."));
+    out.push(heading("Local clones"), note("A Review starts in the clone of the Pull Request's repo. Worktree: a new worktree. Branch: the branch checked out in the clone itself. Wranglr, Herdr, Beside or Folder: where the worktrees go."));
     out.push(card("wf-set-clones", [
       ...(p.repos.length || missing.length ? [] : [note("No clones yet.")]),
       ...p.repos.map((r) => {
-        const placement = r.worktrees === "herdr" || r.worktrees === "beside" ? r.worktrees : "folder";
+        const placement = ["wranglr", "herdr", "beside"].includes(r.worktrees) ? r.worktrees : "folder";
         return v_flex().id(`wf-clone-${r.id}`).gap(4)
           .child(h_flex().gap(8).items_center()
             .child(stateMark("found", t))
@@ -1077,10 +1091,11 @@ export default class Wayfindr extends View {
               .child(div().truncate().text_size(11).text_color(t.dim).child(r.path)))
             .child(segmented(`wf-co-${r.id}`, [["worktree", "Worktree"], ["branch", "Branch"]], r.checkout, t,
               (mode, cx) => this.saveConfig((raw) => edits.setRepoCheckout(raw, p.name, r.id, mode), cx)))
-            .child(segmented(`wf-wp-${r.id}`, [["herdr", "Herdr"], ["beside", "Beside"], ["folder", "Folder…"]], placement, t,
+            .child(segmented(`wf-wp-${r.id}`, [["wranglr", "Wranglr"], ["herdr", "Herdr"], ["beside", "Beside"], ["folder", "Folder…"]], placement, t,
               (key, cx) => this.setPlacement(r.id, key, cx)))
             .child(button(`wf-clone-rm-${r.id}`, "Remove", t, (cx) => this.saveConfig((raw) => edits.removeRepo(raw, p.name, r.id), cx))))
-          .when(placement === "folder", (el) => el.child(div().pl(16).truncate().text_size(11).text_color(t.dim).child(`Worktrees in ${r.worktrees}`)));
+          .when(placement === "folder", (el) => el.child(div().pl(16).truncate().text_size(11).text_color(t.dim).child(`Worktrees in ${r.worktrees}`)))
+          .when(placement === "wranglr", (el) => el.child(div().pl(16).truncate().text_size(11).text_color(t.dim).child(`Worktrees by ${placementText("wranglr", this.wranglr)}`)));
       }),
       ...missing.flatMap(({ a, name, i }) => {
         const f = this.cloneFind[`${a.id}:${name}`];
@@ -1459,7 +1474,8 @@ export default class Wayfindr extends View {
     cx.spawn(async (cx) => {
       let exists = [];
       let folder = null;
-      try { ({ names: exists, folder } = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io)); } catch { /* shown as not made */ }
+      const wr = await this.readWranglr();
+      try { ({ names: exists, folder } = await existingWorktrees(ticketPrefix(tk), ticketFolder(tk), repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io, wr)); } catch { /* shown as not made */ }
       if (this.launch?.key !== key) return;
       this.launch.exists = exists; this.launch.folder = folder;
       cx.notify();
@@ -1495,7 +1511,8 @@ export default class Wayfindr extends View {
     cx.spawn(async (cx) => {
       try {
         // An earlier Launch's folder and branch are reused when the title has changed since.
-        const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io);
+        const wr = await this.readWranglr();
+        const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io, wr);
         const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: made.worktrees?.[repoName(r)] ?? `${made.path}/${repoName(r)}` }));
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
@@ -1520,7 +1537,7 @@ export default class Wayfindr extends View {
           L.selected = L.selected.includes(r.id) ? L.selected.filter((x) => x !== r.id) : [...L.selected, r.id]; cx.notify();
         }))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(r.path))
-        .child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).child(placementText(r.worktrees)))
+        .child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).child(placementText(r.worktrees, this.wranglr)))
         .child(note(L.exists == null ? "" : exists(r) ? "worktree exists" : ""))) : [note("No repos for this Board yet. Add a local clone, or launch without one.")])
       .child(h_flex().gap(8).items_center()
         .child(button("wf-launch-add", "Add repo…", t, (cx) => this.addLaunchRepo(cx)))
@@ -1564,7 +1581,7 @@ export default class Wayfindr extends View {
   rememberClone(profileName, folder, prRepo, cx) {
     let id = null;
     const failed = this.saveConfig((raw) => { const r = edits.addRepo(raw, profileName, { path: folder, prRepo }); id = r.id; return r.raw; }, cx);
-    return { failed, repo: { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo, checkout: "worktree", worktrees: "herdr" } };
+    return { failed, repo: { id: id ?? "repo", path: folder.replace(/[\\/]+$/, ""), prRepo, checkout: "worktree", worktrees: "wranglr" } };
   }
 
   // A picked folder's origin must be `prRepo`. Returns the error text, else null.
@@ -1640,7 +1657,8 @@ export default class Wayfindr extends View {
         const info = await loadReviewInfo(p, accountId, pr, io);
         st.message = "Making the worktree…"; cx.notify();
         const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
-        const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree");
+        const wr = await this.readWranglr();
+        const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree", wr);
         run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
