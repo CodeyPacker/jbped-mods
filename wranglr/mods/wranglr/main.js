@@ -191,8 +191,18 @@ export default class Wranglr extends View {
 
   // What the model sees. With a cx, Repos not resolved yet are asked for.
   world(cx) {
-    const sp = spaces(), ps = panes();
+    const all = spaces(), ps = panes();
     const repos = {};
+    // A space made just now waits (at most a moment) for its git, so it appears in its Group instead of jumping there.
+    const now = Date.now();
+    this.born ??= {};
+    const sp = all.filter((s) => {
+      if (s.id in (this.state?.snap ?? {})) return true;
+      const dir = place(s, ps);
+      if (!dir || this.resolver.get(dir, s.machine) !== undefined) return true;
+      if (cx) this.resolve(dir, s.machine, cx);
+      return now - (this.born[s.id] ??= now) > 1500;
+    });
     for (const s of sp) {
       const dir = place(s, ps);
       if (!dir) { repos[s.id] = null; continue; }

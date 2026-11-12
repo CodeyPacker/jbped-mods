@@ -214,6 +214,20 @@ test("a space started from a Subgroup lands in that Subgroup", () => {
   assert.deepEqual(rowIds(tree, "repo:" + FRONT, "review"), ["s2"]);
 });
 
+test("a space started from a Repo group shows there before git answers, and leaves if git says otherwise", () => {
+  const c = config();
+  const w0 = world([space("s1")], { repos: { s1: repo(FRONT, "/d/front") } });
+  const plus = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "open" }, w0, c, view(w0, c).state);
+  const w1 = world([space("s1"), space("s2", { folder: "/d/front" })], { repos: { s1: repo(FRONT, "/d/front") } });
+  const first = view(w1, c, plus.state);
+  assert.deepEqual(rowIds(first.tree, "repo:" + FRONT).sort(), ["s1", "s2"]);
+  assert.deepEqual(first.tree.loose, []);
+  const w2 = world([space("s1"), space("s2", { folder: "/d/front" })], { repos: { s1: repo(FRONT, "/d/front"), s2: null } });
+  const later = view(w2, c, first.state);
+  assert.deepEqual(rowIds(later.tree, "repo:" + FRONT), ["s1"]);
+  assert.deepEqual(later.tree.loose.map((r) => r.id), ["s2"]);
+});
+
 test("a pending entry ignores spaces that existed before and expires after 20 world changes", () => {
   const c = config();
   const w0 = world([space("c1")]);
@@ -429,7 +443,7 @@ test("plus on a Repo group opens the main root on the first ready Machine of its
   const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
   const r = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: null }, w, c, s);
   assert.deepEqual(r.effects, [{ type: "start", machine: "wsl", folder: "/srv/front", argv: null, name: null, worktree: null }]);
-  assert.equal(r.state, s, "no pending entry without a Subgroup");
+  assert.equal(r.state.pending.length, 1, "remembered, so the new space shows in the Group before git answers");
   assert.deepEqual(arrange(w, c, s).groups[0].machines, ["wsl", ""]);
   const wslDown = world([], { machines: [{ name: null, layout: "ready" }, { name: "wsl", layout: "loading" }] });
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: null }, wslDown, c, s).effects[0].machine, null);

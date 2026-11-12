@@ -408,6 +408,9 @@ function syncPending(c, known) {
       claimed.add(space.id);
       if (entry.workspace) s.started[space.id] = entry.workspace;
       if (entry.group.startsWith("custom:") || entry.sub != null) s.place[space.id] = { group: entry.group, sub: entry.sub ?? null };
+      // Started from a Repo group: assume that Repo until git says otherwise.
+      if (entry.group.startsWith("repo:") && world.repos?.[space.id] === undefined && s.snap[space.id] && !s.snap[space.id].identity)
+        s.snap[space.id].identity = entry.group.slice(5);
       continue;
     }
     const age = (entry.age || 0) + 1;
@@ -691,7 +694,8 @@ function plusRepo(a, c, group, mode) {
     worktree = { main, branch: a.branch, path: folder };
   }
   c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
-  if (a.sub != null) addPending(c, a, { machine, folder });
+  // Always remembered, so the new space shows in this Group at once instead of loose until git answers.
+  addPending(c, a, { machine, folder });
 }
 
 function isClaude(argv) {
