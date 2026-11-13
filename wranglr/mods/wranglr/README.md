@@ -26,8 +26,9 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 - Click a row to go to the space. Right-click it for the shipped space menu.
 - Drag a row onto another row (it lands above, or below when you release on the row's lower half), onto a Group or Subgroup header (it goes to the end), or onto the empty area under the list (it leaves every Group).
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
-- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups) or Dismiss (an empty Repo group). Right-click a Subgroup for Rename and Remove.
+- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group) and Settings. Right-click a Subgroup for Rename and Remove.
 - "+" on a Group starts a space there: in the Repo's main checkout, in the Workspace home, or in your home folder for a Custom group. Right-click "+" for Open here, New worktree (Repo groups) and Open on a given Machine.
+- A Group's Settings set its Machines in order of preference. A Repo also has its worktree location and the ref new branches start from, and a Workspace its home on each Machine. A Workspace's and a Repo's settings are written to the config file. A Custom group's are kept in Wranglr's state.
 - In the header: the sort button cycles Recent, Kind, A-Z and Manual. The folder button adds a Custom group. The gear opens the settings menu, which edits the `settings` block of the config file. "+" is Herdr's own new space.
 
 ## Keys and commands
@@ -43,6 +44,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 | | `wranglr.fold` | Fold the focused space's Group |
 | | `wranglr.sort` | Next sort |
 | | `wranglr.settings` | Open the settings menu |
+| | `wranglr.group` | Open the settings of the focused space's Group |
 
 Every command is also in the palette (the `palette` mod).
 
@@ -58,7 +60,8 @@ Every command is also in the palette (the `palette` mod).
     "worktrees": "{clone}/.worktrees/{branch}",
     "autoname": true,
     "ticket": "^(?:[a-z]+/)?#?(\\d{2,})",
-    "agent": ["claude"]
+    "agent": ["claude"],
+    "machine": "wsl"
   },
   "workspaces": [
     {
@@ -81,12 +84,13 @@ Every command is also in the palette (the `palette` mod).
 - `worktrees`: where a new worktree goes. `{clone}` is the Repo's main checkout on the Machine the worktree is made on, `{branch}` is the branch and `{repo}` is the Repo's name. A pattern must start with `{clone}` or be an absolute path. `..` after `{clone}` is resolved, so `{clone}/../.worktrees/{branch}/{repo}` puts worktrees beside the clone. An absolute path only suits one Machine.
 - A Repo can set its own worktree rules under `repos`. A Workspace does not set them for its Repos.
   - `"worktrees"`: that Repo's own location pattern, used in place of the setting.
-  - `"from"`: the ref a new branch starts from, such as `"origin/staging"` or a local branch. A ref on a remote is fetched first. With no `from`, a new branch starts from the remote's default branch, else `main` or `master`, else what the main checkout has checked out.
+  - `"from"`: the ref a new branch starts from, such as `"origin/staging"` or a local branch. It is one word and cannot start with `-`. A ref on a remote is fetched first. With no `from`, a new branch starts from the remote's default branch, else `main` or `master`, else what the main checkout has checked out.
   - Example: `"repos": { "github.com/org/repo": { "worktrees": "{clone}/../wt/{branch}", "from": "origin/staging" } }`
 - A branch that already exists is checked out as it is. A branch that is only on the remote is tracked. `from` only applies to a new branch.
 - `autoname`: name new spaces from their branch.
 - `ticket`: a regular expression matched against the branch. Its first group is the ticket id at the start of the name.
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.
+- `machine`: the default Machine. "+" on a Group starts there when the Group has no `machines` of its own, or when none of them is ready. `""` is this computer. Left out, a Group starts on this computer and the header "+" starts where Herdr does. A default Machine that is away or where the Group cannot start is skipped for this computer.
 - A Workspace's `repos` are Repo ids: the remote URL without scheme, user and `.git` (`github.com/Org/Repo`). `machines` lists Machine names in order of preference, `""` being this computer. `on.<machine>.home` sets the Workspace home there. Without it, the home is the folder that holds all of the Workspace's Repos, when there is one. `on.<machine>.paths` says where a Repo is checked out when Wranglr has not seen it there yet.
 - `repos` gives the same Machines and paths for a Repo on its own.
 

@@ -635,12 +635,78 @@ test("sort cycles recent, kind, az, manual and writes the setting", () => {
 
 test("settings writes each given setting and ignores unknown keys", () => {
   const w = world([]);
-  assert.deepEqual(run({ type: "settings", values: { plus: "worktree", autoname: true, agent: null, nope: 1 } }, w, config()).effects, [
-    { type: "setting", key: "plus", value: "worktree" },
-    { type: "setting", key: "autoname", value: true },
-    { type: "setting", key: "agent", value: null },
+  assert.deepEqual(run({ type: "settings", values: { plus: "worktree", autoname: true, agent: null, machine: "wsl", nope: 1 } }, w, config()).effects, [
+    { type: "settings", values: { plus: "worktree", autoname: true, agent: null, machine: "wsl" } },
   ]);
   assert.deepEqual(run({ type: "settings" }, w, config()).effects, []);
+  assert.deepEqual(run({ type: "settings", values: { nope: 1 } }, w, config()).effects, []);
+  assert.deepEqual(run({ type: "settings", values: "sort" }, w, config()).effects, []);
+});
+
+// The default Machine and a Group's own settings
+
+const SEEN = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+const ON_BOTH = { wsl: { path: "/srv/front" }, "": { path: "/home/me/front" } };
+const plusOn = (id) => ({ type: "plus", group: id, sub: null, mode: null });
+
+test("the default Machine is where + starts when the Group has no list of its own", () => {
+  const c = config({ settings: { machine: "wsl" }, repos: { [FRONT]: { machines: [], on: ON_BOTH } } });
+  const w = world([]);
+  assert.deepEqual(arrange(w, c, SEEN).groups[0].machines, ["wsl", ""]);
+  assert.equal(run(plusOn("repo:" + FRONT), w, c, SEEN).effects[0].folder, "/srv/front");
+  const own = config({ settings: { machine: "wsl" }, repos: { [FRONT]: { machines: [""], on: ON_BOTH } } });
+  assert.deepEqual(arrange(w, own, SEEN).groups[0].machines, ["", "wsl"], "the Group's own list comes first");
+});
+
+test("a default Machine that is away, unknown or not usable falls back to this computer", () => {
+  const repos = { [FRONT]: { machines: [], on: ON_BOTH } };
+  const away = world([], { machines: [{ name: null, layout: "ready" }, { name: "wsl", layout: "unavailable" }] });
+  assert.equal(run(plusOn("repo:" + FRONT), away, config({ settings: { machine: "wsl" }, repos }), SEEN).effects[0].machine, null);
+  assert.equal(run(plusOn("repo:" + FRONT), world([]), config({ settings: { machine: "gone" }, repos }), SEEN).effects[0].machine, null);
+  const notThere = config({ settings: { machine: "wsl" }, repos: { [FRONT]: { machines: [], on: { "": { path: "/home/me/front" } } } } });
+  assert.equal(run(plusOn("repo:" + FRONT), world([]), notThere, SEEN).effects[0].folder, "/home/me/front");
+  for (const machine of [null, undefined, 7, ["wsl"]])
+    assert.equal(run(plusOn("repo:" + FRONT), world([]), config({ settings: { machine }, repos }), SEEN).effects[0].machine, null);
+});
+
+test("a Custom group starts on its own Machines, else the default Machine, else this computer", () => {
+  const w = world([]);
+  let s = run({ type: "addCustom", name: "Box" }, w, config()).state;
+  assert.deepEqual(group(arrange(w, config(), s), "custom:box").machines, ["", "wsl"]);
+  assert.equal(run(plusOn("custom:box"), w, config(), s).effects[0].machine, null);
+  assert.equal(run(plusOn("custom:box"), w, config({ settings: { machine: "wsl" } }), s).effects[0].machine, "wsl");
+  s = run({ type: "groupSettings", group: "custom:box", values: { machines: ["wsl", "wsl", 3, ""] } }, w, config(), s).state;
+  assert.deepEqual(s.custom, [{ id: "box", name: "Box", machines: ["wsl", ""] }]);
+  const start = run(plusOn("custom:box"), w, config(), s);
+  assert.deepEqual(start.effects, [{ type: "start", machine: "wsl", folder: "", argv: null, name: null, worktree: null }]);
+  assert.equal(start.state.pending[0].machine, "wsl");
+  const away = world([], { machines: [{ name: null, layout: "ready" }, { name: "wsl", layout: "loading" }] });
+  assert.equal(run(plusOn("custom:box"), away, config(), s).effects[0].machine, null);
+  assert.equal(run({ ...plusOn("custom:box"), machine: null }, w, config(), s).effects[0].machine, null, "an explicit Machine wins");
+});
+
+test("groupSettings sends a Workspace's and a Repo's settings to the config file", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const w = world([]);
+  const ws = run({ type: "groupSettings", group: "ws:Arden", values: { machines: ["wsl"] } }, w, c);
+  assert.deepEqual(ws.effects, [{ type: "group", kind: "workspace", key: "Arden", values: { machines: ["wsl"] } }]);
+  const rp = run({ type: "groupSettings", group: "repo:" + FRONT, values: { from: "origin/dev" } }, w, c);
+  assert.deepEqual(rp.effects, [{ type: "group", kind: "repo", key: FRONT, values: { from: "origin/dev" } }]);
+});
+
+test("groupSettings does nothing for a Group that is not there or values that are not settings", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const w = world([]);
+  const s = emptyState();
+  for (const a of [
+    { group: "ws:Nope", values: { machines: [] } }, { group: "custom:nope", values: { machines: [] } },
+    { group: "repo:", values: { from: "x" } }, { group: "", values: { machines: [] } }, { group: null, values: { machines: [] } },
+    { group: "ws:Arden", values: {} }, { group: "ws:Arden", values: null }, { group: "ws:Arden", values: ["x"] }, { group: "ws:Arden" },
+  ]) {
+    const r = run({ type: "groupSettings", ...a }, w, c, s);
+    assert.deepEqual(r.effects, [], JSON.stringify(a));
+    assert.equal(r.state, s, JSON.stringify(a));
+  }
 });
 
 test("Custom groups get readable ids, and removing one frees its spaces", () => {

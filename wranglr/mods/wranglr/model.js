@@ -178,11 +178,13 @@ function lastSegments(identity, n) {
   return identity.split("/").filter(Boolean).slice(-n).join("/");
 }
 
-// Machine keys to start on: the priority list, then this computer, then any other ready Machine.
-function machineChoices(world, priority, usable) {
-  const ready = readyKeys(world);
+// Machine keys to start on: the Group's priority list, then the default Machine setting, then this
+// computer, then any other ready Machine. Only ready Machines the Group can start on are kept.
+function machineChoices(ctx, priority, usable) {
+  const ready = readyKeys(ctx.world);
+  const preset = ctx.config.settings?.machine;
   const out = [];
-  for (const mk of [...(priority || []), "", ...ready])
+  for (const mk of [...(Array.isArray(priority) ? priority : []), ...(typeof preset === "string" ? [preset] : []), "", ...ready])
     if (ready.includes(mk) && !out.includes(mk) && usable(mk)) out.push(mk);
   return out;
 }
@@ -312,13 +314,13 @@ function allRows(group) {
 // Groups
 
 function groupMachines(ctx, group) {
-  if (group.kind === "custom") return [""];
+  if (group.kind === "custom") return machineChoices(ctx, ctx.state.custom.find((x) => "custom:" + x.id === group.id)?.machines, () => true);
   if (group.kind === "repo") {
     const identity = group.id.slice(5);
-    return machineChoices(ctx.world, ctx.config.repos?.[identity]?.machines, (mk) => !!ctx.cloned[mk]?.[identity]);
+    return machineChoices(ctx, ctx.config.repos?.[identity]?.machines, (mk) => !!ctx.cloned[mk]?.[identity]);
   }
   const ws = ctx.wsByName.get(group.name);
-  return machineChoices(ctx.world, ws.machines, (mk) => !!workspaceHome(ws, mk, ctx.cloned, ctx.local));
+  return machineChoices(ctx, ws.machines, (mk) => !!workspaceHome(ws, mk, ctx.cloned, ctx.local));
 }
 
 function candidateGroups(ctx, members) {
@@ -583,10 +585,24 @@ function doSort(a, c) {
   if (SORTS.includes(value)) c.effects.push({ type: "setting", key: "sort", value });
 }
 
-// The settings menu's Save: one setting effect per changed setting.
-const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent"];
+// The settings menu's Save: the changed settings, written in one go.
+const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine"];
 function doSettings(a, c) {
-  for (const key of SETTINGS) if (a.values && key in a.values) c.effects.push({ type: "setting", key, value: a.values[key] });
+  const values = {};
+  for (const key of SETTINGS) if (a.values && typeof a.values === "object" && key in a.values) values[key] = a.values[key];
+  if (Object.keys(values).length) c.effects.push({ type: "settings", values });
+}
+
+// A Group's own settings. A Custom group's are in the State; a Workspace's and a Repo's go to the config file.
+function doGroupSettings(a, c) {
+  const v = a.values, id = typeof a.group === "string" ? a.group : "";
+  if (!v || typeof v !== "object" || Array.isArray(v) || !Object.keys(v).length) return;
+  if (id.startsWith("custom:")) {
+    const custom = c.s.custom.find((x) => "custom:" + x.id === id);
+    if (custom && Array.isArray(v.machines)) custom.machines = [...new Set(v.machines.filter((m) => typeof m === "string"))];
+  } else if (id.startsWith("ws:")) {
+    if (c.ctx().wsByName.has(id.slice(3))) c.effects.push({ type: "group", kind: "workspace", key: id.slice(3), values: v });
+  } else if (id.startsWith("repo:") && id.length > 5) c.effects.push({ type: "group", kind: "repo", key: id.slice(5), values: v });
 }
 
 function slugId(name, taken) {
@@ -691,9 +707,12 @@ function addPending(c, a, entry) {
   c.s.pending.push({ group: a.group, sub: a.sub ?? null, workspace: null, ...entry, before, age: 0 });
 }
 
-function plusCustom(a, c) {
-  c.effects.push({ type: "start", machine: null, folder: "", argv: c.config.settings.agent, name: null, worktree: null });
-  addPending(c, a, { machine: null, folder: "" });
+// A Custom group has no folder: the space starts in the home folder of the Machine.
+function plusCustom(a, c, group) {
+  const usable = (mk) => a.machine !== undefined || isReady(c.world, mk);
+  const machine = machineOfKey(pickMachine(a, group.machines, usable) ?? "");
+  c.effects.push({ type: "start", machine, folder: "", argv: c.config.settings.agent, name: null, worktree: null });
+  addPending(c, a, { machine, folder: "" });
 }
 
 // Where a Repo's new worktrees go: the Repo's own pattern, else the setting. {clone} is the main root on that Machine.
@@ -756,7 +775,7 @@ function doPlus(a, c) {
   const group = c.tree().tree.groups.find((g) => g.id === a.group);
   if (!group || (a.sub != null && !group.subgroups.some((s) => s.id === a.sub))) return;
   const mode = a.mode ?? c.config.settings.plus;
-  if (group.kind === "custom") plusCustom(a, c);
+  if (group.kind === "custom") plusCustom(a, c, group);
   else if (group.kind === "repo") plusRepo(a, c, group, mode);
   else plusWorkspace(a, c, group, mode);
 }
@@ -764,7 +783,7 @@ function doPlus(a, c) {
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
   select: doSelect, next: doStep, prev: doStep, plus: doPlus,
-  fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings,
+  fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings, groupSettings: doGroupSettings,
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,
   dismiss: doDismiss, name: doName, named: doNamed,

@@ -2,7 +2,7 @@
 import { run, notify } from "herdr";
 import { addWorktree } from "./worktree.js";
 import { askName as realAskName } from "./namer.js";
-import { saveSetting as realSaveSetting } from "./config.js";
+import { saveSetting as realSaveSetting, saveSettings as realSaveSettings, saveGroup as realSaveGroup } from "./config.js";
 
 // A worktree for a start effect. False, with git's error shown, when it could not be made.
 async function makeWorktree(worktree, machine) {
@@ -12,7 +12,7 @@ async function makeWorktree(worktree, machine) {
   return r.ok;
 }
 
-async function runOne(e, { dispatch, askName, saveSetting }) {
+async function runOne(e, { dispatch, askName, saveSetting, saveSettings, saveGroup }) {
   switch (e.type) {
     case "select": run("space.select", { id: e.id }); return;
     case "rename": run("space.rename", { id: e.id, name: e.name }); return;
@@ -33,15 +33,20 @@ async function runOne(e, { dispatch, askName, saveSetting }) {
       return;
     }
     case "setting": await saveSetting(e.key, e.value); return;
+    case "settings": await saveSettings(e.values); return;
+    case "group": await saveGroup(e.kind, e.key, e.values); return;
     case "toast": notify({ title: e.title, body: e.body, level: e.level }); return;
     default: throw new Error(`unknown effect ${e.type}`);
   }
 }
 
 export async function runEffects(effects, deps = {}) {
-  const d = { dispatch: () => {}, askName: realAskName, saveSetting: realSaveSetting, ...deps };
+  const d = { dispatch: () => {}, askName: realAskName, saveSetting: realSaveSetting, saveSettings: realSaveSettings, saveGroup: realSaveGroup, ...deps };
   for (const e of effects ?? []) {
     try { await runOne(e, d); }
-    catch (err) { notify({ title: "Wranglr", body: `${e?.type ?? "effect"} failed: ${err?.message ?? err}`, level: "error" }); }
+    catch (err) {
+      const saving = e?.type === "setting" || e?.type === "settings" || e?.type === "group";
+      notify({ title: "Wranglr", body: saving ? `Not saved: ${err?.message ?? err}.` : `${e?.type ?? "effect"} failed: ${err?.message ?? err}`, level: "error" });
+    }
   }
 }

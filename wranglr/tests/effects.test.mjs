@@ -5,7 +5,7 @@ import { runEffects } from "../mods/wranglr/effects.js";
 
 const ok = { code: 0, stdout: "", stderr: "" };
 const order = [];
-const noDeps = { dispatch: () => {}, askName: async () => null, saveSetting: async () => {} };
+const noDeps = { dispatch: () => {}, askName: async () => null, saveSetting: async () => {}, saveSettings: async () => {}, saveGroup: async () => {} };
 beforeEach(() => {
   reset(); order.length = 0;
   fake.exec = (cmd, args) => { order.push(`${cmd} ${args.join(" ")}`); return Promise.resolve(ok); };
@@ -70,4 +70,19 @@ test("a throwing effect is reported and the rest still run", async () => {
   assert.equal(notes[0].level, "error");
   assert.match(notes[0].body, /disk full/);
   assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s9" } }]);
+});
+
+test("settings and group save through the config module, and a failed save says so", async () => {
+  const saved = [];
+  await runEffects([
+    { type: "settings", values: { machine: "wsl" } },
+    { type: "group", kind: "repo", key: "github.com/o/r", values: { from: "origin/dev" } },
+  ], { ...noDeps, saveSettings: async (v) => saved.push(["settings", v]), saveGroup: async (...a) => saved.push(["group", ...a]) });
+  assert.deepEqual(saved, [["settings", { machine: "wsl" }], ["group", "repo", "github.com/o/r", { from: "origin/dev" }]]);
+  assert.equal(notes.length, 0);
+  await runEffects([{ type: "group", kind: "workspace", key: "W", values: {} }, { type: "select", id: "s1" }], { ...noDeps, saveGroup: async () => { throw new Error("the Workspace \"W\" is not in wranglr.json"); } });
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].level, "error");
+  assert.match(notes[0].body, /^Not saved: the Workspace "W" is not in wranglr.json\.$/);
+  assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s1" } }], "the effects after it still run");
 });

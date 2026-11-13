@@ -12,7 +12,7 @@ import {
   shared, setShared, watchFolder, window, layout, home, nextCommand,
 } from "herdr";
 import { emptyState, mkey, clonedMap, arrange, act, workspaceHome } from "./model.js";
-import { parseConfig, loadConfig, settingError, DEFAULT_SETTINGS } from "./config.js";
+import { parseConfig, loadConfig, settingError, groupError, DEFAULT_SETTINGS } from "./config.js";
 import { makeResolver } from "./repos.js";
 import { loadState, makeSaver } from "./store.js";
 import { writeWorkspaceFile } from "./workspacefile.js";
@@ -85,6 +85,7 @@ export default class Wranglr extends View {
     this.dialog = p.overlay ? p.dialog ?? "none" : null;
     if (this.dialog === "move" || this.dialog === "input") this.initInput(cx);
     else if (this.dialog === "settings") this.initSettings(cx);
+    else if (this.dialog === "group") this.initGroup(cx);
     else if (this.dialog === "menu") { this.at = 0; this.handle = cx.focus_handle(); this.handle.focus(); }
     else if (!this.dialog) this.initOwner(cx);
   }
@@ -262,11 +263,21 @@ export default class Wranglr extends View {
     }
     // The file is read again only every few seconds: the new setting applies now.
     for (const e of effects)
-      if (e.type === "setting") this.config = { ...this.config, settings: { ...this.config.settings, [e.key]: e.value } };
+      if (e.type === "setting" || e.type === "settings")
+        this.config = { ...this.config, settings: { ...this.config.settings, ...(e.type === "setting" ? { [e.key]: e.value } : e.values) } };
     // An `ask` can take a minute: it runs apart, and nothing waits for either.
     const asks = effects.filter((e) => e.type === "ask"), rest = effects.filter((e) => e.type !== "ask");
     for (const list of [rest, asks])
-      if (list.length) cx.spawn(async (cx) => { await runEffects(list, { dispatch: (a) => this.dispatch(a, cx) }); });
+      if (list.length) cx.spawn(async (cx) => {
+        await runEffects(list, { dispatch: (a) => this.dispatch(a, cx) });
+        // After a save the file is the truth: read it now, also when the save failed.
+        if (!list.some((e) => e.type === "setting" || e.type === "settings" || e.type === "group")) return;
+        this.configText = undefined;
+        await this.reloadConfig();
+        this.filesKey = null;
+        this.tick(cx);
+        cx.notify();
+      });
     this.tree = arrange({ ...world, cloned: clonedMap(this.config, this.state) }, this.config, this.state);
     this.publish();
     cx.notify();
@@ -320,13 +331,18 @@ export default class Wranglr extends View {
     else if (c === "fold") this.dispatch({ type: "foldFocused" }, cx);
     else if (c === "sort") this.dispatch({ type: "sort", value: null }, cx);
     else if (c === "settings") this.openSettings();
+    else if (c === "group") {
+      const at = focus && this.placeOf(focus);
+      const g = at?.group && this.tree.groups.find((x) => x.id === at.group);
+      if (g) openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: this.groupProps(g) });
+    }
     else if (c === "name" && focus) this.dispatch({ type: "name", space: focus }, cx);
     else if (c === "move" && focus) this.openMove(focus);
     else if (c === "new") {
       const at = focus && this.placeOf(focus);
       const g = at?.group && this.tree.groups.find((x) => x.id === at.group);
       if (g) this.plus(g, at.sub, cx);
-      else run("space.new");
+      else this.newSpace();
     }
   }
 
@@ -334,8 +350,39 @@ export default class Wranglr extends View {
     openOverlay({ mod: "wranglr", kind: "dialog", width: 420, props: { dialog: "move", space, at: this.placeOf(space) } });
   }
 
+  // Machine keys a picker offers: this computer, Herdr's Machines, and any others already named.
+  knownMachines(extra = []) {
+    const names = machines().map((m) => m.name).filter((n) => typeof n === "string" && n);
+    return [...new Set(["", ...names, ...extra.filter((m) => typeof m === "string")])];
+  }
+
+  // A space in no Group: on the default Machine when it is set and ready, else as Herdr starts one.
+  newSpace() {
+    const m = this.config.settings.machine;
+    if (typeof m !== "string") return run("space.new");
+    const ready = m === "" || machines().some((x) => x.name === m && x.layout === "ready");
+    run("space.new", { machine: ready ? m : "" });
+  }
+
   openSettings() {
-    openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: { dialog: "settings", settings: this.config.settings } });
+    const s = this.config.settings;
+    openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: { dialog: "settings", settings: s, known: this.knownMachines([s.machine]) } });
+  }
+
+  // A Group's own settings as the dialog's props. A Workspace's and a Repo's are in the config file, a Custom group's in the State.
+  groupProps(g) {
+    let values;
+    if (g.kind === "workspace") {
+      const ws = this.config.workspaces.find((w) => w.name === g.id.slice(3)) ?? {};
+      values = { machines: ws.machines ?? [], homes: Object.fromEntries(Object.entries(ws.on ?? {}).map(([mk, on]) => [mk, typeof on?.home === "string" ? on.home : ""])) };
+    } else if (g.kind === "repo") {
+      const r = this.config.repos[g.id.slice(5)] ?? {};
+      values = { machines: r.machines ?? [], worktrees: r.worktrees ?? "", from: r.from ?? "" };
+    } else {
+      values = { machines: this.state.custom.find((x) => "custom:" + x.id === g.id)?.machines ?? [] };
+    }
+    const known = this.knownMachines([...values.machines, ...Object.keys(values.homes ?? {})]);
+    return { dialog: "group", group: { id: g.id, kind: g.kind, name: g.name }, values, known, worktrees: this.config.settings.worktrees };
   }
 
   // "+": a new space in that Group. A worktree by default asks for its branch first.
@@ -361,6 +408,7 @@ export default class Wranglr extends View {
       items.push({ label: "Remove group", action: { type: "removeCustom", group: g.id } });
     }
     if (g.can.dismiss) items.push({ label: "Dismiss", action: { type: "dismiss", group: g.id } });
+    items.push({ label: "Settings…", key: "s", dialog: this.groupProps(g) });
     openMenu(items);
   }
 
@@ -812,7 +860,7 @@ export default class Wranglr extends View {
         .child(this.headerButton("wranglr-sort", t, div().text_size(11).child(SORT_LABEL[sort] ?? sort), "Sort: click for the next", (_e, cx) => this.dispatch({ type: "sort", value: null }, cx)))
         .child(this.headerButton("wranglr-group", t, svg(icon("folder-plus")).size(14), "New group", () => openInput({ title: "New group", value: "", action: { type: "addCustom" } })))
         .child(this.headerButton("wranglr-settings", t, svg(icon("settings")).size(14), "Wranglr settings", () => this.openSettings())))
-      .child(this.headerButton("space-new", t, svg(icon("plus")).size(14), "New space", () => run("space.new")));
+      .child(this.headerButton("space-new", t, svg(icon("plus")).size(14), "New space", () => this.newSpace()));
     const warning = this.errors.length && !collapsed
       ? h_flex().id("wranglr-errors").mx(8).mb(4).px(8).h(24).flex_none().gap(6).items_center().rounded(6).bg(t.raised)
         .text_size(11).text_color(t.blocked).tooltip(this.errors.join("\n"))
@@ -938,22 +986,85 @@ export default class Wranglr extends View {
         .child(button("wi-save", "Save", true, () => this.submit())));
   }
 
-  // The settings menu: the `settings` block of wranglr.json. Save writes only what changed.
-  initSettings(cx) {
-    const s = props()?.settings ?? DEFAULT_SETTINGS;
-    this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname };
-    this.pick = { ...this.was };
-    this.wasText = { worktrees: s.worktrees ?? "", ticket: s.ticket ?? "", agent: (s.agent ?? []).join(" ") };
-    this.text = { ...this.wasText };
+  // The settings dialogs. Each saves only what changed, and shows what is wrong under its field.
+
+  // One text input per key of `text`, kept in this.inputs.
+  makeInputs(text, hint, save) {
+    this.wasText = { ...text };
+    this.text = { ...text };
     this.bad = {};
     this.inputs = {};
-    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal" };
-    for (const key of Object.keys(this.text)) {
-      const input = InputState.new({ value: this.text[key], placeholder: hint[key] });
+    for (const key of Object.keys(text)) {
+      const input = InputState.new({ value: text[key], placeholder: hint(key) });
       input.on("change", (_e, cx) => { this.text[key] = input.value(); delete this.bad[key]; cx.notify(); });
-      input.on("submit", (_e, cx) => { this.saveSettings(); cx?.notify?.(); });
+      input.on("submit", (_e, cx) => { save(); cx?.notify?.(); });
       this.inputs[key] = input;
     }
+  }
+
+  // The text fields that differ from what the dialog opened with, trimmed.
+  changedText() {
+    const out = {};
+    for (const key of Object.keys(this.text)) {
+      const raw = String(this.text[key] ?? "").trim();
+      if (raw !== String(this.wasText[key] ?? "").trim()) out[key] = raw;
+    }
+    return out;
+  }
+
+  field(t, label, control, key, about) {
+    const why = this.bad[key];
+    return v_flex().gap(6)
+      .child(div().text_size(11.5).text_color(t.dim).child(label))
+      .child(control)
+      .when(Boolean(why || about), (el) => el.child(div().text_size(11).text_color(why ? t.blocked : t.dim).child(why ? `This ${why}.` : about)));
+  }
+
+  choice(t, id, label, on, click, badge) {
+    return h_flex().id(id).h(28).px(11).gap(6).items_center().rounded(7).border_1().cursor_pointer()
+      .border_color(on ? t.accent : t.input).bg(on ? t.selected : t.raised).text_size(12).text_color(on ? t.foreground : t.muted)
+      .hover((s) => s.text_color(t.foreground))
+      .on_click(click)
+      .when(badge != null, (el) => el.child(div().text_size(11).text_color(t.accent).child(String(badge))))
+      .child(label);
+  }
+
+  textInput(t, key) {
+    return Input.new(this.inputs[key]).h(32).px(10).rounded(8).border_1().border_color(this.bad[key] ? t.blocked : t.input).bg(t.background).text_size(12.5).text_color(t.foreground);
+  }
+
+  dialogFrame(t, id, title, fields, save) {
+    const p = props() ?? {};
+    const button = (bid, label, primary, action) => h_flex().id(bid).h(32).px(14).items_center().rounded(8)
+      .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
+      .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium().cursor_pointer()
+      .hover((s) => s.opacity(0.88)).on_click(action).child(label);
+    return v_flex().id(id).track_focus(this.handle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
+      .w_full().min_h(0).p(18).gap(14).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().items_center().child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(title))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
+      .children(fields)
+      .child(h_flex().pt(4).gap(8).justify_end()
+        .child(button(`${id}-cancel`, "Cancel", false, () => closeOverlay(p.overlay)))
+        .child(button(`${id}-save`, "Save", true, (_e, cx) => { save(); cx.notify(); })));
+  }
+
+  machineLabel(mk) {
+    return mk === "" ? "This computer" : mk;
+  }
+
+  // The settings menu: the `settings` block of wranglr.json.
+  initSettings(cx) {
+    const p = props() ?? {};
+    const s = { ...DEFAULT_SETTINGS, ...(p.settings ?? {}) };
+    this.known = Array.isArray(p.known) ? p.known.filter((m) => typeof m === "string") : [""];
+    this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname, machine: typeof s.machine === "string" ? s.machine : null };
+    this.pick = { ...this.was };
+    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal" };
+    this.makeInputs(
+      { worktrees: String(s.worktrees ?? ""), ticket: String(s.ticket ?? ""), agent: Array.isArray(s.agent) ? s.agent.join(" ") : "" },
+      (key) => hint[key], () => this.saveSettings());
     this.handle = cx.focus_handle();
     this.handle.focus();
   }
@@ -961,14 +1072,12 @@ export default class Wranglr extends View {
   saveSettings() {
     const values = {}, bad = {};
     for (const key of Object.keys(this.pick)) if (this.pick[key] !== this.was[key]) values[key] = this.pick[key];
-    for (const key of Object.keys(this.text)) {
-      const raw = this.text[key].trim();
-      if (raw === this.wasText[key].trim()) continue;
+    for (const [key, raw] of Object.entries(this.changedText()))
       // An empty field is the default: a plain terminal for the agent.
-      const value = key === "agent" ? (raw ? raw.split(/\s+/) : null) : raw || DEFAULT_SETTINGS[key];
+      values[key] = key === "agent" ? (raw ? raw.split(/\s+/) : null) : raw || DEFAULT_SETTINGS[key];
+    for (const [key, value] of Object.entries(values)) {
       const why = settingError(key, value);
       if (why) bad[key] = why;
-      else values[key] = value;
     }
     this.bad = bad;
     if (Object.keys(bad).length) return;
@@ -978,48 +1087,87 @@ export default class Wranglr extends View {
 
   renderSettings() {
     const t = theme();
+    const pick = (key, options) => h_flex().flex_wrap().gap(5).children(options.map(([value, label]) =>
+      this.choice(t, `ws-${key}-${value}`, label, this.pick[key] === value, (_e, cx) => { this.pick[key] = value; delete this.bad[key]; cx.notify(); })));
+    return this.dialogFrame(t, "wranglr-settings", "Wranglr settings", [
+      this.field(t, "Sort", pick("sort", Object.entries(SORT_LABEL)), "sort"),
+      this.field(t, "Default Machine", pick("machine", [[null, "Not set"], ...this.known.map((mk) => [mk, this.machineLabel(mk)])]), "machine",
+        "Where + starts a space when the Group has no Machines of its own. Not set: this computer for a Group, Herdr's choice for the header +."),
+      this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."),
+      this.field(t, "Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"),
+      this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern wins."),
+      this.field(t, "Ticket pattern", this.textInput(t, "ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."),
+      this.field(t, "New spaces run", this.textInput(t, "agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."),
+    ], () => this.saveSettings());
+  }
+
+  // A Group's settings: Machines for every kind, worktree rules for a Repo, homes for a Workspace.
+  initGroup(cx) {
     const p = props() ?? {};
-    const field = (label, control, key, about) => v_flex().gap(6)
-      .child(div().text_size(11.5).text_color(t.dim).child(label))
-      .child(control)
-      .when(Boolean(this.bad[key] || about), (el) => el.child(div().text_size(11).text_color(this.bad[key] ? t.blocked : t.dim).child(this.bad[key] ? `This ${this.bad[key]}.` : about)));
-    const pick = (key, options) => h_flex().gap(5).children(options.map(([value, label]) => {
-      const on = this.pick[key] === value;
-      return h_flex().id(`ws-${key}-${value}`).h(28).px(11).items_center().rounded(7).border_1().cursor_pointer()
-        .border_color(on ? t.accent : t.input).bg(on ? t.selected : t.raised).text_size(12).text_color(on ? t.foreground : t.muted)
-        .hover((s) => s.text_color(t.foreground))
-        .on_click((_e, cx) => { this.pick[key] = value; cx.notify(); })
-        .child(label);
+    const v = p.values ?? {};
+    const strings = (list) => (Array.isArray(list) ? [...new Set(list.filter((m) => typeof m === "string"))] : []);
+    this.kind = p.group?.kind;
+    this.known = [...new Set(["", ...strings(p.known)])];
+    this.wasList = strings(v.machines);
+    this.list = [...this.wasList];
+    const text = {};
+    if (this.kind === "repo") { text.worktrees = String(v.worktrees ?? ""); text.from = String(v.from ?? ""); }
+    if (this.kind === "workspace") for (const mk of this.known) text[`home:${mk}`] = String(v.homes?.[mk] ?? "");
+    const hint = (key) => key === "worktrees" ? String(p.worktrees ?? DEFAULT_SETTINGS.worktrees) : key === "from" ? "The Repo's default branch" : "The folder that holds its Repos";
+    this.makeInputs(text, hint, () => this.saveGroup());
+    this.handle = cx.focus_handle();
+    this.handle.focus();
+  }
+
+  saveGroup() {
+    const p = props() ?? {};
+    const values = {};
+    if (JSON.stringify(this.list) !== JSON.stringify(this.wasList)) values.machines = [...this.list];
+    for (const [key, raw] of Object.entries(this.changedText())) {
+      if (key.startsWith("home:")) (values.homes ??= {})[key.slice(5)] = raw;
+      else values[key] = raw;
+    }
+    this.bad = groupError(this.kind, values);
+    if (Object.keys(this.bad).length) return;
+    if (Object.keys(values).length && p.group?.id) send({ type: "groupSettings", group: p.group.id, values });
+    closeOverlay(p.overlay);
+  }
+
+  renderGroup() {
+    const t = theme();
+    const p = props() ?? {};
+    const toggle = (mk) => (_e, cx) => {
+      this.list = this.list.includes(mk) ? this.list.filter((m) => m !== mk) : [...this.list, mk];
+      delete this.bad.machines;
+      cx.notify();
+    };
+    const picker = h_flex().flex_wrap().gap(5).children(this.known.map((mk) => {
+      const at = this.list.indexOf(mk);
+      return this.choice(t, `wg-m-${mk}`, this.machineLabel(mk), at >= 0, toggle(mk), at >= 0 ? at + 1 : null);
     }));
-    const text = (key) => Input.new(this.inputs[key]).h(32).px(10).rounded(8).border_1().border_color(this.bad[key] ? t.blocked : t.input).bg(t.background).text_size(12.5).text_color(t.foreground);
-    const button = (id, label, primary, action) => h_flex().id(id).h(32).px(14).items_center().rounded(8)
-      .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
-      .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium().cursor_pointer()
-      .hover((s) => s.opacity(0.88)).on_click(action).child(label);
-    return v_flex().id("wranglr-settings").track_focus(this.handle)
-      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
-      .w_full().min_h(0).p(18).gap(14).bg(t.popover).text_color(t.foreground)
-      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child("Wranglr settings"))
-        .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .child(field("Sort", pick("sort", Object.entries(SORT_LABEL)), "sort"))
-      .child(field("+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."))
-      .child(field("Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"))
-      .child(field("Worktree location", text("worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern in wranglr.json wins."))
-      .child(field("Ticket pattern", text("ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."))
-      .child(field("New spaces run", text("agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."))
-      .child(h_flex().pt(4).gap(8).justify_end()
-        .child(button("ws-cancel", "Cancel", false, () => closeOverlay(p.overlay)))
-        .child(button("ws-save", "Save", true, (_e, cx) => { this.saveSettings(); cx.notify(); })));
+    const fields = [this.field(t, "Machines, in order of preference", picker, "machines",
+      "Click to add or remove. + starts on the first one that is ready. None: the default Machine.")];
+    if (this.kind === "repo") {
+      fields.push(this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "Starts with {clone} or is an absolute path. Empty: the setting."));
+      fields.push(this.field(t, "New branches start from", this.textInput(t, "from"), "from", "A ref such as origin/staging. Empty: the Repo's default branch."));
+    }
+    if (this.kind === "workspace")
+      for (const mk of this.known) fields.push(this.field(t, `Workspace home on ${mk === "" ? "this computer" : mk}`, this.textInput(t, `home:${mk}`), `home:${mk}`));
+    const kind = { workspace: "Workspace", repo: "Repo", custom: "Group" }[this.kind] ?? "Group";
+    const bad = this.bad.settings ? [div().text_size(11).text_color(t.blocked).child(`These ${this.bad.settings}.`)] : [];
+    return this.dialogFrame(t, "wranglr-group", `${kind} settings: ${p.group?.name ?? ""}`, [...fields, ...bad], () => this.saveGroup());
   }
 
   choose(item) {
     closeOverlay(props()?.overlay);
     if (!item) return;
-    if (item.input) openInput(item.input);
+    if (item.dialog) openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: item.dialog });
+    else if (item.input) openInput(item.input);
     else if (item.action) send(item.action);
   }
 
   menuIcon(item) {
+    if (item.dialog) return "settings";
     const type = item.input?.action?.type ?? item.action?.type;
     if (type === "plus") return item.input ? "git-branch" : "plus";
     if (/^remove|^dismiss/.test(type)) return "x";
@@ -1058,6 +1206,7 @@ export default class Wranglr extends View {
     if (this.dialog === "input") return this.renderInput();
     if (this.dialog === "menu") return this.renderMenu();
     if (this.dialog === "settings") return this.renderSettings();
+    if (this.dialog === "group") return this.renderGroup();
     if (this.dialog) return div();
     return this.renderOwner(cx);
   }

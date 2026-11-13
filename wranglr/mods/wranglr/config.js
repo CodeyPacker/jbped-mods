@@ -9,12 +9,19 @@ export const DEFAULT_SETTINGS = {
   autoname: true,
   ticket: "^(?:[a-z]+/)?#?(\\d{2,})",
   agent: null,
+  machine: null,
 };
 
 const SORTS = ["recent", "kind", "az", "manual"];
 const PLUS = ["open", "worktree"];
 const isObj = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const strings = (v) => (Array.isArray(v) ? v.filter((s) => typeof s === "string") : []);
+// A Machine name as a key of `on`: "" is this computer. __proto__ would not be stored as a key.
+const okMachine = (m) => typeof m === "string" && m !== "__proto__";
+const absolute = (p) => typeof p === "string" && /^([\/\\]|[A-Za-z]:[\/\\])/.test(p);
+// A ref handed to git: one word, and not an option.
+const REF = "must be a git ref, such as origin/staging";
+const okRef = (r) => typeof r === "string" && /^[^\s-]\S*$/.test(r);
 
 function parseSettings(raw, errors) {
   const s = { ...(isObj(raw) ? raw : {}) };
@@ -29,6 +36,8 @@ function parseSettings(raw, errors) {
   else { try { new RegExp(s.ticket, "i"); } catch { fall("ticket", "is not a valid regular expression"); } }
   if (!("agent" in s)) s.agent = DEFAULT_SETTINGS.agent;
   else if (s.agent !== null && !(Array.isArray(s.agent) && s.agent.length && s.agent.every((a) => typeof a === "string"))) fall("agent", "must be null or a list of strings");
+  if (!("machine" in s)) s.machine = DEFAULT_SETTINGS.machine;
+  else if (s.machine !== null && !okMachine(s.machine)) fall("machine", 'must be a Machine name, "" for this computer, or null');
   return s;
 }
 
@@ -44,13 +53,13 @@ const parseOn = (on) => (isObj(on) ? Object.fromEntries(Object.entries(on).filte
 
 // A worktrees pattern says where it starts: at the Repo's clone on that Machine ({clone}), or at an absolute path.
 const ANCHOR = "must start with {clone} or be an absolute path";
-const anchored = (p) => typeof p === "string" && (p.startsWith("{clone}") || /^([\/\\]|[A-Za-z]:[\/\\])/.test(p));
+const anchored = (p) => typeof p === "string" && (p.startsWith("{clone}") || absolute(p));
 
 // A Repo's own worktree settings: where they go (`worktrees`) and the ref a new branch starts from (`from`).
 // One that is not a non-empty string is dropped and named.
 function pattern(entry, where, errors) {
   if ("worktrees" in entry && !anchored(entry.worktrees)) { errors.push(`${where}.worktrees: ${ANCHOR}`); delete entry.worktrees; }
-  if ("from" in entry && (typeof entry.from !== "string" || !entry.from)) { errors.push(`${where}.from: must be a git ref`); delete entry.from; }
+  if ("from" in entry && !okRef(entry.from)) { errors.push(`${where}.from: ${REF}`); delete entry.from; }
   return entry;
 }
 
@@ -102,22 +111,109 @@ export async function loadConfig() {
   return { ...parseConfig(text), text };
 }
 
-/** Sets settings[key] in the file, keeping everything else. Retries when the file changed under us. */
-export async function saveSetting(key, value) {
+// Reads the file, applies `change` to its JSON and writes it back, keeping every other key.
+// The write is compare-and-swap: when the file changed under us it is read and changed again.
+// A file that is not JSON is left alone, and so is a change that would add a config problem.
+async function edit(change) {
   const path = configPath();
   for (let attempt = 0; ; attempt++) {
     const text = await readTextFile(path);
     let raw = {};
     if (text != null && text.trim()) {
-      raw = JSON.parse(text); // A file that is not JSON is left alone: this throws.
-      if (!isObj(raw)) throw new Error("wranglr.json is not a JSON object");
+      try { raw = JSON.parse(text); } catch { throw new Error("wranglr.json is not valid JSON, so it was left as it is"); }
+      if (!isObj(raw)) throw new Error("wranglr.json is not a JSON object, so it was left as it is");
     }
-    const next = { ...raw, settings: { ...(isObj(raw.settings) ? raw.settings : {}), [key]: value } };
+    const out = JSON.stringify(change(raw), null, 2) + "\n";
+    if (out === text) return;
+    if (parseConfig(out).errors.length > parseConfig(text).errors.length) throw new Error("that change would break wranglr.json, so it was not saved");
     try {
-      await writeTextFile(path, JSON.stringify(next, null, 2) + "\n", text);
+      await writeTextFile(path, out, text);
       return;
     } catch (e) {
       if (attempt >= 3) throw e;
     }
   }
+}
+
+/** Sets several settings in one write. Nothing is written when one of them is not valid. */
+export async function saveSettings(values) {
+  if (!isObj(values)) throw new Error("settings are not an object");
+  for (const [key, value] of Object.entries(values)) {
+    if (!(key in DEFAULT_SETTINGS)) throw new Error(`${key} is not a setting`);
+    const why = settingError(key, value);
+    if (why) throw new Error(`${key} ${why}`);
+  }
+  await edit((raw) => ({ ...raw, settings: { ...(isObj(raw.settings) ? raw.settings : {}), ...values } }));
+}
+
+/** Sets settings[key] in the file, keeping everything else. */
+export const saveSetting = (key, value) => saveSettings({ [key]: value });
+
+const GROUP_FIELDS = { workspace: ["machines", "homes"], repo: ["machines", "worktrees", "from"], custom: ["machines"] };
+
+/**
+ * What is wrong with a Group's settings, as { field: why }, empty when nothing is.
+ * values: machines (priority list), and for a Repo worktrees and from ("" removes it),
+ * for a Workspace homes: { [machine]: folder } ("" removes it; its field is `home:<machine>`).
+ */
+export function groupError(kind, values) {
+  const fields = GROUP_FIELDS[kind];
+  if (!fields || !isObj(values)) return { settings: "are not valid" };
+  const bad = {};
+  for (const k of Object.keys(values)) if (!fields.includes(k)) bad[k] = "is not a setting of this Group";
+  if ("machines" in values && !bad.machines) {
+    const m = values.machines;
+    if (!Array.isArray(m) || !m.every(okMachine)) bad.machines = "must be a list of Machine names";
+    else if (new Set(m).size !== m.length) bad.machines = "names a Machine twice";
+  }
+  if ("worktrees" in values && !bad.worktrees && values.worktrees !== "" && !anchored(values.worktrees)) bad.worktrees = ANCHOR;
+  if ("from" in values && !bad.from && values.from !== "" && !okRef(values.from)) bad.from = REF;
+  if ("homes" in values && !bad.homes) {
+    if (!isObj(values.homes)) bad.homes = "must be a folder for each Machine";
+    else for (const [mk, home] of Object.entries(values.homes))
+      if (!okMachine(mk) || (home !== "" && !absolute(home))) bad[`home:${mk}`] = "must be an absolute path";
+  }
+  return bad;
+}
+
+/** Writes a Workspace's (key: its name) or a Repo's (key: its id) settings. Only the given fields change. */
+export async function saveGroup(kind, key, values) {
+  if (kind !== "workspace" && kind !== "repo") throw new Error("only a Workspace or a Repo has settings in wranglr.json");
+  if (typeof key !== "string" || !key || key === "__proto__") throw new Error("no such Group");
+  const bad = Object.entries(groupError(kind, values))[0];
+  if (bad) throw new Error(`${bad[0]} ${bad[1]}`);
+  await edit((raw) => {
+    let entry;
+    if (kind === "workspace") {
+      entry = Array.isArray(raw.workspaces) ? raw.workspaces.find((w) => isObj(w) && w.name === key) : null;
+      if (!entry) throw new Error(`the Workspace "${key}" is not in wranglr.json`);
+    } else {
+      if (raw.repos === undefined) raw.repos = {};
+      if (!isObj(raw.repos)) throw new Error("repos in wranglr.json is not an object");
+      if (!Object.hasOwn(raw.repos, key)) raw.repos[key] = {};
+      entry = raw.repos[key];
+      if (!isObj(entry)) throw new Error(`repos["${key}"] in wranglr.json is not an object`);
+    }
+    // An empty list is only written over a list that is there.
+    if ("machines" in values && (values.machines.length || "machines" in entry)) entry.machines = [...values.machines];
+    for (const k of ["worktrees", "from"]) {
+      if (!(k in values)) continue;
+      if (values[k]) entry[k] = values[k]; else delete entry[k];
+    }
+    for (const [mk, home] of Object.entries(values.homes ?? {})) {
+      if (home) {
+        if (!isObj(entry.on)) entry.on = {};
+        if (!isObj(entry.on[mk])) entry.on[mk] = {};
+        entry.on[mk].home = home;
+      } else if (isObj(entry.on) && isObj(entry.on[mk])) {
+        delete entry.on[mk].home;
+        if (!Object.keys(entry.on[mk]).length) delete entry.on[mk];
+      }
+    }
+    if (kind === "repo") {
+      if (!Object.keys(entry).length) delete raw.repos[key];
+      if (!Object.keys(raw.repos).length) delete raw.repos;
+    }
+    return raw;
+  });
 }
