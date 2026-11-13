@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+# private-app: run a private Herdr app instance for testing mods. Its own app home, its own
+# herdr-core session, nothing shared with the Herdr the person is using. See README.md.
+#
+# Only WSL driving the Windows app is implemented. Everything platform-specific is in the
+# plat_* functions (one block per platform) so native Linux/macOS can be added there.
+#
+# The script can also be sourced (selftest.sh does): it then defines its functions and runs nothing.
+
+set -euo pipefail
+
+PA_NAME_RE='^[a-z0-9][a-z0-9-]{0,30}$'
+PA_SESSION_PREFIX=pa-
+# The variables an instance sets. Inherited HC_* / HERDR_* are always removed first.
+PA_VARS=(HC_SESSION HERDR_APP_HOME HERDR_TELEMETRY DO_NOT_TRACK HERDR_APP_NO_SOUND HERDR_RELEASES_URL)
+PA_RELEASES_URL=http://127.0.0.1:9 # nothing self-updates
+
+die() { echo "private-app: $*" >&2; exit 1; }
+say() { echo "private-app: $*" >&2; }
+need_name() { [[ ${1:-} =~ $PA_NAME_RE ]] || die "invalid instance name '${1:-}' (want $PA_NAME_RE)"; }
+
+# python3 for JSON only, isolated (-I) so nothing is imported from the current folder.
+py() { python3 -I "$@"; }
+jfield() { # jfield <file> <key>: one top-level field of a JSON file ("" when absent)
+  py -c 'import json,sys
+v=json.load(open(sys.argv[1])).get(sys.argv[2])
+print("" if v is None else (json.dumps(v) if isinstance(v,(list,dict,bool)) else v))' "$1" "$2"
+}
+
+# ======================================================================================
+# Platform layer. Each platform defines:
+#   plat_init            set PA_BASE (instances' parent folder), PA_APP_EXE, PA_HC_EXE,
+#                        PA_REAL_HOME (the person's own app home), PA_CORE_STATE_BASE
+#   plat_path_native P   a local path as the app sees it;  plat_path_local P: the reverse
+#   plat_exec EXE ARGS   run EXE with the instance environment (I_* globals loaded)
+#   plat_core_start      start the private core, print its pid
+#   plat_app_launch      launch the private app detached, print "pid ticks"
+#   plat_proc PID        "pid<TAB>ppid<TAB>name<TAB>ticks<TAB>cmdline" or nothing
+#   plat_procs           every process: "pid<TAB>ppid<TAB>name<TAB>ticks" (no cmdline)
+#   plat_holders         holder processes of this instance's session, plat_proc format
+#   plat_kill PID NAME TICKS [CMDSUB]   end PID only if it still has that name and creation
+#                        time (and its command line contains CMDSUB); prints stopped|gone|mismatch
+#   plat_crashinfo       crash entries for the app since the instance started
+#   plat_inherited_names HC_*/HERDR_* names the platform hands to started programs regardless of
+#                        this shell's environment (blanked in every call)
+#   plat_app_version     the installed app's version, read without running it
+# ======================================================================================
+
+plat_detect() {
+  if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    echo wsl
+  else
+    echo unsupported
+  fi
+}
+
+# ---- WSL -> Windows -------------------------------------------------------------------
+
+# powershell.exe from a Windows folder (a Linux cwd makes Windows warn about UNC paths).
+# Only fixed scripts with validated values (digits, [a-z0-9.-], checked paths) are passed in.
+win_ps() { (cd /mnt/c && powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$1" | tr -d '\r'); }
+
+# A Windows path safe to embed in a single-quoted PowerShell string.
+win_q() { [[ $1 != *"'"* ]] || die "path has a quote: $1"; printf "'%s'" "$1"; }
+
+wsl_init() {
+  local raw
+  raw=$(cd /mnt/c && cmd.exe /d /c 'echo %TEMP%;%LOCALAPPDATA%;%USERNAME%;%USERPROFILE%' | tr -d '\r')
+  IFS=';' read -r W_TEMP W_LOCAL W_USER W_PROFILE <<<"$raw"
+  [ -n "$W_TEMP" ] && [ -n "$W_LOCAL" ] && [ -n "$W_PROFILE" ] || die "could not read Windows TEMP/LOCALAPPDATA/USERPROFILE"
+  [[ $W_USER =~ ^[A-Za-z0-9._-]+$ ]] || die "unexpected Windows user name '$W_USER'"
+  PA_BASE=$(wslpath -u "$W_TEMP")/herdr-private
+  PA_APP_EXE=${PA_APP_EXE:-$(wslpath -u "$W_LOCAL")/Programs/herdr-app/herdr-app.exe}
+  PA_HC_EXE=${PA_HC_EXE:-$(wslpath -u "$W_LOCAL")/Programs/herdr-core/hc.exe}
+  PA_REAL_HOME=$(wslpath -u "$W_PROFILE")/.config/herdr-app
+  PA_CORE_STATE_BASE=$(wslpath -u "$W_LOCAL")/herdr-core
+  # The core's pipe names: \\.\pipe\herdr-core-<user>-<session>.<...>
+  PA_PIPE_USER=$(printf '%s' "$W_USER" | tr '[:upper:]' '[:lower:]')
+  [ -x "$PA_APP_EXE" ] || die "no herdr-app.exe at $PA_APP_EXE"
+  [ -x "$PA_HC_EXE" ] || die "no hc.exe at $PA_HC_EXE"
+}
+
+wsl_app_version() { win_ps "(Get-Item -LiteralPath $(win_q "$(wslpath -w "$PA_APP_EXE")")).VersionInfo.ProductVersion"; }
+wsl_path_native() { wslpath -w "$1"; }
+wsl_path_local() { wslpath -u "$1"; }
+
+# The env(1) arguments for an instance: drop every inherited HC_*/HERDR_* (rule 2), blank the
+# ones Windows hands in from its own environment (I_BLANK, found at start), set the instance's.
+inst_env_args() {
+  local v wslenv="" args=()
+  for v in $(compgen -e | grep -E '^(HC_|HERDR_)' || true); do args+=(-u "$v"); done
+  for v in "${I_BLANK[@]}"; do args+=("$v="); wslenv+="$v:"; done
+  args+=("HC_SESSION=$I_SESSION" "HERDR_APP_HOME=$I_HOME_NATIVE" "HERDR_TELEMETRY=0" "DO_NOT_TRACK=1"
+    "HERDR_APP_NO_SOUND=1" "HERDR_RELEASES_URL=$PA_RELEASES_URL")
+  wslenv+=$(IFS=:; echo "${PA_VARS[*]}")
+  args+=("WSLENV=$wslenv")
+  printf '%s\0' "${args[@]}"
+}
+
+wsl_exec() {
+  guard_instance
+  local envargs=()
+  mapfile -d '' envargs < <(inst_env_args)
+  env "${envargs[@]}" "$@"
+}
+
+# PowerShell prelude run with the instance environment: removes every HC_*/HERDR_* that is not
+# the instance's own, whatever Windows or WSL handed in, before anything is started from it.
+wsl_ps_clean_prelude() {
+  local keep
+  keep=$(printf "'%s'," "${PA_VARS[@]}"); keep=${keep%,}
+  printf '%s' "\$keep=@($keep); Get-ChildItem env: | Where-Object { \$_.Name -match '^(HC_|HERDR_)' -and \$keep -notcontains \$_.Name } | ForEach-Object { Remove-Item (\"env:\" + \$_.Name) };"
+}
+
+wsl_core_start() {
+  local out
+  out=$(wsl_exec_ps "$(wsl_ps_clean_prelude) & $(win_q "$(wslpath -w "$PA_HC_EXE")") server start")
+  printf '%s\n' "$out" >"$I_ROOT/core-start.json"
+  py -c 'import json,sys; d=json.loads(sys.stdin.read()); print(d["pid"])' <<<"$out" ||
+    die "core did not start: $out"
+}
+
+wsl_exec_ps() { guard_instance; local envargs=(); mapfile -d '' envargs < <(inst_env_args); (cd /mnt/c && env "${envargs[@]}" powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$1" | tr -d '\r'); }
+
+# Launch detached from WSL, the way a person would (`exe > log &`). A PowerShell Start-Process
+# launch does not return while the app lives: the app inherits the interop's stdio handles,
+# even with PowerShell's own output sent to /dev/null. The app's stdout+stderr go to app.log.
+# The Windows pid is then found: a herdr-app.exe of this exe path that did not exist before
+# (I_PRE_APPS) and was created after the launch (I_STARTED_TICKS).
+wsl_app_launch() {
+  guard_instance
+  local envargs=()
+  mapfile -d '' envargs < <(inst_env_args)
+  (cd "$I_ROOT" && exec setsid -f env "${envargs[@]}" "$PA_APP_EXE" >"$I_ROOT/app.log" 2>&1 </dev/null)
+  local found="" i
+  for i in $(seq 1 60); do
+    found=$(wsl_new_apps)
+    [ -n "$found" ] && break
+    sleep 0.5
+  done
+  [ -n "$found" ] || return 1
+  [ "$(wc -l <<<"$found")" = 1 ] || die "more than one new herdr-app.exe appeared; not guessing: $(tr '\n' ' ' <<<"$found")"
+  printf '%s\n' "$found"
+}
+
+# herdr-app.exe processes of this exe that are not in I_PRE_APPS ("pid:ticks" list) and were
+# created at or after I_STARTED_TICKS: "pid ticks" per line.
+wsl_new_apps() {
+  [[ $I_STARTED_TICKS =~ ^[0-9]+$ ]] || die "no start time recorded"
+  local exe_w all p t pre=" ${I_PRE_APPS[*]:-} "
+  exe_w=$(wslpath -w "$PA_APP_EXE" | tr '[:upper:]' '[:lower:]')
+  all=$(win_ps "Get-CimInstance Win32_Process -Filter \"Name='herdr-app.exe'\" | ForEach-Object { '{0} {1} {2}' -f \$_.ProcessId,\$_.CreationDate.ToUniversalTime().Ticks,\$_.ExecutablePath }")
+  while read -r p t path; do
+    [[ $p =~ ^[0-9]+$ && $t =~ ^[0-9]+$ ]] || continue
+    [ "$(tr '[:upper:]' '[:lower:]' <<<"$path")" = "$exe_w" ] || continue
+    [[ $pre == *" $p:$t "* ]] && continue
+    [ "$t" -ge "$I_STARTED_TICKS" ] || continue
+    echo "$p $t"
+  done <<<"$all"
+}
+# herdr-app.exe processes now, "pid:ticks" per line (recorded before a launch).
+wsl_app_snapshot() {
+  win_ps "Get-CimInstance Win32_Process -Filter \"Name='herdr-app.exe'\" | ForEach-Object { '{0}:{1}' -f \$_.ProcessId,\$_.CreationDate.ToUniversalTime().Ticks }" | grep -E '^[0-9]+:[0-9]+$' || true
+}
+# Now as Windows file-time ticks (100 ns since 0001-01-01 UTC), minus 5 s for clock skew.
+wsl_now_ticks() { win_ps '[DateTime]::UtcNow.AddSeconds(-5).Ticks'; }
+
+WSL_PROC_FMT='"{0}`t{1}`t{2}`t{3}`t{4}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CreationDate.ToUniversalTime().Ticks,$_.CommandLine'
+wsl_proc() {
+  [[ $1 =~ ^[0-9]+$ ]] || die "bad pid $1"
+  win_ps "Get-CimInstance Win32_Process -Filter 'ProcessId=$1' | ForEach-Object { $WSL_PROC_FMT }"
+}
+wsl_procs() {
+  win_ps 'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}" -f $_.ProcessId,$_.ParentProcessId,$_.Name,$_.CreationDate.ToUniversalTime().Ticks }'
+}
+# Holders (and any core) of this session only: the pipe name has the session and a dot after it.
+wsl_holders() {
+  local sub="herdr-core-$PA_PIPE_USER-$I_SESSION."
+  [[ $sub =~ ^herdr-core-[a-z0-9._-]+-pa-[a-z0-9-]+\.$ ]] || die "bad holder pattern $sub"
+  win_ps "Get-CimInstance Win32_Process | Where-Object { (\$_.Name -eq 'herdr-core.exe' -or \$_.Name -eq 'hc.exe') -and \$_.CommandLine -and \$_.CommandLine.ToLowerInvariant().Contains('$sub') } | ForEach-Object { $WSL_PROC_FMT }"
+}
+wsl_kill() {
+  local pid=$1 name=$2 ticks=$3 sub=${4:-}
+  [[ $pid =~ ^[0-9]+$ && $ticks =~ ^[0-9]+$ && $name =~ ^[a-z.-]+\.exe$ ]] || die "bad kill target $pid $name $ticks"
+  [[ -z $sub || $sub =~ ^[a-z0-9._-]+$ ]] || die "bad command-line match $sub"
+  win_ps "\$p = Get-CimInstance Win32_Process -Filter 'ProcessId=$pid';
+if (-not \$p) { 'gone'; exit 0 }
+if (\$p.Name -ne '$name' -or \$p.CreationDate.ToUniversalTime().Ticks -ne $ticks) { 'mismatch'; exit 0 }
+if ('$sub' -ne '' -and -not (\$p.CommandLine -and \$p.CommandLine.ToLowerInvariant().Contains('$sub'))) { 'mismatch'; exit 0 }
+Stop-Process -Id $pid -Force; 'stopped'"
+}
+# Application Error (1000) events for herdr-app.exe since start, only this instance's app pid
+# when one is recorded (the event names the faulting pid); then the tail of the app's log.
+wsl_crashinfo() {
+  local since pidhex=""
+  since=$(jfield "$I_ROOT/instance.json" started_at)
+  [[ $since =~ ^[0-9T:.Z-]+$ ]] || die "bad start time $since"
+  [ -z "$I_APP_PID" ] || pidhex=$(printf '0x%x' "$I_APP_PID")
+  echo "== Event Log (Application Error 1000, herdr-app.exe${pidhex:+, pid $I_APP_PID = $pidhex}) since $since"
+  win_ps "\$s = [datetime]::Parse('$since').ToLocalTime();
+\$e = Get-WinEvent -FilterHashtable @{LogName='Application'; Id=1000; StartTime=\$s} -ErrorAction SilentlyContinue | Where-Object { \$_.Message -match 'herdr-app\.exe' -and ('$pidhex' -eq '' -or \$_.Message -match ('Faulting process id: ' + '$pidhex' + '\b')) };
+foreach (\$x in \$e) { '{0:o} id={1} {2}' -f \$x.TimeCreated, \$x.Id, ((\$x.Message -split \"\`n\" | Select-Object -First 7) -join ' | ') }" || true
+  echo "== tail of $I_ROOT/app.log"
+  [ -f "$I_ROOT/app.log" ] && tail -n 20 "$I_ROOT/app.log" | sed 's/\x1b\[[0-9;]*m//g' | tr -d '\r' || true
+}
+# Names Windows hands to every process started from this WSL session (its own environment),
+# which unsetting in WSL does not remove. Blanked through WSLENV in every call.
+wsl_inherited_names() {
+  win_ps 'Get-ChildItem env: | Where-Object { $_.Name -match "^(HC_|HERDR_)" } | ForEach-Object { $_.Name }' |
+    grep -E '^[A-Z0-9_]+$' || true
+}
+
+# ---- dispatch to the platform -----------------------------------------------------------
+
+PLAT=$(plat_detect)
+plat() {
+  local fn=$1; shift
+  case $PLAT in
+    wsl) "wsl_$fn" "$@" ;;
+    *) die "this platform is not supported yet (only WSL driving the Windows app is implemented)" ;;
+  esac
+}
+
+# ======================================================================================
+# Instances
+# ======================================================================================
+
+# Load an instance's recorded facts into I_* and check the safety rules.
+load_instance() {
+  need_name "$1"
+  I_NAME=$1
+  I_ROOT=$PA_BASE/$1
+  local f=$I_ROOT/instance.json
+  [ -f "$f" ] || die "no instance '$1' (no $f)"
+  local vals
+  vals=$(py -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+for k in ("session","home","home_native","core_state","app_pid","app_ticks","core_pid","core_ticks","keep_home","started_ticks"):
+    v=d.get(k); print("" if v is None else v)
+print(":".join(d.get("blank",[])))
+print(" ".join(d.get("pre_apps",[])))' "$f")
+  { read -r I_SESSION; read -r I_HOME; read -r I_HOME_NATIVE; read -r I_CORE_STATE; read -r I_APP_PID; read -r I_APP_TICKS
+    read -r I_CORE_PID; read -r I_CORE_TICKS; read -r I_KEEP_HOME; read -r I_STARTED_TICKS; read -r blank; read -r pre; } <<<"$vals"
+  I_PRE_APPS=()
+  [ -z "$pre" ] || read -r -a I_PRE_APPS <<<"$pre"
+  I_BLANK=()
+  [ -z "$blank" ] || IFS=: read -r -a I_BLANK <<<"$blank"
+  guard_instance
+}
+
+# Rule 1: refuse when the session is empty/default or the home is empty or the person's own.
+guard_instance() {
+  [ -n "${I_SESSION:-}" ] || die "refusing: empty core session"
+  [ "$I_SESSION" != default ] || die "refusing: the 'default' core session is the person's own"
+  [[ $I_SESSION == "$PA_SESSION_PREFIX"* && ${I_SESSION#"$PA_SESSION_PREFIX"} =~ $PA_NAME_RE ]] || die "refusing: unexpected session '$I_SESSION'"
+  [ -n "${I_HOME:-}" ] && [ -n "${I_HOME_NATIVE:-}" ] || die "refusing: empty app home"
+  local real home
+  real=$(realpath -m "$PA_REAL_HOME"); home=$(realpath -m "$I_HOME")
+  case "$home/" in "$real/"*) die "refusing: home $I_HOME is the person's own app home" ;; esac
+  case "$real/" in "$home/"*) die "refusing: home $I_HOME contains the person's own app home" ;; esac
+  [ "$home" = "$(realpath -m "$PA_BASE/$I_NAME/home")" ] || die "refusing: home $I_HOME is not $PA_BASE/$I_NAME/home"
+  [ "$(plat_path_local_check "$I_HOME_NATIVE")" = "$home" ] || die "refusing: home paths disagree ($I_HOME vs $I_HOME_NATIVE)"
+}
+plat_path_local_check() { realpath -m "$(plat path_local "$1")"; }
+
+record() { # record <key> <json value>: update instance.json in place
+  py -c 'import json,sys
+f=sys.argv[1]; d=json.load(open(f)); d[sys.argv[2]]=json.loads(sys.argv[3])
+open(f+".tmp","w").write(json.dumps(d,indent=2)+"\n")' "$I_ROOT/instance.json" "$1" "$2"
+  mv "$I_ROOT/instance.json.tmp" "$I_ROOT/instance.json"
+}
+
+# poll <seconds> <command...>: until it succeeds; no fixed sleeps in callers.
+poll() {
+  local until=$((SECONDS + $1)); shift
+  until "$@" >/dev/null 2>&1; do [ $SECONDS -lt "$until" ] || return 1; sleep 0.3; done
+}
+
+# Is the recorded process still the same one (pid, name and creation time)?
+same_proc() { # same_proc <pid> <name> <ticks>
+  local line
+  [ -n "$1" ] && [ -n "$3" ] || return 1
+  line=$(plat proc "$1") || return 1
+  [ -n "$line" ] || return 1
+  IFS=$'\t' read -r p _ n t _ <<<"$line"
+  [ "$p" = "$1" ] && [ "$n" = "$2" ] && [ "$t" = "$3" ]
+}
+
+app_alive() { same_proc "$I_APP_PID" herdr-app.exe "$I_APP_TICKS"; }
+core_alive() { same_proc "$I_CORE_PID" hc.exe "$I_CORE_TICKS"; }
+core_gone() { ! core_alive; }
+app_status_ok() { plat exec "$PA_APP_EXE" status >/dev/null 2>&1; }
+
+# ---- start -----------------------------------------------------------------------------
+
+cmd_start() {
+  local name="" mods=() layout="" keep=false
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --name) name=${2:-}; shift ;;
+      --mod) mods+=("${2:-}"); shift ;;
+      --layout) layout=${2:-}; shift ;;
+      --keep-home) keep=true ;;
+      *) die "start: unknown argument '$1'" ;;
+    esac
+    shift
+  done
+  [ -n "$name" ] || name=i$(date +%m%d-%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')
+  need_name "$name"
+  local m b
+  for m in "${mods[@]}"; do
+    [ -f "$m/main.js" ] || die "--mod $m: no main.js there"
+    b=$(basename "$(realpath "$m")")
+    [[ $b =~ ^[A-Za-z0-9._-]+$ ]] || die "--mod $m: unexpected folder name '$b'"
+  done
+  if [ -n "$layout" ]; then
+    [ -f "$layout" ] || die "--layout $layout: no such file"
+    b=$(basename "$layout" .json)
+    [[ $layout == *.json && $b =~ ^[A-Za-z0-9._-]+$ ]] || die "--layout must be a <name>.json file"
+    py -c 'import json,sys; json.load(open(sys.argv[1]))' "$layout" || die "--layout $layout is not valid JSON"
+  fi
+
+  I_NAME=$name I_ROOT=$PA_BASE/$name I_SESSION=$PA_SESSION_PREFIX$name
+  I_HOME=$I_ROOT/home I_CORE_STATE=$PA_CORE_STATE_BASE/$I_SESSION
+  [ ! -e "$I_ROOT" ] || die "instance '$name' already exists ($I_ROOT); stop it or pick another --name"
+  [ ! -e "$I_CORE_STATE" ] || die "core state for session $I_SESSION already exists ($I_CORE_STATE)"
+  mkdir -p "$I_HOME"
+  I_HOME_NATIVE=$(plat path_native "$I_HOME")
+  I_BLANK=()
+  mapfile -t I_BLANK < <(plat inherited_names)
+  guard_instance
+
+  local version
+  version=$(app_version)
+  py -c 'import json,sys
+a=sys.argv
+d={"name":a[2],"session":a[3],"root":a[4],"home":a[5],"home_native":a[6],"core_state":a[7],
+   "keep_home":a[8]=="true","blank":[x for x in a[9].split(":") if x],"app_version":a[10],
+   "mods":[x for x in a[11].split("\n") if x],"layout":a[12] or None,"started_at":None}
+open(a[1],"w").write(json.dumps(d,indent=2)+"\n")' "$I_ROOT/instance.json" "$name" "$I_SESSION" "$I_ROOT" "$I_HOME" \
+    "$I_HOME_NATIVE" "$I_CORE_STATE" "$keep" "$(IFS=:; echo "${I_BLANK[*]}")" "$version" \
+    "$(printf '%s\n' "${mods[@]}")" "${layout:+$(basename "$layout" .json)}"
+
+  # Seed the home: no welcome, no "Updated" toast, the layout to show.
+  py -c 'import json,sys
+d={"frame.welcomed": True}
+if sys.argv[2]: d["layout"]=sys.argv[2]
+open(sys.argv[1],"w").write(json.dumps(d)+"\n")' "$I_HOME/shared.json" "${layout:+$(basename "$layout" .json)}"
+  [ -z "$version" ] || printf '{"last_run": "%s", "presented": []}\n' "$version" >"$I_HOME/update-notes.json"
+  # Mods and the layout go in before the first start (see README: the app keeps them as they are).
+  mkdir -p "$I_HOME/mods" "$I_HOME/layouts"
+  for m in "${mods[@]}"; do cp -r "$(realpath "$m")" "$I_HOME/mods/"; done
+  [ -z "$layout" ] || cp "$layout" "$I_HOME/layouts/"
+
+  # What existed before: the app pid is later found as a herdr-app.exe that is not one of these.
+  record started_at "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+  I_STARTED_TICKS=$(plat now_ticks)
+  [[ $I_STARTED_TICKS =~ ^[0-9]+$ ]] || die "could not read the time"
+  I_PRE_APPS=()
+  mapfile -t I_PRE_APPS < <(plat app_snapshot)
+  record started_ticks "$I_STARTED_TICKS"
+  record pre_apps "$(py -c 'import json,sys; print(json.dumps(sys.argv[1:]))' "${I_PRE_APPS[@]}")"
+  local core_pid line app
+  core_pid=$(plat core_start)
+  line=$(plat proc "$core_pid")
+  IFS=$'\t' read -r _ _ cname I_CORE_TICKS _ <<<"$line"
+  [ "$cname" = hc.exe ] || die "core pid $core_pid is '$cname', not hc.exe; stop with: private-app stop $name"
+  I_CORE_PID=$core_pid
+  record core_pid "$I_CORE_PID"; record core_ticks "$I_CORE_TICKS"
+
+  app=$(plat app_launch) || die "no new herdr-app.exe appeared within 30 s (log: $I_ROOT/app.log); stop with: private-app stop $name"
+  read -r I_APP_PID I_APP_TICKS <<<"$app"
+  [[ $I_APP_PID =~ ^[0-9]+$ && $I_APP_TICKS =~ ^[0-9]+$ ]] || die "app did not launch: $app"
+  record app_pid "$I_APP_PID"; record app_ticks "$I_APP_TICKS"
+  poll 60 app_status_ok || die "the private app did not answer status within 60 s (log: $I_ROOT/app.log); stop with: private-app stop $name"
+
+  if [ -n "$layout" ]; then
+    local lname; lname=$(basename "$layout" .json)
+    if [ "$(shown_layout)" = "$lname" ]; then
+      say "layout $lname shown from the seeded shared.json"
+    else
+      say "layout $lname not shown at start; switching with layout.switch"
+      plat exec "$PA_APP_EXE" do layout.switch "{\"name\":\"$lname\"}" >/dev/null || die "layout.switch $lname failed"
+      poll 10 layout_is "$lname" || die "layout $lname is not shown (status says $(shown_layout))"
+    fi
+  fi
+  # The app must have kept each mod as copied (not replaced or moved to <name>-edited).
+  for m in "${mods[@]}"; do
+    b=$(basename "$(realpath "$m")")
+    diff -rq -x jsconfig.json -x '*.d.ts' "$(realpath "$m")" "$I_HOME/mods/$b" >/dev/null ||
+      die "mod $b changed after the app started: diff -r $m $I_HOME/mods/$b"
+  done
+  echo "$name"
+}
+
+# The app's version from the file itself (running the app for it would be an unguarded run).
+app_version() { plat app_version | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true; }
+shown_layout() { plat exec "$PA_APP_EXE" status 2>/dev/null | py -c 'import json,sys; print(json.load(sys.stdin).get("layout",""))'; }
+layout_is() { [ "$(shown_layout)" = "$1" ]; }
+
+# ---- the instance's processes ---------------------------------------------------------------
+
+# Every process of the instance now: recorded app/core, the session's holders, and their
+# descendants (by parent links, each with its creation ticks). "pid<TAB>name<TAB>ticks<TAB>why".
+inst_procs() {
+  local all roots=()
+  all=$(plat procs)
+  if same_proc "$I_APP_PID" herdr-app.exe "$I_APP_TICKS"; then roots+=("$I_APP_PID"); fi
+  if same_proc "$I_CORE_PID" hc.exe "$I_CORE_TICKS"; then roots+=("$I_CORE_PID"); fi
+  local h
+  while IFS=$'\t' read -r p _ _ _ _; do [ -n "$p" ] && roots+=("$p"); done < <(plat holders)
+  py -c 'import sys
+procs={}
+for line in sys.stdin.read().splitlines():
+    f=line.split("\t")
+    if len(f)>=4 and f[0].isdigit(): procs[f[0]]=(f[1],f[2],int(f[3] or 0))
+roots=[r for r in sys.argv[1:] if r in procs]
+out={r:"root" for r in roots}
+changed=True
+while changed:
+    changed=False
+    for p,(pp,n,t) in procs.items():
+        # a child: parent is ours and it was created after the parent (pid reuse guard)
+        if p not in out and pp in out and t>=procs[pp][2]:
+            out[p]="child of "+pp; changed=True
+for p,why in out.items():
+    print(f"{p}\t{procs[p][1]}\t{procs[p][2]}\t{why}")' "${roots[@]}" <<<"$all"
+}
+
+# ---- stop ------------------------------------------------------------------------------
+
+kill_verified() { # kill_verified <pid> <name> <ticks> [cmdsub] <label>
+  local r
+  r=$(plat kill "$@")
+  say "end $5 pid $1 ($2): $r"
+  [ "$r" != mismatch ]
+}
+
+cmd_stop() {
+  local keep=false all=false name=""
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --keep-home) keep=true ;;
+      --all) all=true ;;
+      -*) die "stop: unknown option '$1'" ;;
+      *) name=$1 ;;
+    esac
+    shift
+  done
+  if $all; then
+    local d rc=0
+    for d in "$PA_BASE"/*/instance.json; do
+      [ -f "$d" ] || continue
+      d=$(basename "$(dirname "$d")")
+      [[ $d =~ $PA_NAME_RE ]] || continue
+      ( stop_one "$d" "$keep" ) || rc=1
+    done
+    return $rc
+  fi
+  [ -n "$name" ] || die "stop: name or --all"
+  stop_one "$name" "$keep"
+}
+
+stop_one() {
+  load_instance "$1"
+  local keep=$2 ok=true
+  [ "$I_KEEP_HOME" = true ] && keep=true
+  local snapshot
+  snapshot=$(inst_procs)
+
+  # 1. The app (and with it its `connect` child). A start that failed before recording the app
+  #    pid: the app is the one herdr-app.exe that did not exist before start and was created
+  #    after it; with none or several, nothing is guessed.
+  if [ -z "$I_APP_PID" ] && [ -n "$I_STARTED_TICKS" ]; then
+    local cand
+    cand=$(plat new_apps)
+    if [ -n "$cand" ] && [ "$(wc -l <<<"$cand")" = 1 ]; then
+      read -r I_APP_PID I_APP_TICKS <<<"$cand"
+      say "no app pid recorded; found the instance's app: pid $I_APP_PID (new since start)"
+      snapshot=$(inst_procs)
+    elif [ -n "$cand" ]; then
+      say "no app pid recorded and several new herdr-app.exe since start ($(tr '\n' ' ' <<<"$cand")); ending none of them"
+      ok=false
+    fi
+  fi
+  if [ -n "$I_APP_PID" ]; then kill_verified "$I_APP_PID" herdr-app.exe "$I_APP_TICKS" "" app || ok=false; fi
+  # 2. The core: its terminals, then the server. hc is only called while the core is alive
+  #    (any other hc call in the session would start a core again).
+  if core_alive; then
+    local t
+    for t in $(plat exec "$PA_HC_EXE" ls --json 2>/dev/null | py -c 'import json,sys
+try: d=json.load(sys.stdin)
+except Exception: d={}
+[print(t["address"]) for t in d.get("terminals",[])]' || true); do
+      [[ $t =~ ^[A-Za-z0-9/_.-]+$ ]] && plat exec "$PA_HC_EXE" kill "$t" >/dev/null 2>&1 || true
+    done
+    say "core server stop: $(plat exec "$PA_HC_EXE" server stop 2>&1 | tr -d '\n' || true)"
+    poll 15 core_gone || true
+  fi
+  if core_alive; then kill_verified "$I_CORE_PID" hc.exe "$I_CORE_TICKS" "" core || ok=false; fi
+  # 3. Leftover holders of this session only (matched by the session's pipe name).
+  local p n t c sub="herdr-core-$PA_PIPE_USER-$I_SESSION."
+  while IFS=$'\t' read -r p _ n t c; do
+    [ -n "$p" ] || continue
+    kill_verified "$p" "$n" "$t" "$sub" holder || ok=false
+  done < <(plat holders)
+  # 4. Anything else that was part of the instance at the snapshot (children of the app, core
+  #    or holders), re-verified by pid, name and creation time.
+  local why
+  while IFS=$'\t' read -r p n t why; do
+    [ -n "$p" ] || continue
+    if same_proc "$p" "$n" "$t"; then kill_verified "$p" "$n" "$t" "" "leftover ($why)" || ok=false; fi
+  done <<<"$snapshot"
+
+  # 5. Files: the home and the session's core state, unless kept.
+  if [ "$keep" = true ]; then
+    say "kept $I_ROOT and $I_CORE_STATE"
+  else
+    remove_files || ok=false
+  fi
+  $ok || die "stop $I_NAME: some processes did not match their record and were left alone"
+  echo "stopped $I_NAME"
+}
+
+remove_files() {
+  [ "$(basename "$I_CORE_STATE")" = "$I_SESSION" ] && [ "$I_SESSION" != default ] || die "refusing to remove $I_CORE_STATE"
+  [ "$(realpath -m "$(dirname "$I_CORE_STATE")")" = "$(realpath -m "$PA_CORE_STATE_BASE")" ] || die "refusing to remove $I_CORE_STATE"
+  [ "$(realpath -m "$I_ROOT")" = "$(realpath -m "$PA_BASE/$I_NAME")" ] || die "refusing to remove $I_ROOT"
+  # Files can stay locked for a moment after their process ends.
+  poll 20 rm -rf -- "$I_CORE_STATE" || { say "could not remove $I_CORE_STATE"; return 1; }
+  poll 20 rm -rf -- "$I_ROOT" || { say "could not remove $I_ROOT"; return 1; }
+  ! [ -e "$I_CORE_STATE" ] && ! [ -e "$I_ROOT" ]
+}
+
+# ---- the other commands ------------------------------------------------------------------
+
+cmd_app() { load_instance "${1:-}"; shift; plat exec "$PA_APP_EXE" "$@"; }
+cmd_hc() { load_instance "${1:-}"; shift; plat exec "$PA_HC_EXE" "$@"; }
+
+cmd_shot() {
+  load_instance "${1:-}"
+  local f=${2:-$I_ROOT/shots/shot-$(date +%H%M%S)-$RANDOM.png} out
+  mkdir -p "$(dirname "$f")"
+  f=$(realpath -m "$f")
+  out=$(plat exec "$PA_APP_EXE" shot "$(plat path_native "$f")" | tr -d '\r') || die "shot failed: $out"
+  [ -s "$f" ] || die "shot wrote nothing: $out"
+  echo "$f"
+}
+
+cmd_wait() {
+  load_instance "${1:-}"
+  local secs=${2:-}; shift 2 || true
+  [[ $secs =~ ^[0-9]+$ ]] || die "wait <name> <seconds> <command...>"
+  [ $# -gt 0 ] || die "wait: no command"
+  local self; self=$(realpath "${BASH_SOURCE[0]}")
+  case $1 in
+    app|hc|shot|status) local sub=$1; shift; poll "$secs" "$self" "$sub" "$I_NAME" "$@" ;;
+    alive) poll "$secs" "$self" alive "$I_NAME" ;;
+    *) local envargs=(); mapfile -d '' envargs < <(inst_env_args); poll "$secs" env "${envargs[@]}" "$@" ;;
+  esac || die "wait: '$*' did not succeed within $secs s"
+}
+
+cmd_status() {
+  load_instance "${1:-}"
+  local a=no c=no errs="(app not answering)" layout="" st
+  app_alive && a=yes
+  core_alive && c=yes
+  if [ $a = yes ] && st=$(plat exec "$PA_APP_EXE" status 2>/dev/null); then
+    errs=$(py -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("errors")))' <<<"$st")
+    layout=$(py -c 'import json,sys; print(json.load(sys.stdin).get("layout",""))' <<<"$st")
+  fi
+  printf 'name %s\nsession %s\nhome %s\napp %s (pid %s)\ncore %s (pid %s)\nlayout %s\nerrors %s\n' \
+    "$I_NAME" "$I_SESSION" "$I_HOME" "$a" "$I_APP_PID" "$c" "$I_CORE_PID" "$layout" "$errs"
+  [ $a = yes ] && [ $c = yes ] && [ "$errs" = "[]" ]
+}
+
+cmd_alive() { load_instance "${1:-}"; app_alive; }
+cmd_crashinfo() { load_instance "${1:-}"; plat crashinfo; }
+cmd_procs() { load_instance "${1:-}"; inst_procs; }
+
+cmd_list() {
+  local f n
+  printf '%-34s %-38s %-5s %-5s\n' NAME SESSION APP CORE
+  for f in "$PA_BASE"/*/instance.json; do
+    [ -f "$f" ] || continue
+    n=$(basename "$(dirname "$f")")
+    [[ $n =~ $PA_NAME_RE ]] || continue
+    ( load_instance "$n"
+      a=no c=no; app_alive && a=yes; core_alive && c=yes
+      printf '%-34s %-38s %-5s %-5s\n' "$I_NAME" "$I_SESSION" "$a" "$c" ) || true
+  done
+}
+
+cmd_env() {
+  load_instance "${1:-}"
+  local v
+  for v in $(compgen -e | grep -E '^(HC_|HERDR_)' || true); do echo "unset $v"; done
+  for v in "${I_BLANK[@]}"; do echo "export $v="; done
+  printf 'export HC_SESSION=%q\nexport HERDR_APP_HOME=%q\nexport HERDR_TELEMETRY=0 DO_NOT_TRACK=1 HERDR_APP_NO_SOUND=1\nexport HERDR_RELEASES_URL=%q\n' \
+    "$I_SESSION" "$I_HOME_NATIVE" "$PA_RELEASES_URL"
+  printf 'export WSLENV=%q\n' "$( (IFS=:; echo "${I_BLANK[*]}${I_BLANK[*]:+:}${PA_VARS[*]}") )"
+  printf '# then: %q ... / %q ...\n' "$PA_APP_EXE" "$PA_HC_EXE"
+}
+
+usage() {
+  cat <<'EOF'
+private-app: a private Herdr app instance for testing mods (see README.md)
+  start [--name N] [--mod DIR]... [--layout FILE.json] [--keep-home]   prints the name
+  app N ARGS...        herdr-app with the instance's environment (status, ls, do, check, ...)
+  hc N ARGS...         hc with the instance's environment
+  shot N [FILE]        screenshot, prints its path
+  wait N SECS CMD...   poll until CMD succeeds (CMD: app|hc|shot|status|alive ... or a program)
+  status N             app alive, core alive, layout, errors (exit 0 when all fine)
+  alive N              exit 0 while the private app process exists
+  crashinfo N          Windows Application-error events for herdr-app.exe since start
+  procs N              the instance's processes now
+  stop N|--all [--keep-home]
+  list
+  env N                export lines for ad-hoc use
+EOF
+}
+
+main() {
+  local cmd=${1:-}; shift || true
+  case $cmd in
+    ""|-h|--help|help) usage; return 0 ;;
+  esac
+  [ "$PLAT" != unsupported ] || die "this platform is not supported yet (only WSL driving the Windows app is implemented)"
+  plat init
+  case $cmd in
+    start) cmd_start "$@" ;;
+    app) cmd_app "$@" ;;
+    hc) cmd_hc "$@" ;;
+    shot) cmd_shot "$@" ;;
+    wait) cmd_wait "$@" ;;
+    status) cmd_status "$@" ;;
+    alive) cmd_alive "$@" ;;
+    crashinfo) cmd_crashinfo "$@" ;;
+    procs) cmd_procs "$@" ;;
+    stop) cmd_stop "$@" ;;
+    list) cmd_list ;;
+    env) cmd_env "$@" ;;
+    *) usage >&2; die "unknown command '$cmd'" ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
