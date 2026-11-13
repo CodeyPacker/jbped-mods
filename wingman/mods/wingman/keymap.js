@@ -12,7 +12,9 @@ export const ACTIONS = [
   { id: "rejectFile", label: "Reject file", group: "Review", scope: "pane", keys: ["ctrl-shift-backspace"] },
   { id: "nextChange", label: "Next change", group: "Review", scope: "pane", keys: ["ctrl-down"] },
   { id: "prevChange", label: "Previous change", group: "Review", scope: "pane", keys: ["ctrl-up"] },
-  { id: "comment", label: "Comment on the selection or change", group: "Review", scope: "pane", keys: ["ctrl-m"] },
+  { id: "comment", label: "Ask the agent now about the selection or change", group: "Review", scope: "pane", keys: ["ctrl-m"] },
+  { id: "addComment", label: "Add a review comment on the selection, line or change", group: "Review", scope: "pane", keys: ["alt-m"] },
+  { id: "commentList", label: "Review comments: list them, send them to the agent", group: "Review", scope: "pane", keys: ["alt-shift-m"] },
   { id: "reason", label: "Comment on the last rejection", group: "Review", scope: "pane", keys: ["ctrl-r"] },
   // Files and views
   { id: "nextFile", label: "Next file", group: "Files and views", scope: "pane", keys: ["ctrl-shift-down"] },

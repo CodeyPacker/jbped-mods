@@ -9,7 +9,10 @@
 // never overwrites someone else's edit: the view reports it and reloads.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, ScrollHandle, TextareaState, Textarea, InputState, Input } from "gpui-base";
-import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, machines, agents, terminals, appHome, exec, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared } from "herdr";
+import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, machines, agents, terminals, appHome, exec, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared, hc } from "herdr";
+import * as fs from "fs/promises";
+import { MAX_BATCH, MAX_TEXT as MAX_COMMENT, makeComment, checkText, addComment, editComment, deleteComment, clearComments, undoClear, relocateFile, spansOn, snippetOf, loadComments, updateComments } from "./comments.js";
+import { buildPrompt, chooseTarget, isWslArgv, promptProblem } from "./commentprompt.js";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
 import { Store, PlainRoot, norm, shows, MAX_TEXT } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
@@ -48,7 +51,7 @@ import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 
-const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 3; // Reject, Accept, Prompt
+const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment)
 const base = (p) => p.split("/").pop();
 const SROW = 22; // a Search result row's height
 const TOK_CHARS = 4e6; // the highlight cache's texts, in characters (tok)
@@ -115,6 +118,50 @@ const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's
 // (every shown copy gets the menu's command); FILEOP tells the other copies what was renamed or deleted.
 const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
 
+// Review comments (comments.js): one file per space under data/wingman/comments, written compare-and-swap.
+// COMMENTS ({ "<space>": stamp }) tells every copy, the dialogs too, that a space's file changed;
+// CMT_JUMP asks a pane copy (no panel view) to open a comment's place.
+const COMMENTS = "wingman.comments", CMT_JUMP = "wingman.commentJump";
+const cmtDir = () => `${appHome()}/data/wingman`;
+const cmtIo = {
+  read: (p) => readTextFile(p),
+  write: (p, text, expected) => writeTextFile(p, text, expected),
+  mkdir: (d) => fs.mkdir(d, { recursive: true }).catch(() => {}),
+};
+
+/** Marks a space's comments as changed for every copy (never cleared: a stamp per space, newest 64 kept). */
+function bumpComments(space) {
+  const all = { ...(shared(COMMENTS) ?? {}) };
+  all[space] = Math.max(Date.now(), (all[space] ?? 0) + 1);
+  setShared(COMMENTS, Object.fromEntries(Object.entries(all).sort((a, b) => b[1] - a[1]).slice(0, 64)));
+}
+
+/** Applies `op` to a space's comments file (retrying on a conflicting write) and tells the copies. */
+async function changeComments(space, op) {
+  const r = await updateComments(cmtIo, cmtDir(), space, op);
+  if (r.changed) bumpComments(space);
+  return r.state;
+}
+
+/** Opens a comment's file at its line: in the Edit panel, else the Review panel, else a pane copy (CMT_JUMP). */
+function jumpTo(c) {
+  const at = { line: Math.max(0, c.start - 1), col: 0 };
+  for (const view of ["edit", "review"]) {
+    if (!hasView(view)) continue;
+    showView(view);
+    setShared(GOTO, { view, space: c.space, key: c.key, at, stamp: Date.now() });
+    return;
+  }
+  setShared(CMT_JUMP, { space: c.space, root: c.root, rel: c.rel, line: at.line, stamp: Date.now() });
+}
+
+/** An agent as the comments dialog names it. */
+function agentLabel(a) {
+  if (!a) return "the agent";
+  const tab = a.tab_name || (a.tab_index != null ? `tab ${a.tab_index + 1}` : "");
+  return `${a.program?.name ?? a.app ?? "Agent"}${tab ? ` · ${tab}` : ""} · ${a.address}`;
+}
+
 /** Whether the layout has a Wingman panel copy for `view`. */
 function hasView(view) {
   const walk = (n) => !!n && ((n.content?.mod === "wingman" && n.content.props?.view === view) || (n.children ?? []).some(walk));
@@ -159,6 +206,8 @@ export default class Review extends View {
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
     this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
+    // Review comments per space (comments.js), loaded from their file when COMMENTS says it changed.
+    this.cmts = new Map(); this.cmtSeen = new Map(); this.jumpSeen = Date.now(); this.anchorSeen = new Map();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
     this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
@@ -178,6 +227,8 @@ export default class Review extends View {
             prompt: ["comment", () => this.askPrompt(this.current, cx)],
             // Reject, then open the reason popup for that rejection right away.
             rejectReason: ["reject", () => this.decide("reject", cx, true)],
+            // Reject the current change, then add a review comment on where it was.
+            rejectComment: ["reject", () => this.rejectWithComment(cx)],
             clear: [null, () => this.clearSelection(cx)],
             // The settings popup saved a change.
             settings: [null, async () => { this.settings = await loadSettings(); this.setKeymap(await loadKeys()); }],
@@ -202,6 +253,7 @@ export default class Review extends View {
     cx.timer.every(1000, () => crumb(`alive ${this.view ?? this.mode} leader=${!!this.loop.isLeader}`, null, ALIVE_MS)); // crash breadcrumbs: every copy, first 10 s after Changes shows
     cx.timer.every(250, (cx) => {
       crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
+      this.syncComments(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
         const f = this.file();
@@ -225,6 +277,7 @@ export default class Review extends View {
     cx.timer.every(1000, () => { if (this.loop.isLeader) { this.loop.lease(); this.loop.publishCaptureErrors(); } });
     cx.timer.every(3000, (cx) => this.loop.collectAll(cx));
     cx.timer.every(STATS_MS, () => this.logStats());
+    cx.timer.every(1000, (cx) => this.anchorComments(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
     // so a 2 s content check is what catches outside edits. "#index" keeps the index
@@ -1241,6 +1294,17 @@ export default class Review extends View {
           // Changes: a row still loading goes to the line once its hunks are in (loadRow).
           if (f?.lazy && g.at) this.gotoLine = { key: f.key, line }; else this.toLine(f, line);
         }
+        cx.notify();
+      }
+    }
+    // The comments dialog's Jump, when the layout has no Edit or Review panel: a pane copy opens it in Edit.
+    const j = !this.view && shared(CMT_JUMP);
+    if (j && j.stamp > this.jumpSeen) {
+      this.jumpSeen = j.stamp;
+      if (j.space === this.spaceId) {
+        const store = this.stores.find((st) => st.root === j.root);
+        if (!store) this.error = "That comment's folder isn't open in this space";
+        else { if (this.mode !== "edit") this.setMode("edit", cx); cx.spawn(async (cx) => this.openFile(store, j.rel, cx, { line: j.line, col: 0 })); }
         cx.notify();
       }
     }
@@ -2635,6 +2699,7 @@ export default class Review extends View {
     if (x >= GUTTER + BTN_GAP && x < GUTTER + BTN_GAP + BTN_W) this.hunk("reject", i, cx);
     else if (x >= GUTTER + 2 * BTN_GAP + BTN_W && x < GUTTER + 2 * (BTN_GAP + BTN_W)) this.hunk("accept", i, cx);
     else if (x >= GUTTER + 3 * BTN_GAP + 2 * BTN_W && x < GUTTER + 3 * (BTN_GAP + BTN_W)) this.askPrompt(i, cx);
+    else if (x >= GUTTER + 4 * BTN_GAP + 3 * BTN_W && x < GUTTER + 4 * (BTN_GAP + BTN_W)) this.commentHunk(i, cx);
     else { this.current = i; cx.notify(); }
   }
 
@@ -2818,6 +2883,144 @@ export default class Review extends View {
     if (!f.hunks[i]) return;
     this.current = i;
     this.openForm({ form: "prompt", terminal, file, where: this.where(f.hunks[i]) });
+  }
+
+  // ---- review comments (comments.js, commentprompt.js) ------------------------
+  // Kept per space in a file; added here, listed and sent to an agent from the comments dialog.
+
+  /** The shown space's comments. */
+  comments() { return this.cmts.get(this.spaceId)?.comments ?? []; }
+
+  /** A hunk header's note of the comments on its lines ("" when none); cmtSpans is the shown file's, set by render. */
+  hunkComments(f, i) {
+    const h = f.hunks[i];
+    if (!h || !this.cmtSpans?.length) return "";
+    const b = h.n + Math.max(1, h.nc) - 1, n = this.cmtSpans.filter((s) => s.b >= h.n && s.a <= b).length;
+    return n ? ` · ${n} comment${n === 1 ? "" : "s"}` : "";
+  }
+
+  /** Every 250 ms: (re)loads the shown space's comments when their file changed (COMMENTS). */
+  syncComments(cx) {
+    const space = this.spaceId;
+    if (!space || this.cmtLoading) return;
+    const stamp = shared(COMMENTS)?.[space] ?? 0;
+    if (this.cmts.has(space) && this.cmtSeen.get(space) === stamp) return;
+    this.cmtLoading = true; this.cmtSeen.set(space, stamp);
+    cx.spawn(async (cx) => {
+      try { this.cmts.set(space, await loadComments(cmtIo, cmtDir(), space)); }
+      catch (e) { log(`comments: ${e.message ?? e}`); this.cmts.set(space, { v: 1, comments: [], undo: null }); }
+      finally { this.cmtLoading = false; }
+      cx.notify();
+    });
+  }
+
+  /**
+   * Every second: comments on a loaded file follow its saved text (relocateFile: by their snippet,
+   * nearest to the old line; not found: "moved or changed"). Only files whose text changed are looked at.
+   */
+  anchorComments(cx) {
+    if (this.mode === "changes" || this.anchoring || this.form) return;
+    const space = this.spaceId, st = this.cmts.get(space);
+    if (!st?.comments.length) return;
+    const work = [];
+    for (const f of this.files) {
+      if (f.lazy || f.error || f.committed || !st.comments.some((c) => c.key === f.key)) continue;
+      const text = typeof f.diskC === "string" ? f.diskC : f.Ctext, seen = this.anchorSeen.get(f.key);
+      if (typeof text !== "string" || (seen && seen.text === text && seen.state === st)) continue;
+      if (relocateFile(st, f.key, text) === st) this.anchorSeen.set(f.key, { text, state: st });
+      else work.push([f.key, text]);
+    }
+    if (!work.length) return;
+    this.anchoring = true;
+    cx.spawn(async (cx) => {
+      try {
+        const next = await changeComments(space, (s) => work.reduce((acc, [key, text]) => relocateFile(acc, key, text), s));
+        this.cmts.set(space, next); this.cmtSeen.set(space, shared(COMMENTS)?.[space] ?? 0);
+      } catch (e) { log(`comments: ${e.message ?? e}`); }
+      finally { this.anchoring = false; }
+      cx.notify();
+    });
+  }
+
+  /** A comment draft on file f's lines [a, b] (0-based, the current text): everything but its text. */
+  commentDraft(f, a, b, extra = {}) {
+    const lines = linesOf(f), root = f.store?.root ?? null;
+    const onChange = f.hunks.some((h) => a <= h.n + Math.max(1, h.nc) - 1 && b >= h.n);
+    return { space: this.spaceId, path: f.path, root, rel: f.rel, key: f.key, on: f.store?.on ?? null, repo: f.store?.label ?? (root ? base(root) : null),
+      as: f.as ?? null, start: a + 1, end: b + 1, snippet: snippetOf(lines, a, b - a + 1), by: onChange ? f.by ?? null : null, kind: "line", ...extra };
+  }
+
+  /** The lines a comment is on: the selection's lines of the current file, else the cursor's, else the current change's. */
+  commentSpan(f) {
+    const last = Math.max(0, linesOf(f).length - 1), clamp = (n) => Math.max(0, Math.min(n, last));
+    const sel = this.selection(f);
+    if (sel) {
+      const rows = this.rowsOf(f), lines = rows.slice(sel[0], sel[1] + 1).filter((r) => r.side === "new" && !r.cont).map((r) => r.line);
+      if (lines.length) return [Math.min(...lines), Math.max(...lines)];
+      // Only removed lines selected: the line where they were.
+      const next = rows.slice(sel[1] + 1).find((r) => r.side === "new");
+      return next ? [next.line, next.line] : [last, last];
+    }
+    if (this.cur) return [clamp(this.cur.line), clamp(this.cur.line)];
+    const h = f.hunks[this.current];
+    return h ? [clamp(h.n), clamp(h.n + Math.max(1, h.nc) - 1)] : null;
+  }
+
+  /** Why a comment can't be added to the shown space now, or null. */
+  commentBlocked(f) {
+    if (!f || f.error || typeof f.Ctext !== "string") return "Open a file to comment on";
+    if (this.mode === "changes") return "Add comments in Review or Edit";
+    if (this.comments().length >= MAX_BATCH) return `A space holds at most ${MAX_BATCH} comments: send or delete some first (${this.kl("commentList")})`;
+    return null;
+  }
+
+  /** alt-m: a comment on the selection, the cursor's line, or the current change. */
+  commentHere(cx) {
+    const f = this.file(), why = this.commentBlocked(f);
+    if (why) { this.error = why; cx.notify(); return; }
+    const span = this.commentSpan(f);
+    if (!span) { this.error = "Put the cursor on a line, or select lines, to comment on"; cx.notify(); return; }
+    this.openCommentForm(this.commentDraft(f, span[0], span[1]));
+  }
+
+  /** A hunk's Comment button: a comment on its lines (a removal: the line after it, quoting what was removed). */
+  commentHunk(i, cx) {
+    const f = this.file(), h = f?.hunks[i], why = this.commentBlocked(f);
+    if (!h) return;
+    this.current = i;
+    if (why) { this.error = why; cx.notify(); return; }
+    const last = Math.max(0, linesOf(f).length - 1), a = Math.min(h.n, last), b = Math.max(a, Math.min(h.n + h.nc - 1, last));
+    const removal = h.nc ? {} : { snippet: snippetOf(f.B, h.o, h.oc), anchor: snippetOf(linesOf(f), a, 1) };
+    this.openCommentForm(this.commentDraft(f, a, b, { kind: "hunk", by: f.by ?? null, ...removal }));
+    cx.notify();
+  }
+
+  /**
+   * Reject the current change, then a comment on where it was: its snippet is the rejected new text
+   * (what the agent wrote), and it is found again by the original lines put back.
+   */
+  rejectWithComment(cx) {
+    const f = this.file(), i = this.current, h = f?.hunks[i], why = this.commentBlocked(f);
+    if (!h) return;
+    if (why) { this.error = why; cx.notify(); return; }
+    const draft = this.commentDraft(f, h.n, h.n, {
+      kind: "rejected", by: f.by ?? null, end: h.n + Math.max(1, h.oc),
+      snippet: snippetOf(f.C, h.n, h.nc),
+      anchor: h.oc ? snippetOf(f.B, h.o, h.oc) : snippetOf(f.C, h.n + h.nc, 1),
+    });
+    this.hunk("reject", i, cx);
+    if (this.files.includes(f)) return; // not rejected (a conflict, or unsaved edits elsewhere): this.error says why
+    this.openCommentForm(draft);
+  }
+
+  openCommentForm(draft) {
+    openOverlay({ mod: "wingman", props: { form: "comment", space: draft.space, draft }, kind: "dialog", width: 560, height: 300 });
+  }
+
+  /** The header's Comments count and alt-shift-m: the comments dialog for the shown space. */
+  openCommentList() {
+    if (!this.spaceId) return;
+    openOverlay({ mod: "wingman", props: { form: "comments", space: this.spaceId }, kind: "dialog", width: 700, height: 560 });
   }
 
   // ---- line selection ------------------------------------------------------
@@ -3918,6 +4121,7 @@ export default class Review extends View {
       acceptFile: () => this.wholeFile("accept", cx), rejectFile: () => this.wholeFile("reject", cx),
       nextChange: () => this.step(1, cx), prevChange: () => this.step(-1, cx),
       comment: () => this.askPrompt(this.current, cx), reason: () => this.askReason(cx),
+      addComment: () => this.commentHere(cx), commentList: () => this.openCommentList(),
       nextFile: () => this.stepFile(1, cx), prevFile: () => this.stepFile(-1, cx),
       quickOpen: () => this.openQuick(cx), toggleView: () => this.setMode(this.nextView(), cx),
       toggleTree: () => this.toggleTree(cx), openInVSCode: () => this.toVSCode(cx), toggleWrap: () => this.toggleWrap(cx),
@@ -4020,6 +4224,8 @@ export default class Review extends View {
       if (this.form.machine) this.hookAction(null, cx);
       return;
     }
+    if (this.form.form === "comment") return this.initCommentForm(cx);
+    if (this.form.form === "comments") return this.initCommentList(cx);
     this.text = "";
     // A text area: Enter adds a line, Ctrl+Enter sends (also caught on the form, in case the
     // text area doesn't report it as a submit).
@@ -4077,6 +4283,255 @@ export default class Review extends View {
           .on_click((_e, cx) => this.submitForm(cx)).child("Send  Ctrl+⏎")));
   }
 
+  // ---- review comment dialogs (forms "comment" and "comments") ------------------
+  // Their own copies of the mod: they read and write the space's comments file themselves and tell
+  // the pane copies through COMMENTS.
+
+  initCommentForm(cx) {
+    this.text = this.form.text ?? "";
+    // One line: Enter saves (submit), Esc cancels.
+    this.input = InputState.new({ placeholder: "What should the agent change here?", value: this.text });
+    this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.formError = null; cx.notify(); });
+    this.input.on("submit", (_e, cx) => this.saveComment(cx));
+    this.input.focus();
+    cx.timer.after(300, () => this.input.focus());
+    this.formHandle = cx.focus_handle();
+  }
+
+  saveComment(cx) {
+    const { space, draft, id, overlay } = this.form;
+    if (this.sending) return;
+    const made = id ? checkText(this.text) : makeComment(draft, this.text);
+    if (made.error) { this.formError = made.error; cx.notify(); return; }
+    this.sending = true; cx.notify();
+    // Write first, close after: closing ends this copy, and its unfinished work with it.
+    cx.spawn(async (cx) => {
+      try {
+        await changeComments(space, (s) => (id ? editComment(s, id, this.text) : addComment(s, made.comment)));
+        closeOverlay(overlay);
+      } catch (e) { this.formError = String(e.message ?? e); this.sending = false; cx.notify(); }
+    });
+  }
+
+  /** Where a comment is, as the dialogs show it: its file in the repo and its lines. */
+  commentWhere(c, repo = false) {
+    return `${repo && c.repo ? `${c.repo} · ` : ""}${c.rel ?? c.path ?? ""}:${c.start === c.end ? c.start : `${c.start}-${c.end}`}`;
+  }
+
+  snippetBox(id, lines, t) {
+    return v_flex().id(id).flex_none().px(8).py(4).rounded(6).bg(t.background).font_family(settings().font_family ?? "JetBrains Mono").text_size(11).text_color(t.muted)
+      .children(lines.map((l, i) => div().id(`${id}-${i}`).w_full().min_w(0).truncate().child(`> ${l}`)));
+  }
+
+  renderCommentForm() {
+    const t = theme(), { draft, id, overlay } = this.form, d = draft ?? {}, n = this.text.trim().length;
+    const title = id ? "Edit review comment" : d.kind === "rejected" ? "Rejected: tell the agent why" : "Add review comment";
+    return v_flex().id("comment-form").track_focus(this.formHandle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
+      .size_full().min_h(0).p(18).gap(8).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().child(div().flex_1().text_size(15).font_semibold().child(title)).child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().flex_none().text_size(11.5).text_color(t.muted).truncate().child(`${this.commentWhere(d, true)}${d.kind === "rejected" ? " · the change you rejected" : ""}`))
+      .when(!!d.snippet?.length, (e) => e.child(this.snippetBox("comment-snippet", d.snippet, t)))
+      .child(div().flex_none().child(Input.new(this.input)))
+      .when(!!this.formError, (e) => e.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(this.formError)))
+      .child(div().flex_1())
+      .child(h_flex().flex_none().items_center().gap(8)
+        .child(div().flex_1().text_size(11).text_color(t.dim).child("Enter saves, Esc cancels. Comments wait in the list (Comments in the header) until you send them to the agent."))
+        .child(div().flex_none().text_size(11).text_color(n > MAX_COMMENT ? t.ansi1 : t.dim).child(`${n}/${MAX_COMMENT}`))
+        .child(div().id("comment-save").flex_none().whitespace_nowrap().h(30).px(14).flex().items_center().rounded(8).bg(t.solid).text_color(t.solid_foreground).text_size(12.5).cursor_pointer()
+          .when(!!this.sending, (e) => e.opacity(0.5)).on_click((_e, cx) => this.saveComment(cx)).child("Save  ⏎")));
+  }
+
+  initCommentList(cx) {
+    this.formHandle = cx.focus_handle(); this.formHandle.focus();
+    this.cs = null; this.cSeen = null; this.branches = new Map(); this.note = null; this.pickList = null; this.confirmTo = null; this.busy = null; this.editing = null;
+    this.editInput = InputState.new({ placeholder: "Comment" });
+    this.editInput.on("submit", (_e, cx) => this.saveEdit(cx));
+    this.loadCommentList(cx);
+    cx.timer.every(400, (cx) => this.loadCommentList(cx));
+  }
+
+  /** Reads the space's comments when they changed (COMMENTS), then each repo's branch for the prompt (once). */
+  loadCommentList(cx) {
+    const space = this.form.space, stamp = shared(COMMENTS)?.[space] ?? 0;
+    if (this.cListLoading || (this.cs && stamp === this.cSeen)) return;
+    this.cListLoading = true; this.cSeen = stamp;
+    cx.spawn(async (cx) => {
+      try { this.cs = await loadComments(cmtIo, cmtDir(), space); }
+      catch (e) { this.note = `Comments not read: ${e.message ?? e}`; this.cs ??= { v: 1, comments: [], undo: null }; }
+      finally { this.cListLoading = false; }
+      cx.notify();
+      for (const c of this.cs.comments) {
+        if (!c.root || this.branches.has(c.root)) continue;
+        this.branches.set(c.root, null);
+        try {
+          const r = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: c.root, on: c.on ?? null, timeout: 5000 });
+          const b = r.code === 0 ? r.stdout.trim() : "";
+          if (b) this.branches.set(c.root, b === "HEAD" ? "detached HEAD" : b);
+        } catch {} // not a git repo (a plain folder), or the machine didn't answer: no branch in the header
+      }
+      cx.notify();
+    });
+  }
+
+  /** Applies `op` to the space's comments from the dialog; `done` is the note shown after. */
+  listChange(op, cx, done = null) {
+    const space = this.form.space;
+    if (this.busy) return;
+    cx.spawn(async (cx) => {
+      try { this.cs = await changeComments(space, op); this.cSeen = shared(COMMENTS)?.[space] ?? 0; this.note = done; }
+      catch (e) { this.note = String(e.message ?? e); }
+      cx.notify();
+    });
+  }
+
+  startEdit(c, cx) { this.editing = c.id; this.editInput.set_value(c.text); this.editInput.focus(); this.note = null; cx.notify(); }
+
+  saveEdit(cx) {
+    const id = this.editing, text = this.editInput.value(), v = checkText(text);
+    if (!id) return;
+    if (v.error) { this.note = v.error; cx.notify(); return; }
+    this.editing = null;
+    this.listChange((s) => editComment(s, id, text), cx);
+    this.formHandle.focus();
+  }
+
+  /** Why Send can't work for this space now, or null: its machine is unreachable. */
+  sendBlocked() {
+    const sp = spaces().find((s) => s.id === this.form.space);
+    if (!sp) return "This space is gone";
+    const m = sp.machine;
+    if (m && machines().find((x) => x.name === m)?.layout === "unavailable") return `${m} isn't reachable now, so its agents can't be sent to`;
+    return null;
+  }
+
+  /** chooseTarget for the dialog's space: { address } | { pick } | { error }. */
+  commentTarget() {
+    const here = agents().filter((a) => a.space === this.form.space);
+    const live = new Set(terminals().filter((x) => x.state === "live").map((x) => x.address));
+    return chooseTarget(this.cs?.comments ?? [], here, live);
+  }
+
+  /** The prompt for `cs`, paths as agent `address` sees them (relative to its folder when inside it). */
+  promptFor(cs, address) {
+    const term = address ? terminals().find((x) => x.address === address) : null;
+    const cwd = address ? panes().find((p) => p.terminal === address)?.cwd ?? term?.cwd ?? null : null;
+    const repos = new Map();
+    for (const c of cs) if (c.root && !repos.has(c.root)) repos.set(c.root, { name: c.repo ?? base(c.root), branch: this.branches.get(c.root) ?? null });
+    return buildPrompt(cs, { repos, cwd, wsl: isWslArgv(term?.argv), target: address });
+  }
+
+  startSend(cx) {
+    if (this.busy || !this.cs?.comments.length) return;
+    const why = this.sendBlocked();
+    if (why) { this.note = why; cx.notify(); return; }
+    const ch = this.commentTarget();
+    this.confirmTo = null; this.pickList = null;
+    if (ch.error) this.note = ch.error;
+    else if (ch.pick) this.pickList = ch.pick.map((a) => a.address);
+    else return this.toTarget(ch.address, cx);
+    cx.notify();
+  }
+
+  /** A working agent asks first (confirmTo); otherwise the comments go now. */
+  toTarget(address, cx) {
+    this.pickList = null;
+    const a = agents().find((x) => x.address === address);
+    if (a && ACTIVE.has(a.status) && this.confirmTo !== address) { this.confirmTo = address; this.note = null; cx.notify(); return; }
+    this.confirmTo = null;
+    this.sendNow(address, cx);
+  }
+
+  sendNow(address, cx) {
+    const space = this.form.space, cs = (this.cs?.comments ?? []).slice(0, MAX_BATCH), ids = cs.map((c) => c.id);
+    if (!cs.length || this.busy) return;
+    const prompt = this.promptFor(cs, address), bad = promptProblem(prompt);
+    if (bad) { this.note = bad; cx.notify(); return; }
+    const who = agentLabel(agents().find((a) => a.address === address) ?? { address }), many = `${cs.length} comment${cs.length === 1 ? "" : "s"}`;
+    this.busy = `Sending ${many} to ${who}…`; this.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      let sent = false;
+      try {
+        // One argument, no shell: hc pastes the text into the agent's terminal and presses Enter.
+        const r = await hc(["send", address, prompt]);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send exited with ${r.code}`).trim().slice(0, 300));
+        sent = true;
+        this.cs = await changeComments(space, (s) => clearComments(s, "sent", Date.now(), ids));
+        this.cSeen = shared(COMMENTS)?.[space] ?? 0;
+        this.note = `Sent ${many} to ${who}. Undo clear puts them back in the list.`;
+      } catch (e) { this.note = sent ? `Sent, but the list wasn't cleared: ${e.message ?? e}` : `Not sent: ${e.message ?? e}`; }
+      this.busy = null; cx.notify();
+    });
+  }
+
+  /** Copy prompt: the prompt on the clipboard, for pasting into an agent by hand. */
+  copyPrompt(cx) {
+    const cs = (this.cs?.comments ?? []).slice(0, MAX_BATCH);
+    if (!cs.length) return;
+    const address = this.commentTarget().address ?? null;
+    cx.write_to_clipboard(this.promptFor(cs, address));
+    this.note = address ? `Prompt copied, paths as ${agentLabel(agents().find((a) => a.address === address) ?? { address })} sees them` : "Prompt copied, with full paths (no single agent to send to)";
+    cx.notify();
+  }
+
+  renderCommentList() {
+    const t = theme(), { overlay } = this.form, cs = this.cs?.comments ?? [], undo = this.cs?.undo ?? null;
+    const multi = new Set(cs.map((c) => c.root)).size > 1, blocked = this.sendBlocked(), mono = settings().font_family ?? "JetBrains Mono";
+    const ch = cs.length ? this.commentTarget() : null, name = (address) => agentLabel(agents().find((a) => a.address === address) ?? { address });
+    const tag = (text, bg) => div().flex_none().px(6).h(18).flex().items_center().rounded(4).bg(bg).text_size(10.5).child(text);
+    const row = (c, i) => v_flex().id(`cm-${c.id}`).flex_none().gap(4).px(10).py(8).rounded(6).bg(t.background)
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(`${i + 1}.`))
+        .child(div().flex_1().min_w(0).truncate().font_family(mono).text_size(11.5).child(this.commentWhere(c, multi)))
+        .when(c.kind === "rejected", (e) => e.child(tag("rejected change", t.ansi1 + "33")))
+        .when(!!c.stale, (e) => e.child(tag("moved or changed", t.ansi3 + "44")))
+        .child(this.button(`cm-jump-${c.id}`, "Jump", t.raised, () => { closeOverlay(overlay); jumpTo(c); }).flex_none())
+        .child(this.button(`cm-edit-${c.id}`, "Edit", t.raised, (cx) => this.startEdit(c, cx)).flex_none())
+        .child(this.button(`cm-del-${c.id}`, "Delete", t.ansi1 + "40", (cx) => this.listChange((s) => deleteComment(s, c.id), cx)).flex_none()))
+      .when(!!c.snippet?.length, (e) => e.child(this.snippetBox(`cm-snip-${c.id}`, c.snippet, t)))
+      .child(this.editing === c.id
+        ? h_flex().gap(6).items_center().child(div().flex_1().min_w(0).child(Input.new(this.editInput)))
+          .child(this.button(`cm-save-${c.id}`, "Save", t.accent + "55", (cx) => this.saveEdit(cx)).flex_none())
+          .child(this.button(`cm-cancel-${c.id}`, "Cancel", t.raised, (cx) => { this.editing = null; this.formHandle.focus(); cx.notify(); }).flex_none())
+        : div().text_size(12.5).whitespace_normal().child(c.text));
+    const off = (b) => b.opacity(0.45);
+    const canSend = cs.length && !blocked && !this.busy && !ch?.error;
+    return v_flex().id("comment-list").track_focus(this.formHandle)
+      .on_key_down((e, cx) => {
+        if (e.key !== "escape") return;
+        if (this.editing) this.editing = null;
+        else if (this.pickList || this.confirmTo) { this.pickList = null; this.confirmTo = null; }
+        else closeOverlay(overlay);
+        this.formHandle.focus(); cx.notify(); cx.stop_propagation();
+      })
+      .size_full().min_h(0).p(16).gap(8).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().gap(8)
+        .child(div().flex_1().text_size(15).font_semibold().child(`Review comments (${cs.length})`))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(!cs.length ? "" : blocked ? blocked
+        : ch?.address ? `Send goes to ${name(ch.address)}${multi ? ", one prompt grouped by repo" : ""}.`
+        : ch?.pick ? "This space has several agents: Send asks which one." : ch?.error ?? ""))
+      .child(v_flex().id("cm-rows").flex_1().min_h(0).gap(6).overflow_y_scrollbar()
+        .children(!this.cs ? [div().id("cm-loading").text_size(12).text_color(t.dim).child("Loading…")]
+          : cs.length ? cs.map(row) : [div().id("cm-none").text_size(12).text_color(t.dim).child("No comments. Add one with Comment on a change in Review, or + Comment (or alt-m) on a line in Edit.")]))
+      .when(!!this.pickList, (e) => e.child(v_flex().flex_none().gap(4).p(8).rounded(6).bg(t.raised)
+        .child(div().text_size(12).child("Send to which agent?"))
+        .children(this.pickList.map((address) => this.button(`cm-pick-${address}`, `${name(address)}${ACTIVE.has(agents().find((a) => a.address === address)?.status) ? " (working)" : ""}`, t.background, (cx) => this.toTarget(address, cx))))
+        .child(this.button("cm-pick-cancel", "Cancel", t.background, (cx) => { this.pickList = null; cx.notify(); }))))
+      .when(!!this.confirmTo, (e) => e.child(h_flex().flex_none().gap(8).items_center().p(8).rounded(6).bg(t.ansi3 + "22")
+        .child(div().flex_1().text_size(12).child(`${name(this.confirmTo)} ${agents().find((a) => a.address === this.confirmTo)?.status === "blocked" ? "is waiting on a question" : "is working"}. Send now anyway? It arrives as your next message.`))
+        .child(this.button("cm-confirm", "Send anyway", t.accent + "55", (cx) => this.toTarget(this.confirmTo, cx)).flex_none())
+        .child(this.button("cm-confirm-no", "Cancel", t.raised, (cx) => { this.confirmTo = null; cx.notify(); }).flex_none())))
+      .when(!!(this.busy || this.note), (e) => e.child(div().flex_none().text_size(12).text_color(this.busy ? t.muted : t.foreground).child(this.busy ?? this.note)))
+      .child(h_flex().flex_none().gap(6).items_center()
+        .when(cs.length > 0, (e) => e.child(this.button("cm-clear", "Clear all", t.ansi1 + "40", (cx) => this.listChange((s) => clearComments(s, "cleared"), cx, "Cleared. Undo clear puts them back.")).flex_none()))
+        .when(!!undo, (e) => e.child(this.button("cm-undo", `Undo clear (${undo.comments.length})`, t.raised, (cx) => this.listChange(undoClear, cx, null)).flex_none()))
+        .child(div().flex_1())
+        .when(cs.length > 0, (e) => e.child(this.button("cm-copy", "Copy prompt", t.raised, (cx) => this.copyPrompt(cx)).flex_none()))
+        .child((canSend ? this.button("cm-send", "Send to agent", t.solid, (cx) => this.startSend(cx)) : off(this.button("cm-send", "Send to agent", t.solid, () => {})))
+          .text_color(t.solid_foreground).flex_none()));
+  }
+
   // ---- selection bar and right-click menu ----------------------------------
 
   /** Floats over the diff while lines are selected, saying what can be done with them. */
@@ -4088,7 +4543,8 @@ export default class Review extends View {
         .when(this.mode !== "changes" && this.picks(f, sel).any, (e) => e
           .child(this.button("sel-reject", `Reject  ${this.kl("reject")}`, t.ansi1 + "55", (cx) => this.selectionAction("reject", cx)))
           .child(this.button("sel-accept", `Accept  ${this.kl("accept")}`, t.ansi2 + "55", (cx) => this.selectionAction("accept", cx))))
-        .child(this.button("sel-prompt", `Comment  ${this.kl("comment")}`, t.ansi4 + "55", (cx) => this.askPrompt(this.current, cx)))
+        .child(this.button("sel-prompt", `Ask  ${this.kl("comment")}`, t.ansi4 + "55", (cx) => this.askPrompt(this.current, cx)))
+        .when(this.mode !== "changes", (e) => e.child(this.button("sel-comment", `Comment  ${this.kl("addComment")}`, t.ansi5 + "55", (cx) => this.commentHere(cx))))
         .child(this.button("sel-clear", "Clear  Esc", t.raised, (cx) => this.clearSelection(cx))));
   }
 
@@ -4106,10 +4562,12 @@ export default class Review extends View {
     // The labels stay short; the selection bar shows when they act on selected lines.
     const selChanges = hasSel && this.picks(f, sel).any && this.mode !== "changes";
     const items = [
-      { cmd: "prompt", label: "Comment", key: this.kl("comment") },
+      { cmd: "prompt", label: "Ask agent now", key: this.kl("comment") },
+      ...(this.mode !== "changes" ? [{ cmd: "addComment", label: "Add review comment", key: this.kl("addComment") }] : []),
       ...((inHunk && this.mode !== "changes") || selChanges ? [
         { cmd: "reject", label: "Reject", key: this.kl("reject") },
         { cmd: "rejectReason", label: "Reject with comment…", key: "" },
+        ...(inHunk && !selChanges ? [{ cmd: "rejectComment", label: "Reject and add review comment…", key: "" }] : []),
         { cmd: "accept", label: "Accept", key: this.kl("accept") },
       ] : []),
       ...(this.lastReject ? [{ cmd: "reason", label: "Comment last rejection", key: this.kl("reason") }] : []),
@@ -4316,9 +4774,12 @@ export default class Review extends View {
         .child(div().w(GUTTER).flex_none())
         .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi1 + (current ? "99" : "55")).text_size(11).child(`Reject  ${this.kl("reject")}`))
         .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi2 + (current ? "99" : "55")).text_size(11).child(`Accept  ${this.kl("accept")}`))
-        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi4 + (current ? "77" : "40")).text_size(11).child(`Comment  ${this.kl("comment")}`))
-        .child(div().flex_1().pl(8).text_color(t.dim).text_size(11).child(`change ${r.hunk + 1} of ${f.hunks.length}`));
+        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi4 + (current ? "77" : "40")).text_size(11).child(`Ask  ${this.kl("comment")}`))
+        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi5 + (current ? "77" : "40")).text_size(11).child(`Comment  ${this.kl("addComment")}`))
+        .child(div().flex_1().pl(8).text_color(t.dim).text_size(11).child(`change ${r.hunk + 1} of ${f.hunks.length}${this.hunkComments(f, r.hunk)}`));
     }
+    // A line with a review comment on it: its number on a tinted background (paler when the comment's code moved or changed).
+    const cm = r.side === "new" && !r.cont ? (this.cmtSpans ?? []).find((s) => r.line >= s.a && r.line <= s.b) : null;
     const spans = expandTabs(spansOf((r.side === "old" ? f.oldTok : f.newTok)?.[r.line]));
     const text = r.side === "new" ? body(linesOf(f)[r.line]) : r.seg ? body(f.B[r.line]) : "";
     // E5: a wrapped segment shows its own columns, after the wrapping indent.
@@ -4345,7 +4806,7 @@ export default class Review extends View {
     return h_flex().w_full().h(ROW).flex_none().whitespace_nowrap()
       .when(r.kind === "+", (e) => e.bg(t.ansi2 + "22")).when(r.kind === "-", (e) => e.bg(t.ansi1 + "22"))
       .when(selected, (e) => e.bg(t.selection).border_l(2).border_color(t.accent))
-      .child(div().w(44).flex_none().pr(8).text_right().text_color(onLine ? t.foreground : t.dim).child(r.cont ? "" : String(r.num)))
+      .child(div().w(44).flex_none().pr(8).text_right().text_color(onLine || cm ? t.foreground : t.dim).when(!!cm, (e) => e.bg(t.ansi5 + (cm.stale ? "26" : "55"))).child(r.cont ? "" : String(r.num)))
       .child(div().w(14).flex_none().text_color(r.kind === "+" ? t.ansi2 : r.kind === "-" ? t.ansi1 : t.dim).child(r.kind === " " || r.cont ? "" : r.kind))
       .child(div().flex_1().h_full().relative().overflow_hidden()
         .children(hits.map((k) => { const [a, b] = clip(found.ms[k].from, found.ms[k].to); return div().absolute().top(1).h(ROW - 2).rounded(2).left(x(a)).w(Math.max(2, x(b) - x(a)))
@@ -4363,6 +4824,8 @@ export default class Review extends View {
     if (this.form?.form === "menu") return this.renderMenu();
     if (this.form?.form === "settings") return this.renderSettings();
     if (this.form?.form === "keys") return this.renderKeys();
+    if (this.form?.form === "comment") return this.renderCommentForm();
+    if (this.form?.form === "comments") return this.renderCommentList();
     if (this.form) return this.renderForm();
     if (this.view === "changes") { // crash breadcrumbs: the first render after shown, and the first after the list is set
       if (!this.crumbRendered) { this.crumbRendered = true; crumb(`render: first Changes render after shown (list set=${this.changeSig != null})`, "changes"); }
@@ -4372,6 +4835,8 @@ export default class Review extends View {
     const tag = (x) => x.created ? "new" : x.Ctext === null ? "deleted" : `${x.hunks.length}`;
     const rows = f ? this.rowsOf(f) : [], sel = f ? this.selection(f) : null, lsel = f ? this.lineSel(f) : null;
     this.bm = f ? this.bracketPair(f) : null; // D2: read by row()
+    const ncomments = this.comments().length;
+    this.cmtSpans = f && ncomments ? spansOn(this.comments(), f.key) : []; // read by row()
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine();
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
@@ -4389,6 +4854,8 @@ export default class Review extends View {
         .when(total > 0 && this.mode === "review", (e) => e
           .child(this.button("reject-all", "Reject all files", t.ansi1 + "55", (cx) => this.everything("reject", cx)))
           .child(this.button("accept-all", "Accept all files", t.ansi2 + "55", (cx) => this.everything("accept", cx))))
+        // Review comments: the count opens the list (send to the agent, jump, edit, delete).
+        .when(!!this.spaceId, (e) => e.child(this.button("comments", `Comments ${ncomments}  ${this.kl("commentList")}`, ncomments ? t.ansi5 + "55" : t.raised, () => this.openCommentList()).flex_none().whitespace_nowrap()))
         .child(this.button("settings", "⚙ Settings", t.raised, () => this.openSettings()).flex_none()))
       // A failing repo's capture (the leader's, shared): a warning row each, the rest of the view works.
       .children(captureNotices(shared(CAPTURE_ERRORS), this.spaceId, this.stores.map(idOf), Date.now()).map((n, i) =>
@@ -4415,6 +4882,8 @@ export default class Review extends View {
         .when(vis.length > 1 && this.mode !== "changes", (e) => e.child(div().flex_none().whitespace_nowrap().text_size(10).text_color(t.dim).px(6).child(`${vis.findIndex((x) => x.key === this.sel) + 1}/${vis.length} · ${this.kl("prevFile")}/${this.kl("nextFile")}`)))
         .when(!!f && this.nvim(), (e) => e.child(this.button("nvim", `Neovim  ${this.kl("openInNvim")}`, t.raised, (cx) => this.toNvim(f, f.hunks[this.current]?.n ?? 0, cx)).flex_none().whitespace_nowrap()))
         .when(this.dirty(f), (e) => e.child(this.button("save", `Save  ${this.kl("save")}`, t.accent + "55", (cx) => this.save(cx)).flex_none().whitespace_nowrap()))
+        // A review comment on the cursor's line or the selection (Review also has one on each change).
+        .when(!!f && this.mode === "edit" && this.editable(f), (e) => e.child(this.button("add-comment", `+ Comment  ${this.kl("addComment")}`, t.ansi5 + "40", (cx) => this.commentHere(cx)).flex_none().whitespace_nowrap()))
         // Only a file with the agent's changes (an opened file's own edits aren't the agent's).
         .when(this.mode === "changes" && !!f && !f.committed, (e) => this.discardKey === f.key
           ? e.child(this.button("discard-yes", "Discard all changes to this file", t.ansi1 + "88", (cx) => this.discard(f, cx)).flex_none().whitespace_nowrap())
