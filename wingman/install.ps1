@@ -208,7 +208,7 @@ function Patch-Layout([string]$src, [string]$dst, [string]$bak, [string]$cloned)
     }
     if ($has) { continue }
     if ($idTaken) { Say "  note: a block with id $bid exists but is not Wingman's; skipped"; continue }
-    $blk = [ordered]@{ id = $bid; type = "block"; content = ([ordered]@{ mod = "wingman"; props = ([ordered]@{ view = $view }) }) }
+    $blk = [ordered]@{ id = $bid; type = "block"; content = ([ordered]@{ mod = "wingman"; props = ([ordered]@{ view = $view; added = $true }) }) }
     [void]$stack["children"].Add($blk)
     $acts += "add block $bid to panel-body"
   }
@@ -222,12 +222,22 @@ function Patch-Layout([string]$src, [string]$dst, [string]$bak, [string]$cloned)
   if ($null -eq $tabs) {
     Say "  note: no tabs block found; Wingman's panel buttons need a tabs block using mod tabs-plus"
   } elseif ($tabs["content"]["mod"] -eq "tabs") {
+    # Each edit is kept in the node, so Unpatch-Layout undoes exactly it: the old mod in props.replaces,
+    # the old max in props.max_was on the first Wingman block.
     $tabs["content"]["mod"] = "tabs-plus"
+    if (-not ($tabs["content"]["props"] -is [System.Collections.IDictionary])) { $tabs["content"]["props"] = [ordered]@{} }
+    $tabs["content"]["props"]["replaces"] = "tabs"
     $acts += "point block $($tabs['id']) at tabs-plus"
   }
   if ($null -ne $parent -and $parent.Contains("max") -and (Is-Number $parent["max"]) -and $parent["max"] -lt $MAXPX) {
-    $acts += "raise max of $($parent['id']) from $($parent['max']) to $MAXPX"
-    $parent["max"] = $MAXPX
+    $mark = $null
+    foreach ($c in $stack["children"]) { if ($null -eq $mark -and $c -is [System.Collections.IDictionary] -and (Is-Wing $c "")) { $mark = $c } }
+    if ($null -ne $mark) {
+      $acts += "raise max of $($parent['id']) from $($parent['max']) to $MAXPX"
+      if (-not ($mark["content"]["props"] -is [System.Collections.IDictionary])) { $mark["content"]["props"] = [ordered]@{} }
+      if (-not $mark["content"]["props"].Contains("max_was")) { $mark["content"]["props"]["max_was"] = $parent["max"] }
+      $parent["max"] = $MAXPX
+    } else { Say "  note: max of $($parent['id']) left as it is: no Wingman block to keep the old value in" }
   }
   $clone = ($src -ne $dst)
   if ($clone -and -not $root.Contains("cloned_from")) {
@@ -235,6 +245,15 @@ function Patch-Layout([string]$src, [string]$dst, [string]$bak, [string]$cloned)
     foreach ($f in (Get-ChildItem -LiteralPath (Split-Path -Parent $src) -Filter "*.json" -File)) {
       try { $o = [System.IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json } catch { continue }
       if ($o.cloned_from -and $o.cloned_from.name -eq $cloned -and $o.cloned_from.version) { $cf["version"] = $o.cloned_from.version; break }
+    }
+    if (-not $cf.Contains("version")) {
+      # Herdr refuses a cloned_from without a version. The app's own layout.clone is preferred
+      # (see Install-Layout); this is the offline fallback: the app version that last ran.
+      $v = $null
+      try { $v = ([System.IO.File]::ReadAllText((Join-Path (Split-Path -Parent (Split-Path -Parent $src)) "update-notes.json")) | ConvertFrom-Json).last_run } catch { }
+      if ($v -isnot [string] -or -not $v) { $v = "0.0.0" }
+      $cf["version"] = $v
+      Say "  note: $cloned has no cloned_from.version to copy; wrote $v (the app's own clone is better: Duplicate layout)"
     }
     $new = [ordered]@{}
     foreach ($k in $root.Keys) {
@@ -262,6 +281,19 @@ function Unpatch-Layout([string]$path, [string]$bak) {
   $root = $L.Root
   $ids = $WING | ForEach-Object { $_[0] }
   $acts = @()
+  # The max Wingman raised goes back, unless the person changed it since.
+  $e = Find-Stack $root
+  if ($e) {
+    foreach ($c in $e[0]["children"]) {
+      if ($c -is [System.Collections.IDictionary] -and (Is-Wing $c "") -and ($c["content"]["props"] -is [System.Collections.IDictionary]) -and $c["content"]["props"].Contains("max_was")) {
+        if ($null -ne $e[1] -and $e[1]["max"] -eq $MAXPX) {
+          $e[1]["max"] = $c["content"]["props"]["max_was"]
+          $acts += "put the max of $($e[1]['id']) back to $($c['content']['props']['max_was'])"
+        }
+        break
+      }
+    }
+  }
   foreach ($x in (Get-Nodes $root)) {
     $n = $x[0]
     if ($n["children"] -is [System.Collections.IList]) {
@@ -280,8 +312,12 @@ function Unpatch-Layout([string]$path, [string]$bak) {
       }
     }
     $c = $n["content"]
-    if ($n["type"] -eq "block" -and ($c -is [System.Collections.IDictionary]) -and $c["mod"] -eq "tabs-plus") {
+    # Only a block Wingman switched (it kept the old mod in props.replaces) goes back.
+    if ($n["type"] -eq "block" -and ($c -is [System.Collections.IDictionary]) -and $c["mod"] -eq "tabs-plus" `
+        -and ($c["props"] -is [System.Collections.IDictionary]) -and $c["props"]["replaces"] -eq "tabs") {
       $c["mod"] = "tabs"
+      $c["props"].Remove("replaces")
+      if ($c["props"].Count -eq 0) { $c.Remove("props") }
       $acts += "point block $($n['id']) back at tabs"
     }
   }
@@ -310,6 +346,56 @@ function Get-LayoutStatus([string]$path) {
   }
   $st = "no"; if ($e) { $st = "yes" }
   return @{ Stack = $st; Blocks = $n; Tabs = $tabs; Text = "stack=$st blocks=$n tabs=$tabs" }
+}
+
+# Removes Wingman's bindings ("wingman.*" values) from the mod:wingman section of keys.json.
+function Remove-WingmanKeys([string]$path, [string]$bak) {
+  $L = Read-Layout $path
+  $sec = $L.Root["mod:wingman"]
+  if (-not ($sec -is [System.Collections.IDictionary])) { $script:res = "unchanged"; return }
+  $mine = @($sec.Keys | Where-Object { $sec[$_] -is [string] -and $sec[$_].StartsWith("wingman.") })
+  if ($mine.Count -eq 0) { $script:res = "unchanged"; return }
+  foreach ($k in $mine) { Act "remove binding $k from keys.json"; $sec.Remove($k) }
+  if ($sec.Count -eq 0) { $L.Root.Remove("mod:wingman") }
+  if (-not $DryRun) { Say "  back up to $(Backup-File $path $bak)"; Write-Layout $path $L $L.Root }
+  $script:res = "changed"
+}
+
+function Reset-PanelSetting([string]$path) {
+  if (-not (Test-Path -LiteralPath $path)) { $script:res = "unchanged"; return }
+  $L = Read-Layout $path
+  if ($L.Root["hideHerdrPanels"] -ne $true) { $script:res = "unchanged"; return }
+  $L.Root["hideHerdrPanels"] = $false
+  Act "turn off `"Hide Herdr's Files and Changes buttons`" in Wingman's settings"
+  if (-not $DryRun) { Write-Layout $path $L $L.Root }
+  $script:res = "changed"
+}
+
+function Restore-Panels([string]$bak) {
+  $path = Join-Path $home_ "shared.json"
+  if (-not (Test-Path -LiteralPath $path)) { $script:res = "unchanged"; return }
+  $L = Read-Layout $path
+  $d = $L.Root
+  $st = $d["wingman.panelsHidden"]
+  $isList = { param($v) ($v -is [System.Collections.IList]) -and (@($v | Where-Object { $_ -isnot [string] }).Count -eq 0) }
+  if (-not (($st -is [System.Collections.IDictionary]) -and $st["on"] -eq $true -and (& $isList $st["removed"]) -and (& $isList $st["original"]))) { $script:res = "unchanged"; return }
+  $cur = $d["workspace.panels"]
+  if (-not (& $isList $cur)) { $cur = @("files", "changes") }
+  $out = New-Object System.Collections.ArrayList
+  foreach ($c in $cur) { [void]$out.Add($c) }
+  $orig = @($st["original"]); $removed = @($st["removed"])
+  for ($i = 0; $i -lt $orig.Count; $i++) {
+    $name = $orig[$i]
+    if ($removed -notcontains $name -or $out.Contains($name)) { continue }
+    $at = 0
+    for ($j = $i - 1; $j -ge 0; $j--) { if ($out.Contains($orig[$j])) { $at = $out.IndexOf($orig[$j]) + 1; break } }
+    $out.Insert($at, $name)
+  }
+  $d["workspace.panels"] = $out
+  $d["wingman.panelsHidden"] = [ordered]@{ on = $false; removed = (New-Object System.Collections.ArrayList); original = (New-Object System.Collections.ArrayList) }
+  Act "put back $($removed -join ', ') in workspace.panels"
+  if (-not $DryRun) { Say "  back up to $(Backup-File $path $bak)"; Write-Layout $path $L $d }
+  $script:res = "changed"
 }
 
 # Returns @(name, shipped|own|missing).
@@ -395,15 +481,24 @@ function Show-NoStackHelp {
   NoteNext "Add the Wingman blocks to your layout by hand (see above)."
 }
 
+# Runs `herdr-app do NAME JSON` against the app that owns $home_. HERDR_APP_BIN names the program
+# (default herdr-app on PATH). Returns $false when it can't run or fails.
+function App-Do([string]$name, [string]$arg = "") {
+  $bin = $env:HERDR_APP_BIN
+  if (-not $bin) { $c = Get-Command herdr-app -ErrorAction SilentlyContinue; if ($c) { $bin = $c.Source } }
+  if (-not $bin) { return $false }
+  $old = $env:HERDR_APP_HOME
+  try {
+    $env:HERDR_APP_HOME = $home_
+    if ($arg) { & $bin do $name $arg *> $null } else { & $bin do $name *> $null }
+    return ($LASTEXITCODE -eq 0)
+  } catch { return $false } finally { $env:HERDR_APP_HOME = $old }
+}
+
 function Switch-To([string]$name) {
   if ($DryRun) { Act "switch to layout $name"; return }
   $ok = $false
-  if (Get-Command herdr-app -ErrorAction SilentlyContinue) {
-    try {
-      & herdr-app do layout.switch ('{\"name\":\"' + $name + '\"}') *> $null
-      $ok = ($LASTEXITCODE -eq 0)
-    } catch { $ok = $false }
-  }
+  $ok = App-Do "layout.switch" ('{\"name\":\"' + $name + '\"}')
   if ($ok) { Say "  switched to layout $name"; NoteChange "active layout is now $name" }
   else { NoteNext "Switch to the layout `"$name`": ctrl-shift-l, or Settings." }
 }
@@ -418,10 +513,18 @@ function Install-Layout {
   }
   $lay = Join-Path $home_ "layouts"
   if ($kind -eq "shipped") {
-    $target = "$name-wingman"
+    $target = "$name-copy"
+    if ((Test-Path -LiteralPath (Join-Path $lay "$name-wingman.json")) -and -not (Test-Path -LiteralPath (Join-Path $lay "$target.json"))) { $target = "$name-wingman" } # an earlier install's copy
     Say "  active layout `"$name`" is shipped (read-only); using the copy `"$target`""
     $tp = Join-Path $lay "$target.json"
-    if (Test-Path -LiteralPath $tp) { Patch-Layout $tp $tp "$tp.bak-$ts" $name }
+    if ($name -notmatch '^[A-Za-z0-9._ -]+$') { Die "layout name `"$name`" has characters this installer won't pass on; rename the layout" }
+    # Herdr's own clone first (it records cloned_from with the right version and switches to the copy).
+    $fresh = $false
+    if (-not (Test-Path -LiteralPath $tp) -and -not $DryRun) {
+      $s = Get-LayoutStatus (Join-Path $lay "$name.json")
+      if ($s.Stack -eq "yes" -and (App-Do "layout.clone" ('{\"name\":\"' + $name + '\"}')) -and (Test-Path -LiteralPath $tp)) { $fresh = $true; Say "  cloned with Herdr's layout.clone" }
+    }
+    if (Test-Path -LiteralPath $tp) { if ($fresh) { Patch-Layout $tp $tp "-" $name } else { Patch-Layout $tp $tp "$tp.bak-$ts" $name } }
     else { Patch-Layout (Join-Path $lay "$name.json") $tp "-" $name }
     if ($script:res -eq "nostack") { Show-NoStackHelp; return }
     if ($script:res -eq "changed") { NoteChange "layout $target.json created or updated" }
@@ -444,6 +547,34 @@ function Uninstall-Layout {
     if ($script:res -eq "changed") { $found = $true; NoteChange "layout $($f.Name) restored (backup: $($f.Name).bak-$ts)" }
   }
   if (-not $found) { Say "  no layout had Wingman's blocks" }
+}
+
+# ---- keys, panel buttons ----
+# Wingman writes its own "mod:wingman" section of keys.json while it runs, only where the key is
+# free. Uninstall removes only those bindings.
+function Uninstall-Keys {
+  Say "Keys"
+  $f = Join-Path $home_ "keys.json"
+  if (-not (Test-Path -LiteralPath $f)) { Say "  no keys.json"; return }
+  Remove-WingmanKeys $f "$f.bak-$ts"
+  if ($script:res -eq "changed") { NoteChange "Wingman's bindings removed from keys.json (backup: keys.json.bak-$ts)" } else { Say "  no Wingman bindings in keys.json" }
+}
+
+# The setting "Hide Herdr's Files and Changes buttons" removed entries from workspace.panels. Turn it
+# off through the running mod (it puts back exactly what it took); if the app isn't running or
+# doesn't answer, restore shared.json directly.
+function Uninstall-Panels {
+  Say "Panel buttons"
+  Reset-PanelSetting (Join-Path $home_ "data\wingman\settings.json")
+  if ($script:res -eq "changed") {
+    NoteChange "Wingman's panel-button setting turned off"
+    if (-not $DryRun -and (App-Do "wingman.settings")) { Say "  asked the running Wingman to put the buttons back"; Start-Sleep -Seconds 2 }
+  }
+  Restore-Panels (Join-Path $home_ "shared.json.bak-$ts")
+  if ($script:res -eq "changed") {
+    NoteChange "workspace.panels restored in shared.json"
+    NoteNext "If Herdr is running, check Files and Changes are back in the tab bar; Herdr may rewrite shared.json from memory."
+  } else { Say "  nothing to put back" }
 }
 
 # ---- hook ----
@@ -537,6 +668,8 @@ switch ($Action) {
   }
   "uninstall" {
     if ($NoHook) { Say "Hook skipped (-NoHook)" } else { Uninstall-Hook }
+    Uninstall-Panels # first: it asks the running mod, which stops answering once its blocks leave the layout
+    Uninstall-Keys
     if ($NoLayout) { Say "Layout skipped (-NoLayout)" } else { Uninstall-Layout }
     Say "Mods"
     foreach ($name in @("wingman", "tabs-plus")) {

@@ -4586,7 +4586,7 @@ export default class Review extends View {
     const next = this.st;
     cx.notify();
     cx.spawn(async () => {
-      try { await saveSettings(next); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
+      try { await saveSettings(next); syncPanels(shared, setShared, next.hideHerdrPanels); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
     });
   }
 

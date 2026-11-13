@@ -111,6 +111,18 @@ A WSL machine of this PC may already have the hook from `install.ps1` (its entri
 
 Inside a terminal there, `HC_TERMINAL_ID` is that machine's own id (`t3`). The hook writes that id; Wingman reads it as Herdr's address for the terminal (`wsl/t3`), and names its notes for that Claude by the bare id, as the hook reads them.
 
+### Layout footprint
+
+What the installer changes in a layout (`wingman/install.sh`, `install.ps1`). Each edit keeps what it replaced in the node, so uninstall restores the layout exactly:
+
+| Node | Change | Kept in |
+| --- | --- | --- |
+| `wingman-review`, `wingman-edit`, `wingman-changes` (new, last in `panel-body`) | added | `props.added: true` |
+| the `tabs` block | mod `tabs` becomes `tabs-plus` | `props.replaces: "tabs"` |
+| the `panel` column (the stack's parent) | `max` raised to 2400 when lower | `props.max_was` on the first Wingman block |
+
+Herdr's own layouts (`layout:<name>` in `installed.json`) are copied once to `<name>-copy` and the copy is edited. `wingman/tests/layoutdiff.mjs before.json after.json` lists changed, added and removed nodes by id.
+
 ## Uninstall
 
 Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/`.
@@ -276,6 +288,7 @@ The header's **⚙ Settings** opens:
 - **Auto-close tags**: the tag rules under Editing. On by default.
 - **External editor**: VS Code (default), Cursor, Windsurf, Zed, Sublime Text, or a custom command with `{path}`, `{line}` and `{col}`. VS Code, Cursor and Windsurf open WSL files through Remote - WSL. On Windows a `.cmd` launcher runs through cmd.exe, which refuses paths containing `& | < > ^ % ! " , ; =`.
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
+- **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
 - **Autosave**: save when Wingman loses focus (another pane, or another window), and when you switch files or spaces. On by default. Herdr has no blur event for mods, so focus is checked 4 times a second.
 - **Also save after typing stops for**: Focus change (no timer, save on focus change only), 1, 2, 3, 5 or 10 seconds. Focus change by default.
 - **Claude hook on <machine>** (a space on another machine only): its status, and Install and Remove (see Install).

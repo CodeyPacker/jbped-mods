@@ -115,7 +115,7 @@ run_suite() {
   check "install: tabs-plus mod copied" diff -r -x gpui-kit.d.ts -x jsconfig.json "$share/../tabs-plus/mods/tabs-plus" "$H/mods/tabs-plus"
   check "install: other mods untouched" sh -c "[ \"\$(cat '$H/mods/tabs/main.js')\" = tabs-original ] && [ \"\$(cat '$H/mods/other/main.js')\" = other ]"
   check "shipped layout is not edited" cmp "$base/fakeship.orig" "$H/layouts/fakeship.json"
-  check "shipped layout is cloned to fakeship-wingman" test -f "$H/layouts/fakeship-wingman.json"
+  check "shipped layout is cloned to fakeship-copy" test -f "$H/layouts/fakeship-copy.json"
   check "clone has cloned_from, 3 blocks after files and changes, tabs-plus, max 2400, rest intact" pyj '
 a=ld(sys.argv[1]); b=ld(sys.argv[2])
 assert b["cloned_from"]["name"]=="fakeship", b.get("cloned_from")
@@ -127,12 +127,14 @@ t=[n for n in walk(b) if n.get("id")=="tabs"][0]; assert t["content"]["mod"]=="t
 assert t["size"]=={"weight":1.5} and t["window_drag"] is True
 p=[n for n in walk(b) if n.get("id")=="panel"][0]; assert p["max"]==2400 and p["min"]==280 and p["hidden"] is True
 # remove our changes and compare with the original
-sb["children"]=sb["children"][:2]; t["content"]["mod"]="tabs"; p["max"]=900; del b["cloned_from"]
+assert [c["content"]["props"] for c in sb["children"][2:]]==[{"view":"review","added":True,"max_was":900},{"view":"edit","added":True},{"view":"changes","added":True}]
+assert t["content"]=={"mod":"tabs-plus","props":{"replaces":"tabs"}}
+sb["children"]=sb["children"][:2]; t["content"]={"mod":"tabs"}; p["max"]=900; del b["cloned_from"]
 assert a==b, "other content changed"
-' "$H/layouts/fakeship.json" "$H/layouts/fakeship-wingman.json"
-  check "clone keeps the 2-space style and final newline" sh -c "sed -n 2p '$H/layouts/fakeship-wingman.json' | grep -q '^  \"id\"' && [ \"\$(tail -c1 '$H/layouts/fakeship-wingman.json' | od -An -c | tr -d ' ')\" = '\\n' ]"
+' "$H/layouts/fakeship.json" "$H/layouts/fakeship-copy.json"
+  check "clone keeps the 2-space style and final newline" sh -c "sed -n 2p '$H/layouts/fakeship-copy.json' | grep -q '^  \"id\"' && [ \"\$(tail -c1 '$H/layouts/fakeship-copy.json' | od -An -c | tr -d ' ')\" = '\\n' ]"
   check "JSON valid after install" valid_json
-  case "$out" in *"Switch to the layout \"fakeship-wingman\""*) ok "tells the person how to switch layout" ;; *) bad "tells the person how to switch layout" "$out" ;; esac
+  case "$out" in *"Switch to the layout \"fakeship-copy\""*) ok "tells the person how to switch layout" ;; *) bad "tells the person how to switch layout" "$out" ;; esac
   if [ "$HOOK" = 1 ]; then
     check "hook installed with the marker and pointing into the Herdr home" sh -c "grep -q herdr-wingman-hook '$CLAUDE_CONFIG_DIR/settings.json' && grep -q \"$H/mods/wingman/hooks/wingman-hook.sh\" '$CLAUDE_CONFIG_DIR/settings.json'"
     check "hook data folder created in the Herdr home" test -d "$H/data/wingman"
@@ -154,7 +156,7 @@ assert a==b, "other content changed"
   out=$(run_inst install dry)
   after=$(snap)
   [ "$before" = "$after" ] && ok "dry-run install writes nothing" || bad "dry-run install writes nothing"
-  case "$out" in *"would"*"fakeship-wingman"*) ok "dry-run prints the actions" ;; *) bad "dry-run prints the actions" "$out" ;; esac
+  case "$out" in *"would"*"fakeship-copy"*) ok "dry-run prints the actions" ;; *) bad "dry-run prints the actions" "$out" ;; esac
   [ ! -e "$CLAUDE_CONFIG_DIR" ] && ok "dry-run does not create Claude settings" || bad "dry-run does not create Claude settings"
   run_inst install $NOHOOK >/dev/null
   before=$(snap); run_inst uninstall dry >/dev/null; after=$(snap)
@@ -165,14 +167,14 @@ assert a==b, "other content changed"
   cp "$H/layouts/mine.json" "$base/mine.orig"
   out=$(run_inst install $NOHOOK)
   check "own layout: backup written beside it, equal to the original" sh -c "ls '$H/layouts'/mine.json.bak-* >/dev/null && cmp '$base/mine.orig' \"\$(ls '$H/layouts'/mine.json.bak-* | head -1)\""
-  check "own layout: no extra layout file" sh -c "[ ! -e '$H/layouts/mine-wingman.json' ]"
+  check "own layout: no extra layout file" sh -c "[ ! -e '$H/layouts/mine-copy.json' ]"
   check "own layout: blocks added after the others, other blocks and keys untouched, max 3000 not lowered" pyj '
 a=ld(sys.argv[1]); b=ld(sys.argv[2])
 sb=[n for n in walk(b) if n.get("id")=="panel-body"][0]
 assert [c["id"] for c in sb["children"]]==["files","changes","wayfinder","mine","wingman-review","wingman-edit","wingman-changes"]
 assert [n for n in walk(b) if n.get("id")=="panel"][0]["max"]==3000
 assert [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]["mod"]=="tabs-plus"
-sb["children"]=sb["children"][:4]; [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]["mod"]="tabs"
+sb["children"]=sb["children"][:4]; [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]={"mod":"tabs"}
 assert a==b
 ' "$base/mine.orig" "$H/layouts/mine.json"
   check "own layout: keeps the 4-space indent" line2_is "$H/layouts/mine.json" '    '
@@ -215,7 +217,7 @@ assert a==b
   run_inst install $NOHOOK >/dev/null; run_inst uninstall $NOHOOK >/dev/null
   check "shipped path: clone restored to stock content" pyj '
 a=ld(sys.argv[1]); b=ld(sys.argv[2]); b.pop("cloned_from"); p=[n for n in walk(b) if n.get("id")=="panel"][0]; p["max"]=900
-assert a==b' "$base/fakeship.orig" "$H/layouts/fakeship-wingman.json"
+assert a==b' "$base/fakeship.orig" "$H/layouts/fakeship-copy.json"
   check "shipped path: shipped file still untouched" cmp "$base/fakeship.orig" "$H/layouts/fakeship.json"
 
   # --- re-use of an existing clone
@@ -265,7 +267,7 @@ assert a==b' "$base/fakeship.orig" "$H/layouts/fakeship-wingman.json"
     mkdir -p "$base/bin"; log="$base/herdr-app.log"; : >"$log"
     printf '#!/bin/sh\necho "$@" >>"%s"\n' "$log" >"$base/bin/herdr-app"; chmod +x "$base/bin/herdr-app"
     out=$(PATH="$base/bin:$PATH" run_inst install $NOHOOK)
-    check "switches layout through herdr-app when available" grep -q 'do layout.switch {"name":"fakeship-wingman"}' "$log"
+    check "switches layout through herdr-app when available" grep -q 'do layout.switch {"name":"fakeship-copy"}' "$log"
     case "$out" in *"Switch to the layout"*) bad "no manual switch hint after a switch" "$out" ;; *) ok "no manual switch hint after a switch" ;; esac
   fi
 }
@@ -298,8 +300,8 @@ if [ -d "$real/layouts" ]; then
   MODE=sh
   new_home r main
   out=$(run_inst install $NOHOOK)
-  check "real main layout cloned to main-wingman, main.json untouched" sh -c "[ -f '$H/layouts/main-wingman.json' ] && cmp '$real/layouts/main.json' '$H/layouts/main.json'"
-  check "real main clone: 3 blocks and tabs-plus" sh -c "python3 -I -c 'import json,sys; d=json.dumps(json.load(open(sys.argv[1]))); assert d.count(\"wingman-review\")==1 and \"tabs-plus\" in d' '$H/layouts/main-wingman.json'"
+  check "real main layout cloned to main-copy, main.json untouched" sh -c "[ -f '$H/layouts/main-copy.json' ] && cmp '$real/layouts/main.json' '$H/layouts/main.json'"
+  check "real main clone: 3 blocks and tabs-plus" sh -c "python3 -I -c 'import json,sys; d=json.dumps(json.load(open(sys.argv[1]))); assert d.count(\"wingman-review\")==1 and \"tabs-plus\" in d' '$H/layouts/main-copy.json'"
   check "JSON valid for the real layouts" valid_json
 fi
 

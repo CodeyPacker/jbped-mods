@@ -47,9 +47,14 @@ Run it again at any time. A second install changes nothing. After you pull new c
 Everything is in the Herdr home (`$HERDR_APP_HOME`, else `~/.config/herdr-app`) and the Claude settings file (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`).
 
 1. `mods/wingman/` and `mods/tabs-plus/` are copied in. Older copies of these two mods are replaced. A mod folder that is a link is left alone.
-2. The active layout gets Wingman's three panel blocks (`wingman-review`, `wingman-edit`, `wingman-changes`) after the blocks already in `panel-body`. Its `tabs` block uses `tabs-plus`, and the panel column's `max` is raised to 2400 if it was lower. Nothing else in the layout changes.
-   - If the active layout is your own, it is backed up as `<name>.json.bak-<timestamp>` and patched.
-   - If it is one Herdr ships (`main`, `terminals`, `win98`), it is read-only. The installer copies it to `<name>-wingman.json`, patches the copy and switches to it with `herdr-app` when that works. Otherwise press `ctrl-shift-l` or use Settings.
+2. The active layout is edited in three ways. Each edit keeps what it replaced inside the node, so uninstall undoes exactly it:
+   - Three blocks are added after the blocks already in `panel-body`: `wingman-review`, `wingman-edit`, `wingman-changes`, each with `props.added: true`.
+   - The `tabs` block's mod `tabs` becomes `tabs-plus`, the old mod kept in `props.replaces`.
+   - The panel column's `max` is raised to 2400 when it was lower. The old value is kept in `props.max_was` of the first Wingman block.
+
+   Nothing else in the layout changes.
+   - If the active layout is your own, it is backed up as `<name>.json.bak-<timestamp>` and edited.
+   - If it is one Herdr ships (listed as `layout:<name>` in `installed.json`: `main`, `terminals`, `win98`), it is read-only. The installer copies it once to `<name>-copy.json` (with `cloned_from`, like Herdr's Duplicate layout), edits the copy and switches to it with `herdr-app` when that works. Otherwise press `ctrl-shift-l` or use Settings. An earlier install's `<name>-wingman.json` is reused if it exists.
    - If the layout has no `panel-body` stack, nothing changes and the installer prints what to add by hand.
 3. The Claude Code hook is added to the Claude settings file. Other hooks stay. A backup is written as `settings.json.bak-herdr-wingman`. On Windows the mod's `install.ps1` also sets the user variables `HERDR_WINGMAN_DIR` and `WSLENV`.
 
@@ -61,4 +66,8 @@ Herdr reloads mods and layouts by itself. Restart Claude Code sessions that were
 sh wingman/install.sh uninstall
 ```
 
-This removes the hook, the three blocks and the `tabs-plus` setting from every layout that has them (each is backed up first), and both mod folders. A `<name>-wingman.json` copy stays, restored to Herdr's content, and you can delete it. The panel `max` is left as it is. Your review data in `data/wingman/` is kept unless you add `--purge`.
+This removes the hook, the three blocks, the `tabs-plus` switch and the raised `max` from every layout that has them (each is backed up first), and both mod folders. The layout is back as it was: byte for byte when the file was in Herdr's own JSON style, node for node otherwise. A `<name>-copy.json` copy stays as yours, without Wingman, and you can delete it. A layout an older install patched has no markers: its blocks are removed, its `tabs-plus` and `max` stay.
+
+It also removes Wingman's own bindings (values starting `wingman.`) from the `mod:wingman` section of `keys.json`, and nobody else's. The installer never adds keys. The running mod writes its `mod:wingman` entries itself, only for keys Herdr binds globally, and never replaces a binding that isn't Wingman's.
+
+If the setting "Hide Herdr's Files and Changes buttons" is on, uninstall turns it off and puts back the entries Wingman removed from `workspace.panels`: through the running mod when `herdr-app` answers (set `HERDR_APP_BIN` to its path if it isn't on PATH), else in `shared.json` directly. Your review data in `data/wingman/` is kept unless you add `--purge`.
