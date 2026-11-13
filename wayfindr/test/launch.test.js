@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfindr/launch.js";
+import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, spaceTarget, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfindr/launch.js";
 import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin, placementFor } from "../mods/wayfindr/flow.js";
 import { identityOf, parseWranglr } from "../mods/wayfindr/wranglr.js";
 import { addRepo } from "../mods/wayfindr/settings.js";
@@ -306,4 +306,17 @@ test("wranglr without Wranglr set up lands in Herdr's folder", async () => {
 test("PLACE and PICK handle the at: placement", () => {
   for (const s of [EXISTS_SH, LAUNCH_SH]) for (const t of ["at:*)", "subst()", "'{branch}'", "${3#at:}"]) assert.ok(s.includes(t), t);
   for (const t of ["at:*)", "subst()"]) assert.ok(REVIEW_SH.includes(t), t);
+});
+
+test("a space opens on the runner's machine when Herdr has it, else on this computer through the wrapper", () => {
+  const argv = ["claude", "--model", "opus"];
+  const on = spaceTarget("wsl:Ubuntu", "windows", null, [null, "wsl"], "/mnt/c/x", "C:\\x", argv);
+  assert.deepEqual(on, { machine: "wsl", folder: "/mnt/c/x", argv });
+  assert.equal(spaceTarget("wsl:Ubuntu", "windows", null, [null, "ubuntu", "wsl"], "/mnt/c/x", "C:\\x", argv).machine, "ubuntu");
+  const off = spaceTarget("wsl:Ubuntu", "windows", null, [null], "/mnt/c/x", "C:\\x", argv);
+  assert.equal(off.machine, ""); assert.equal(off.folder, "C:\\x"); assert.equal(off.argv[0], "wsl.exe"); assert.ok(off.argv.includes("/mnt/c/x"));
+  assert.equal(spaceTarget("wsl:Ubuntu", "windows", "", [null, "wsl"], "/mnt/c/x", "C:\\x", argv).machine, "");
+  assert.equal(spaceTarget("native", "linux", null, [null, "wsl"], "/x", "/x", argv).machine, "");
+  assert.deepEqual(spaceTarget("native", "linux", "box", [null, "box"], "/x", "/x", argv), { machine: "box", folder: "/x", argv });
+  assert.throws(() => spaceTarget("native", "linux", "box", [null], "/x", "/x", argv), /no machine "box"/);
 });

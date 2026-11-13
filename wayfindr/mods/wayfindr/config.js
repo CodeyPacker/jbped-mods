@@ -36,6 +36,10 @@ function checkProfile(name, p, platform, errors) {
   if (!isObj(p)) { errors.push(`${at}: must be an object`); return null; }
   const runner = p.runner ?? defaultRunner(platform);
   if (!validRunner(runner)) errors.push(`${at}.runner: use "native" or "wsl:<distro>"`);
+  // The Herdr machine Launch and Review spaces open on: "" is this computer; absent, Wayfindr picks the
+  // machine named after a wsl runner's distro (or "wsl"), else this computer.
+  if (p.machine != null && typeof p.machine !== "string") errors.push(`${at}.machine: the Herdr machine the Launch and Review spaces open on, "" for this computer`);
+  const machine = typeof p.machine === "string" ? p.machine : null;
 
   const list = (key) => {
     const v = p[key] ?? [];
@@ -107,7 +111,7 @@ function checkProfile(name, p, platform, errors) {
   const notifications = { enabled: isObj(n) && typeof n.enabled === "boolean" ? n.enabled : true, minutes: isObj(n) && Number.isInteger(n.minutes) && n.minutes >= 1 && n.minutes <= 60 ? n.minutes : 5 };
   // Each Repo carries its Checkout mode, "worktree" by default, and its Worktree Placement, "wranglr" (Wranglr's rule) by default.
   const withCheckout = repos.map((r) => (isObj(r) ? { ...r, checkout: r.checkout ?? "worktree", worktrees: r.worktrees ?? "wranglr" } : r));
-  return { name, runner, accounts, repos: withCheckout, boards, notifications };
+  return { name, runner, machine, accounts, repos: withCheckout, boards, notifications };
 }
 
 // Returns { config, profile, errors }. `profile` is the active one, normalized; null when errors.

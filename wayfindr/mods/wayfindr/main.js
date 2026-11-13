@@ -6,13 +6,13 @@
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
-import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, pickFolder, window as herdrWindow } from "herdr";
+import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
-import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceArgv, launchSpaceName, reviewSpaceName } from "./launch.js";
+import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceTarget, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
 import { newItems, toastsFor } from "./background.js";
@@ -1514,8 +1514,9 @@ export default class Wayfindr extends View {
         const wr = await this.readWranglr();
         const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io, wr);
         const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: made.worktrees?.[repoName(r)] ?? `${made.path}/${repoName(r)}` }));
-        // machine "": the worktrees and the runner are on this computer. Left out, a click starts the space on the focused space's Machine.
-        run("space.new", { name, machine: "", folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
+        // On the runner's machine when Herdr has it (the agent runs there directly), else this computer.
+        const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, argv);
+        run("space.new", { name, ...target, task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
       } catch (e) {
         L.status = "error"; L.error = `Launch failed: ${e.message ?? e}`;
@@ -1660,8 +1661,8 @@ export default class Wayfindr extends View {
         const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
         const wr = await this.readWranglr();
         const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree", wr);
-        // machine "": the worktrees and the runner are on this computer. Left out, a click starts the space on the focused space's Machine.
-        run("space.new", { name, machine: "", folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
+        const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, agentArgv(tpl));
+        run("space.new", { name, ...target, task: reviewPrompt(pr, info, made.path, tpl) });
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
         else delete this.reviews[pr.key];

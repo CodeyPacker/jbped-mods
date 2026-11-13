@@ -120,3 +120,10 @@ test("a Repo's worktrees is wranglr by default, herdr, beside or a folder when s
   for (const bad of ["", 3, ["/x"]]) assert.deepEqual(p({ worktrees: bad }).errors, ['profiles.p.repos[0].worktrees: "wranglr" (Wranglr\'s rule for the Repo, the default), "herdr" (Herdr\'s worktrees folder), "beside" (next to the clone) or a folder'], JSON.stringify(bad));
   assert.equal(p({}).config.profiles.p.repos[0].worktrees, undefined); // the raw config is left as read
 });
+
+test("a Profile's machine is null when absent, a string when set, and an error otherwise", () => {
+  assert.equal(parse({ profiles: { p: {} } }).profile.machine, null);
+  assert.equal(parse({ profiles: { p: { machine: "wsl" } } }).profile.machine, "wsl");
+  assert.equal(parse({ profiles: { p: { machine: "" } } }).profile.machine, "");
+  assert.ok(parse({ profiles: { p: { machine: 3 } } }).errors.some((e) => /machine/.test(e)));
+});

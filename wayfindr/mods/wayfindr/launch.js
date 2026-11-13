@@ -226,6 +226,25 @@ export function spaceArgv(runner, platform, folder, argv) {
   return [inv.command, ...inv.args];
 }
 
+// Where a Launch or Review space opens and what it runs: { machine, folder, argv } for space.new.
+// machine: the Profile's, else (a wsl runner) the Herdr machine named after its distro or "wsl" when
+// there is one, else "" (this computer). On a machine, the space is at the runner-local path and runs the
+// agent itself: its core starts it in the user's shell with the task as the first message, so nothing
+// passes through wsl.exe (which splits a task into words). On this computer, the host path and the
+// runner's wrapper (spaceArgv). names: the machines Herdr knows (machines(), null for this computer).
+// A Profile's machine Herdr doesn't know is an error.
+export function spaceTarget(runner, platform, machine, names, localPath, hostPath, argv) {
+  const known = names.filter((n) => typeof n === "string" && n);
+  let chosen = machine;
+  if (chosen == null) {
+    const distro = /^wsl:(\S+)$/.exec(runner)?.[1]?.toLowerCase();
+    chosen = distro ? known.find((n) => n.toLowerCase() === distro) ?? known.find((n) => n.toLowerCase() === "wsl") ?? "" : "";
+  }
+  if (chosen === "") return { machine: "", folder: hostPath, argv: spaceArgv(runner, platform, localPath, argv) };
+  if (!known.includes(chosen)) throw new Error(`Herdr has no machine "${chosen}" (the profile's machine)`);
+  return { machine: chosen, folder: localPath, argv };
+}
+
 // "space <x>", "path <y>", "branch <b>", "made <r>", "reused <r>", "note <text>" and "worktree <r>\t<path>"
 // lines from the scripts. worktrees: { [repo name]: local path }.
 export function parseScript(stdout) {
