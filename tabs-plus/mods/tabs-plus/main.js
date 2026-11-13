@@ -126,6 +126,10 @@ export default class Tabs extends View {
     const wingmen = (body?.children ?? []).filter(c => c.content?.mod === "wingman");
     const enabled = [...base, ...wingmen.map(c => c.id).filter(id => !base.includes(id))];
     const wf = find(root, "wayfindr"), main = find(root, "main");
+    // Going to another space (a click, a key, a space Wayfindr opened) closes Wayfindr: the space is
+    // what you came for. Deferred: the layout can't change during render.
+    if (wf && !wf.hidden && space && this.seenSpace !== undefined && space.id !== this.seenSpace) cx.timer.after(0, () => run("layout.hide", { id: "wayfindr" }));
+    if (space) this.seenSpace = space.id;
     this.holdWayfindr(cx, wf, main);
     // While Wayfindr covers the work area (or until the terminals are back), the panel it hid isn't
     // a choice: nothing is recorded or restored.
