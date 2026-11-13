@@ -586,7 +586,7 @@ function doSort(a, c) {
 }
 
 // The settings menu's Save: the changed settings, written in one go.
-const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine"];
+const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine", "agents"];
 function doSettings(a, c) {
   const values = {};
   for (const key of SETTINGS) if (a.values && typeof a.values === "object" && key in a.values) values[key] = a.values[key];

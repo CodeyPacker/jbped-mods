@@ -240,3 +240,13 @@ test("saveGroup does not lose a hand edit made between its read and its write", 
   await saveGroup("repo", R, { machines: ["wsl"] });
   assert.deepEqual(file(), { repos: { [R]: { from: "origin/dev", machines: ["wsl"] } }, workspaces: [{ name: "Hand", repos: [] }] });
 });
+
+test("agents is on by default, a boolean, and anything else falls back", () => {
+  assert.equal(parseConfig(null).config.settings.agents, true);
+  assert.equal(parseConfig(JSON.stringify({ settings: { agents: false } })).config.settings.agents, false);
+  const { config, errors } = parseConfig(JSON.stringify({ settings: { agents: "no" } }));
+  assert.equal(config.settings.agents, true);
+  assert.equal(errors.length, 1);
+  assert.equal(settingError("agents", false), null);
+  assert.ok(settingError("agents", 0));
+});

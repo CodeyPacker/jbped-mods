@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS = {
   ticket: "^(?:[a-z]+/)?#?(\\d{2,})",
   agent: null,
   machine: null,
+  agents: true,
 };
 
 const SORTS = ["recent", "kind", "az", "manual"];
@@ -36,6 +37,7 @@ function parseSettings(raw, errors) {
   else { try { new RegExp(s.ticket, "i"); } catch { fall("ticket", "is not a valid regular expression"); } }
   if (!("agent" in s)) s.agent = DEFAULT_SETTINGS.agent;
   else if (s.agent !== null && !(Array.isArray(s.agent) && s.agent.length && s.agent.every((a) => typeof a === "string"))) fall("agent", "must be null or a list of strings");
+  if (!("agents" in s)) s.agents = DEFAULT_SETTINGS.agents; else if (typeof s.agents !== "boolean") fall("agents", "must be true or false");
   if (!("machine" in s)) s.machine = DEFAULT_SETTINGS.machine;
   else if (s.machine !== null && !okMachine(s.machine)) fall("machine", 'must be a Machine name, "" for this computer, or null');
   return s;
