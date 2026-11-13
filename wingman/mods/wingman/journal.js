@@ -13,6 +13,7 @@ import { hostPath } from "./capture.js";
 import { writeText, removeFile, readOn, execOn } from "./fsx.js";
 import { REMOTE, remotePath, rootId, addressOn, idOn, mapLimit } from "./remote.js";
 import { DIR_SH } from "./hooksetup.js";
+import { noteSession } from "./sessionlog.js";
 
 export const reviewDir = () => `${appHome()}/data/wingman`;
 const SPACES = () => `${reviewDir()}/spaces.json`;
@@ -83,6 +84,7 @@ export class Journal {
         const text = await readTextFile(path);
         if (text) {
           const { terminal, event } = JSON.parse(text);
+          noteSession(terminal, event); // the session log's name for this Claude (sessionlog.js)
           const space = terminals().find((t) => t.address === terminal)?.labels?.["herdr.space"] ?? null;
           const r = await this.apply(event, terminal);
           this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${r?.added ? "added" : r ? "already reviewed" : "not in a repo"}`);
@@ -138,6 +140,7 @@ export class Journal {
         if (texts[i].error) throw texts[i].error;
         if (texts[i].text) {
           const { terminal: id, event } = JSON.parse(texts[i].text), terminal = addressOn(on, id);
+          noteSession(terminal, event);
           const space = agents().find((a) => a.address === terminal)?.space ?? null;
           const res = await this.apply(event, terminal, on);
           this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${res?.added ? "added" : res ? "already reviewed" : "not in a repo"}`);
@@ -304,7 +307,7 @@ const SETTINGS = () => `${reviewDir()}/settings.json`;
 export async function loadSettings() {
   const t = await readTextFile(SETTINGS());
   // autosave: save on focus loss and file switch; autosaveDelay: also after typing stops (s, 0 = off).
-  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, ...(t ? JSON.parse(t) : {}) };
+  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, sessionLog: true, ...(t ? JSON.parse(t) : {}) };
 }
 /** The user's keyboard shortcuts: { "<action>": ["key", ...] }, only the ones changed from the defaults. */
 const KEYS = () => `${reviewDir()}/keys.json`;
