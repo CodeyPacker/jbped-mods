@@ -74,3 +74,17 @@ export const shared = (k) => world.shared.get(k);
 export const setShared = (k, v) => { world.shared.set(k, v); return null; };
 export const props = () => world.props ?? null;
 export const hc = async (args) => { hcCalls.push(args); return { code: 0, stdout: "", stderr: "" }; };
+// watchFolder(dir) waits until a test calls emitWatch(dir, paths) (resolves every call waiting on
+// dir, returns how many); a dir in `watch.fail` rejects. `watch.calls` records each call.
+export const watch = { waiting: new Map(), calls: [], fail: new Set() };
+export const watchFolder = (dir) => {
+  watch.calls.push(dir);
+  if (watch.fail.has(dir)) return Promise.reject(new Error("watch failed"));
+  return new Promise((res) => { if (!watch.waiting.has(dir)) watch.waiting.set(dir, []); watch.waiting.get(dir).push(res); });
+};
+export const emitWatch = (dir, paths) => {
+  const w = watch.waiting.get(dir) ?? [];
+  watch.waiting.delete(dir);
+  for (const r of w) r(paths);
+  return w.length;
+};

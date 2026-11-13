@@ -3,8 +3,8 @@
 // a turn's start), the 3 s collectAll pass (adopt, then store.reconcile), and the failing repos
 // shared with the other copies. No UI: Herdr's state comes through the "herdr" module, the copy's
 // id, log and clock through the constructor, so a test can drive it under node.
-import { spaces, panes, agents, terminals, layout, hc, appHome, readTextFile, writeTextFile, shared, setShared } from "herdr";
-import { Store } from "./store.js";
+import { spaces, panes, agents, terminals, layout, hc, appHome, readTextFile, writeTextFile, shared, setShared, watchFolder } from "herdr";
+import { Store, norm } from "./store.js";
 import { Capture, tailText } from "./capture.js";
 import { capturePlan, applyPlan, capturePass, tryPass, captureErrors, ERRORS_RENEW } from "./captureplan.js";
 import { layoutHasWingman, reviewedSpaces } from "./panelview.js";
@@ -20,6 +20,21 @@ export const ACTIVE = new Set(["working", "blocked"]);
 // Outside mods/: any write under a mod folder (even a hidden file) hot-reloads every copy.
 export const LEADER_FILE = () => `${appHome()}/data/wingman-leader.json`;
 export const LEASE_MS = 5000;
+/**
+ * The lease file is { id, at } for a panel copy and { id, at, role: "capture" } for a capture
+ * controller (props.role "capture", an always-rendered floating block). A controller always leads:
+ * a panel copy never takes a fresh lease, a controller's or another panel copy's. A controller that
+ * finds a panel copy leading adds `ask: <its id>` unless an ask is there already. The panel leader
+ * then starts no new collect pass, keeps the ask in its renewals, and once none of its passes runs
+ * writes the lease over to the controller ({ id: ask, at, role }) and stops. Two controllers: the
+ * one holding the lease keeps it, the other waits until it expires. An old copy reads only id and
+ * at, so it never takes a controller's fresh lease either.
+ */
+export const CONTROLLER = "capture";
+/** The collect pass: every FAST_MS, or SLOW_MS while every captured repo has a working file watch. */
+export const FAST_MS = 3000, SLOW_MS = 10000;
+/** A watch event's pass: at most one per WAKE_MS, WAKE_SETTLE after the first event of a burst. */
+export const WAKE_MS = 500, WAKE_SETTLE = 100;
 
 // The capture leader's failing repos, { by: leader copy, at, repos: captureErrors }, for every copy's
 // one-line notice (captureNotices). Written when it changes, renewed every ERRORS_RENEW ms while a repo
@@ -53,11 +68,46 @@ export function reviewSpaces() {
   return reviewedSpaces(spaces(), panes(), inLayout);
 }
 
+/**
+ * Whether a watch batch for repo `root` (git folder `gitDir`) calls for a capture pass: a working
+ * file changed, the batch overflowed to the root, or HEAD or a branch moved (a switch or a commit:
+ * store.reconcile). Other git files never do: a snapshot and a pass write only under the git folder
+ * (objects, wingman/), so a pass never wakes the next one.
+ */
+export function wakes(paths, root, gitDir) {
+  if (!paths?.length) return true;
+  const r = norm(root), g = norm(gitDir), head = norm(`${gitDir}/HEAD`), heads = norm(`${gitDir}/refs/heads/`);
+  return paths.some((p) => {
+    const n = norm(p);
+    if (n === r) return true;
+    if (n.startsWith(g + "/")) return n === head || n.startsWith(heads);
+    if (!n.startsWith(r + "/")) return false;
+    const rel = n.slice(r.length + 1);
+    return !(rel === ".git" || rel.startsWith(".git/") || rel.includes("/.git/"));
+  });
+}
+
+/**
+ * Whether watchFolder is tried for a repo on this computer. Not for WSL's own files seen from
+ * Windows (//wsl.localhost/<distro>/..., //wsl$/...): there the watch was accepted but never
+ * fired, and a /mnt/c folder named that way rejected with "Access is denied" (Herdr 0.1.15).
+ */
+export const watchable = (root) => !/^\/\/wsl(\.localhost|\$)\//i.test(String(root).replace(/\\/g, "/"));
+
 export class CaptureLoop {
-  /** `id`: the copy's id (the lease's holder). `log(line)`: the capture log. `now()`: the clock. */
-  constructor({ id, log, now = Date.now }) {
-    this.id = id; this.log = log; this.now = now;
+  /** `id`: the copy's id (the lease's holder). `log(line)`: the capture log. `now()`: the clock.
+   *  `controller`: a capture controller's copy (props.role "capture"), which leads over panel copies.
+   *  `paint(cx)`: redraws the copy (main.js paint); a controller draws nothing and keeps cx.notify(). */
+  constructor({ id, log, now = Date.now, controller = false, paint = (cx) => cx.notify() }) {
+    this.id = id; this.log = log; this.now = now; this.controller = controller; this.paint = paint;
     this.captures = new Map();
+    this.watches = new Map(); // capture key -> { root, gitDir, stop, live, failed }: one watchFolder loop each
+  }
+
+  /** The copy is going: watch loops end at their next event, wakes do nothing. */
+  close() {
+    this.closed = true;
+    this.stopWatches();
   }
 
   /** A repo's store (on machine `on`), or null when the folder isn't (or isn't yet) a repo: retried after 30 s. */
@@ -96,13 +146,42 @@ export class CaptureLoop {
     return { repos, plain };
   }
 
-  /** Renews or takes the capture lease; true while this copy holds it. */
+  /** Renews or takes the capture lease (priority: see CONTROLLER); true while this copy holds it. */
   async leader() {
     const path = LEADER_FILE(), text = await readTextFile(path), now = this.now();
     const lease = text ? JSON.parse(text) : null;
-    if (lease && lease.id !== this.id && now - lease.at < LEASE_MS) return false;
-    try { await writeTextFile(path, JSON.stringify({ id: this.id, at: now }), text); return true; }
-    catch { return false; } // another copy renewed or took it first
+    if (lease && lease.id !== this.id && now - lease.at < LEASE_MS) {
+      // A controller asks the panel copy that leads to hand over; it leads once the lease names it.
+      // Only one ask at a time: two controllers (or a copy being reloaded) never overwrite each other's.
+      if (this.controller && lease.role !== CONTROLLER && !lease.ask)
+        await writeTextFile(path, JSON.stringify({ ...lease, ask: this.id }), text).catch(() => {});
+      return false;
+    }
+    // Asked by a controller: no new collect pass starts (`handing`), the ask stays in the lease, and
+    // the lease goes over once none of this copy's passes runs, so two copies never run one at once.
+    const ask = !this.controller && lease?.id === this.id ? lease.ask ?? null : null;
+    this.handing = !!ask;
+    if (ask && this.idle()) {
+      try { await writeTextFile(path, JSON.stringify({ id: ask, at: now, role: CONTROLLER }), text); }
+      catch { return this.holds(path); }
+      this.handing = false;
+      this.log(`capture handed over to controller ${ask}`);
+      return false;
+    }
+    const mine = this.controller ? { id: this.id, at: now, role: CONTROLLER } : { id: this.id, at: now, ...(ask ? { ask } : {}) };
+    try { await writeTextFile(path, JSON.stringify(mine), text); return true; }
+    catch { return this.holds(path); } // another copy wrote meanwhile: an ask leaves the lease this copy's
+  }
+
+  /** Whether the lease file names this copy and is fresh. */
+  async holds(path) {
+    const text = await readTextFile(path), lease = text ? JSON.parse(text) : null;
+    return lease?.id === this.id && this.now() - lease.at < LEASE_MS;
+  }
+
+  /** No collect pass, snapshot, last pass or hook-event drain of this copy's is running. */
+  idle() {
+    return !this.collecting && !this.draining && ![...this.captures.values(), ...(this.ending ?? [])].some((c) => c.busy);
   }
 
   /**
@@ -139,9 +218,14 @@ export class CaptureLoop {
     this.leading = true;
     const log = this.log;
     try {
-      if (!(await this.lease())) return;
+      if (!(await this.lease())) { this.stopWatches(); return; }
       this.journal ??= new Journal(log);
-      try { await this.journal.drain(); this.logStep("hook events", null); } catch (e) { this.logStep("hook events", e); }
+      // Never while a collect pass runs: both write review indexes (a pass then fails its compare-and-swap).
+      if (!this.collecting) {
+        this.draining = true;
+        try { await this.journal.drain(); this.logStep("hook events", null); } catch (e) { this.logStep("hook events", e); }
+        finally { this.draining = false; }
+      }
       try {
         await drainOutbox((t) => agents().some((a) => a.address === t && ACTIVE.has(a.status)),
           (t, text) => hc(["send", t, text]), log);
@@ -208,8 +292,11 @@ export class CaptureLoop {
         if (!c) continue;
         const change = applyPlan(c, p);
         if (change === "started") started.push(c);
-        if (change) { log(`${c.capture.store.root}: ${change === "started" ? "working" : "idle"}`); cx.notify(); }
+        if (change) { log(`${c.capture.store.root}: ${change === "started" ? "working" : "idle"}`); this.paint(cx); }
+        // With the slow fallback, a turn's last pass comes now, not up to SLOW_MS later.
+        if (change === "idle" && this.fallbackMs() === SLOW_MS) this.wake(cx);
       }
+      this.syncWatches(cx);
       // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
       if (started.length) await Promise.all(started.map((c) => this.collect(c, cx, true)));
       // A record whose pass is running ends at a later tick.
@@ -220,9 +307,74 @@ export class CaptureLoop {
     finally { this.leading = false; }
   }
 
-  async collectAll(cx) {
-    if (!this.isLeader) return;
-    const now = this.now();
+  /** The collect timer's tick (main.js, every 500 ms): a pass once the fallback interval is up. */
+  collectTick(cx) {
+    if (this.now() - (this.collectedAt ?? 0) >= this.fallbackMs()) return this.collectAll(cx);
+  }
+
+  /** SLOW_MS while every captured repo has a watch that has delivered events, else FAST_MS. */
+  fallbackMs() {
+    const keys = [...this.captures.keys()];
+    return keys.length && keys.every((k) => this.watches.get(k)?.live) ? SLOW_MS : FAST_MS;
+  }
+
+  /** A watch event: a pass soon (WAKE_SETTLE), at most one per WAKE_MS; one pending at a time. */
+  wake(cx) {
+    if (this.wakeDue || this.closed) return;
+    this.wakeDue = true;
+    cx.spawn(async (cx) => {
+      await cx.sleep(Math.max(WAKE_SETTLE, (this.collectedAt ?? 0) + WAKE_MS - this.now()));
+      this.wakeDue = false;
+      if (!this.closed) await this.collectAll(cx, true);
+    });
+  }
+
+  /** One watchFolder loop per captured repo on this computer while this copy leads; ended when the repo leaves capture. */
+  syncWatches(cx) {
+    for (const [k, w] of this.watches) if (!this.captures.has(k)) { w.stop = true; this.watches.delete(k); }
+    if (!this.isLeader || this.closed) return;
+    for (const [k, c] of this.captures) {
+      const st = c.capture.store;
+      if (st.on || this.watches.has(k)) continue;
+      const w = { root: st.root, gitDir: st.gitDir, stop: false, live: false, failed: !watchable(st.root) };
+      this.watches.set(k, w); // a root that isn't watchable keeps its entry (failed), so it isn't looked at again
+      if (!w.failed) cx.spawn((cx) => this.watchLoop(w, cx));
+    }
+  }
+
+  stopWatches() {
+    for (const w of this.watches.values()) w.stop = true;
+    this.watches.clear();
+  }
+
+  /** Waits for changes under the repo and wakes a pass. A watch that fails stays failed (FAST_MS) until the repo leaves capture. */
+  async watchLoop(w, cx) {
+    while (!w.stop && !this.closed) {
+      let paths;
+      try { paths = await watchFolder(w.root); }
+      catch (e) {
+        w.failed = true;
+        if (!w.stop && !this.closed) this.log(`${w.root}: no file watch (${tailText(e?.message ?? e) || "error"}); passes every ${FAST_MS / 1000} s`);
+        return;
+      }
+      if (w.stop || this.closed) return;
+      if (!w.live) { w.live = true; this.log(`${w.root}: file watch working; passes on change, else every ${SLOW_MS / 1000} s`); }
+      if (wakes(paths, w.root, w.gitDir)) this.wake(cx);
+    }
+  }
+
+  async collectAll(cx, woken = false) {
+    if (!this.isLeader || this.handing) return;
+    if (this.collecting) { if (woken) this.again = true; return; }
+    if (this.draining) { if (woken) this.wake(cx); return; } // hook events are being applied: soon after
+    this.collecting = true;
+    try { await this.collectPass(cx); }
+    finally { this.collecting = false; }
+    if (this.again) { this.again = false; this.wake(cx); }
+  }
+
+  async collectPass(cx) {
+    const now = this.collectedAt = this.now();
     // On another machine: a pass only while an agent works and once after, at most every REMOTE.captureMs.
     const due = (c) => !c.capture.store.on || ((c.active || c.after) && now - (c.at ?? 0) >= REMOTE.captureMs);
     // Grouped by machine: a machine's hook events are applied before its captures' passes, so the

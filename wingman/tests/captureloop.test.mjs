@@ -3,8 +3,8 @@
 // clock (herdr-shim's `world`). Scenarios S1-S11: repos added and dropped, shared repos, two
 // spellings of a repo, no agent, deleted spaces and folders, branch switches, a leader change and
 // linked worktrees. `WINGMAN_LOOP_CASES=S1,S5` runs only some.
-import { world, execCalls } from "./herdr-shim.mjs";
-import { CaptureLoop, LEASE_MS, CAPTURE_ERRORS } from "../mods/wingman/captureloop.js";
+import { world, execCalls, watch, emitWatch } from "./herdr-shim.mjs";
+import { CaptureLoop, LEASE_MS, CAPTURE_ERRORS, LEADER_FILE, CONTROLLER, FAST_MS, SLOW_MS, WAKE_MS, wakes, watchable } from "../mods/wingman/captureloop.js";
 import { addFolder, removeFolder } from "../mods/wingman/workspace.js";
 import { shows } from "../mods/wingman/store.js";
 import { mkRepo, isolate, tempDir, cleanup, state } from "./snaphelper.mjs";
@@ -21,7 +21,18 @@ isolate(BASE);
 const LAYOUT = { id: "w", type: "block", content: { mod: "wingman", props: { view: "review" } } }; // every space reviewed
 const clock = { t: 1.7e12 };
 const now = () => clock.t;
-const cx = { notify() {} };
+// spawn: a task starts at once; sleep moves the fake clock (and records how long it was asked to wait).
+const slept = [];
+const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+const cx = { notify() {}, spawn(f) { Promise.resolve().then(() => f(cx)); }, async sleep(ms) { slept.push(ms); clock.t += ms; await pause(30); } };
+/** Waits until the loop has no pass running or due (watch loops keep waiting for emitWatch). */
+async function settle(loop) {
+  for (let i = 0; i < 1000; i++) {
+    await pause(5);
+    if (!loop.wakeDue && !loop.collecting) { await pause(10); if (!loop.wakeDue && !loop.collecting) return; }
+  }
+  throw new Error("passes never settled");
+}
 
 /** A fresh Herdr world and Wingman data folder. */
 function reset() {
@@ -29,11 +40,14 @@ function reset() {
   mkdirSync(join(home, "data", "wingman"), { recursive: true });
   Object.assign(world, { spaces: [], agents: [], panes: [], terminals: [], layout: LAYOUT });
   world.shared.clear();
+  watch.waiting.clear(); watch.calls.length = 0; watch.fail.clear();
 }
 
-function newLoop(id = "L1") {
-  const lines = [], loop = new CaptureLoop({ id, log: (m) => lines.push(m), now });
+function newLoop(id = "L1", controller = false) {
+  const lines = [], loop = new CaptureLoop({ id, log: (m) => lines.push(m), now, controller });
   loop.lines = lines;
+  const pass1 = loop.collectPass.bind(loop);
+  loop.passes = 0; loop.passAt = []; loop.collectPass = (c) => { loop.passes++; loop.passAt.push(clock.t); return pass1(c); };
   /** Log lines since the last mark. */
   loop.since = () => { const out = lines.slice(loop.at ?? 0); loop.at = lines.length; return out; };
   return loop;
@@ -371,6 +385,167 @@ try {
     assert.deepEqual(entries(R), { "b.txt": e("t1", "s1") }, "t1 is the space's only working agent: credited in both");
     assert.deepEqual(entries(R, wtGit), { "a.txt": e("t1", "s1", "wt") });
     okR(["b.txt"]);
+  });
+
+  // S12: a capture controller (props.role "capture") over panel copies, and two controllers.
+  await scenario("S12", async () => {
+    const R = repo(), ok = guard(R), sp = space("s1", folder()), a = agent("t1", sp, R.dir, "working");
+    const P1 = newLoop("p1"), P2 = newLoop("p2"), C = newLoop("c1", true);
+    const lease = () => JSON.parse(readFileSync(LEADER_FILE(), "utf8"));
+    const leaders = (...ls) => ls.filter((l) => l.isLeader).map((l) => l.id);
+    const round = async (...ls) => { clock.t += 500; for (const l of ls) await l.lead(cx); };
+    await round(P1, P2);
+    assert.deepEqual(leaders(P1, P2), ["p1"]);
+    R.w("a.txt", "by p1\n"); await P1.collectAll(cx);
+    // The controller appears: it asks, the panel leader hands over at its next renewal, the controller leads.
+    const t0 = clock.t;
+    clock.t += 500; await C.lead(cx);
+    assert.equal(C.isLeader, false, "a fresh panel lease isn't taken over at once");
+    assert.equal(lease().ask, "c1");
+    // Another controller (or a copy being reloaded) doesn't replace the ask.
+    const Cx = newLoop("cx", true);
+    clock.t += 100; await Cx.lead(cx);
+    assert.equal(lease().ask, "c1");
+    // A panel leader in the middle of a pass keeps the lease (and the ask) until the pass is done,
+    // and starts no new pass meanwhile.
+    const rec = [...P1.captures.values()][0];
+    rec.busy = true; await P1.lease(); rec.busy = false;
+    assert.equal(lease().id, "p1", "no hand-over while a pass runs");
+    assert.equal(lease().ask, "c1", "the ask stays");
+    assert.equal(P1.isLeader, true);
+    const n = P1.passes; await P1.collectAll(cx);
+    assert.equal(P1.passes, n, "no new pass while handing over");
+    await round(C, P1, P2);
+    for (let i = 0; i < 4 && !C.isLeader; i++) await round(C, P1, P2);
+    assert.deepEqual(leaders(C, P1, P2), ["c1"]);
+    assert.ok(clock.t - t0 < LEASE_MS, `handed over within the lease time (${clock.t - t0} ms)`);
+    assert.deepEqual(lease(), { id: "c1", at: lease().at, role: CONTROLLER });
+    has(P1.since(), "capture handed over to controller c1");
+    // Panel copies never lead while the controller renews, however long.
+    for (let i = 0; i < 30; i++) { await round(C, P1, P2); assert.deepEqual(leaders(C, P1, P2), ["c1"]); }
+    // The controller captures: the saved snapshot carries on, and the edit is adopted.
+    R.w("b.txt", "by c1\n"); await C.collectAll(cx);
+    assert.deepEqual(entries(R), { "a.txt": e("t1", "s1"), "b.txt": e("t1", "s1") });
+    // An old copy reads only id and at: both are there.
+    assert.equal(typeof lease().id, "string"); assert.equal(typeof lease().at, "number");
+    // The controller goes: a panel copy leads once the lease has run out, not before.
+    clock.t += 1000; await P1.lead(cx); await P2.lead(cx);
+    assert.deepEqual(leaders(P1, P2), []);
+    clock.t += LEASE_MS; await P1.lead(cx); await P2.lead(cx);
+    assert.equal(leaders(P1, P2).length, 1, "one panel copy leads again");
+    assert.equal(lease().role, undefined);
+    // Two controllers (two windows): one leads; the other only after the first is gone.
+    const C2 = newLoop("c2", true), C3 = newLoop("c3", true);
+    for (let i = 0; i < 6; i++) await round(C2, C3, P1, P2);
+    assert.equal(leaders(C2, C3, P1, P2).length, 1);
+    assert.ok(["c2", "c3"].includes(lease().id), `a controller leads (${JSON.stringify(lease())})`);
+    for (let i = 0; i < 20; i++) { await round(C3, C2, P2, P1); assert.equal(leaders(C2, C3, P1, P2).length, 1); }
+    const [gone, left] = C2.isLeader ? [C2, C3] : [C3, C2];
+    for (let i = 0; i < 4; i++) { await round(left, P1, P2); assert.equal(left.isLeader, false, "the lease still holds"); }
+    for (let i = 0; i < 12; i++) await round(left, P1, P2);
+    assert.deepEqual(leaders(left, P1, P2), [left.id], `${gone.id} gone: ${left.id} leads`);
+    a.status = "idle"; await round(left); await left.collectAll(cx);
+    assert.equal(capState(R).tree, null);
+    ok(["a.txt", "b.txt"]);
+  });
+
+  // S13: watchFolder wakes collect passes; the timer is the fallback.
+  await scenario("S13", async () => {
+    // Which batches wake a pass.
+    assert.equal(wakes(["C:\\x\\a.txt"], "C:/x", "C:/x/.git"), true);
+    assert.equal(wakes(["c:/X/.git/objects/ab/cd", "C:\\x\\.git\\wingman\\index.json", "C:/x/.git/index"], "C:/x", "C:/x/.git"), false);
+    assert.equal(wakes(["C:/x/.git/HEAD"], "C:/x", "C:/x/.git"), true);
+    assert.equal(wakes(["C:/x/.git/refs/heads/main"], "C:/x", "C:/x/.git"), true);
+    assert.equal(wakes(["C:/x"], "C:/x", "C:/x/.git"), true, "the root: anything may have changed");
+    assert.equal(wakes([], "/r", "/r/.git"), true);
+    assert.equal(wakes(["/r/sub/.git/index", "/elsewhere/a"], "/r", "/r/.git"), false);
+    // Which roots are watched: not WSL's files seen from Windows.
+    assert.deepEqual(["C:/dev/a", "/home/u/a", "//wsl.localhost/Ubuntu/home/u/a", "\\\\wsl$\\Ubuntu\\home\\u\\a", "//WSL.localhost/Ubuntu/mnt/c/a"].map(watchable), [true, true, false, false, false]);
+
+    const A = repo(), ok = guard(A), sp = space("s1", folder()), a = agent("t1", sp, A.dir, "working"), L = newLoop();
+    await tick(L); await settle(L);
+    assert.deepEqual(watch.calls, [A.dir], "one watch for the captured repo");
+    assert.equal(L.fallbackMs(), FAST_MS, "no event yet: the 3 s timer");
+    // A change wakes a pass within the debounce.
+    slept.length = 0;
+    A.w("a.txt", "watched\n");
+    assert.equal(emitWatch(A.dir, [join(A.dir, "a.txt")]), 1);
+    await settle(L);
+    assert.equal(L.passes, 1);
+    assert.ok(slept.length === 1 && slept[0] <= WAKE_MS, `woken within ${WAKE_MS} ms (${slept})`);
+    assert.deepEqual(entries(A), { "a.txt": e("t1", "s1") });
+    has(L.since(), "file watch working");
+    assert.equal(L.fallbackMs(), SLOW_MS, "a working watch: the 10 s fallback");
+    // A burst makes one pass, and passes are at least WAKE_MS apart.
+    clock.t += 2000;
+    for (const f of ["b.txt", "c.txt", "d.txt"]) { A.w(f, `${f}\n`); emitWatch(A.dir, [join(A.dir, f)]); await pause(2); }
+    await settle(L);
+    assert.equal(L.passes, 2, "one pass for the burst");
+    A.w("e.txt", "e\n"); emitWatch(A.dir, [join(A.dir, "e.txt")]); await settle(L);
+    assert.equal(L.passes, 3);
+    assert.ok(L.passAt[2] - L.passAt[1] >= WAKE_MS, `passes ${L.passAt[2] - L.passAt[1]} ms apart`);
+    assert.deepEqual(Object.keys(entries(A)).sort(), ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"]);
+    // A batch naming only git files (a snapshot's objects, the review store, the index) makes none.
+    emitWatch(A.dir, [join(A.gitDir, "objects", "ab", "cdef"), join(A.gitDir, "wingman", "index.json"), join(A.gitDir, "index")]);
+    await settle(L);
+    assert.equal(L.passes, 3, "no pass for a .git-only batch");
+    // Hook events and collect passes never run at once (both write the review index).
+    const ev = join(home, "data", "wingman", "events");
+    mkdirSync(ev, { recursive: true });
+    A.w("h.txt", "by the hook\n");
+    writeFileSync(join(ev, "1-t1-1.json"), JSON.stringify({ terminal: "t1", event: { tool_name: "Edit", cwd: A.dir, tool_input: { file_path: join(A.dir, "h.txt") }, tool_response: { originalFile: "" } } }));
+    L.collecting = true; await tick(L); L.collecting = false;
+    assert.equal(existsSync(join(ev, "1-t1-1.json")), true, "no drain while a pass runs");
+    L.draining = true;
+    emitWatch(A.dir, [join(A.dir, "h.txt")]); await pause(150);
+    assert.equal(L.passes, 3, "no pass while hook events are applied");
+    L.draining = false; await settle(L);
+    assert.equal(L.passes, 4, "the woken pass runs once the drain is done");
+    await tick(L); await settle(L);
+    assert.equal(existsSync(join(ev, "1-t1-1.json")), false, "drained at the next tick");
+    assert.equal(entries(A)["h.txt"]?.by, "t1");
+    // No loop per pass: one watch waits, however many ticks and passes.
+    for (let i = 0; i < 4; i++) { await tick(L); await pass(L); }
+    await settle(L);
+    assert.equal(watch.waiting.get(A.dir)?.length, 1);
+    assert.equal(watch.calls.length, 8, "one watchFolder call per event, none per pass");
+    // The fallback timer: nothing before 10 s while the watch works, a pass at 10 s with no event.
+    const n = L.passes;
+    clock.t += FAST_MS; await L.collectTick(cx);
+    assert.equal(L.passes, n, "no 3 s pass while the watch works");
+    A.w("f.txt", "missed by the watch\n");
+    clock.t += SLOW_MS; await L.collectTick(cx);
+    assert.equal(L.passes, n + 1);
+    assert.ok(entries(A)["f.txt"], "the fallback pass adopts what no event announced");
+    // The repo leaves capture: its loop ends at its next event and doesn't watch again.
+    world.spaces = []; dropAgent(a);
+    await tick(L); await settle(L);
+    has(L.since(), `stopped capturing ${A.dir}`);
+    assert.equal(L.watches.size, 0);
+    const calls = watch.calls.length;
+    emitWatch(A.dir, [join(A.dir, "g.txt")]); await settle(L);
+    assert.equal(watch.calls.length, calls, "the ended loop doesn't call watchFolder again");
+    assert.equal(watch.waiting.has(A.dir), false);
+    ok(["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "h.txt"]);
+  });
+
+  // S14: a watch that fails keeps the 3 s timer and isn't restarted; a closed copy's loop ends.
+  await scenario("S14", async () => {
+    const A = repo(), B = repo(), sp = space("s1", folder());
+    agent("t1", sp, A.dir, "working"); agent("t2", sp, B.dir);
+    watch.fail.add(B.dir);
+    const L = newLoop();
+    await tick(L); await settle(L); await tick(L); await settle(L);
+    has(L.since(), `${B.dir}: no file watch`);
+    assert.equal(watch.calls.filter((d) => d === B.dir).length, 1, "a failed watch isn't tried again every tick");
+    A.w("a.txt", "x\n"); emitWatch(A.dir, [join(A.dir, "a.txt")]); await settle(L);
+    assert.equal(L.fallbackMs(), FAST_MS, "one repo without a watch: the 3 s timer");
+    clock.t += FAST_MS; const n = L.passes; await L.collectTick(cx);
+    assert.equal(L.passes, n + 1);
+    L.close();
+    emitWatch(A.dir, [join(A.dir, "b.txt")]); await settle(L);
+    assert.equal(watch.waiting.has(A.dir), false, "a closed copy's loop ends at its next event");
+    assert.equal(L.passes, n + 1, "and wakes nothing");
   });
 } finally {
   console.log(results.join("\n"));

@@ -92,8 +92,55 @@ MAXPX = 2400
 #   - the tabs block (mod "tabs") becomes "tabs-plus", the old mod kept in props.replaces
 #   - the max of the stack's parent, when below MAXPX, becomes MAXPX; the old max is kept in
 #     props.max_was on the first Wingman block
+#   - adds the capture controller block "wingman-capture" to the root's floating list (add_ctl)
 def block(bid, view):
     return {"id": bid, "type": "block", "content": {"mod": "wingman", "props": {"view": view, "added": True}}}
+
+
+# The capture controller: an empty block in the root's floating list, always rendered. Marked like
+# the panel blocks (props.added = true); props.list_added = true when patch created the floating list,
+# so unpatch removes the list too only then.
+CTL_ID = "wingman-capture"
+
+
+def is_ctl(f):
+    c = f.get("content") if isinstance(f, dict) else None
+    return isinstance(c, dict) and c.get("mod") == "wingman" and (c.get("props") or {}).get("role") == "capture"
+
+
+def add_ctl(root, acts):
+    fl = root.get("floating")
+    if fl is not None and not isinstance(fl, list):
+        print("NOTE the layout's floating is not a list; capture controller not added")
+        return
+    made = fl is None
+    fl = fl if fl is not None else []
+    if any(is_ctl(f) for f in fl):
+        return
+    if any(isinstance(f, dict) and f.get("id") == CTL_ID for f in fl):
+        print("NOTE a floating block with id %s exists but is not Wingman's; skipped" % CTL_ID)
+        return
+    props = {"role": "capture", "added": True}
+    if made:
+        props["list_added"] = True
+    fl.append({"id": CTL_ID, "content": {"mod": "wingman", "props": props}})
+    root["floating"] = fl
+    acts.append("add floating block %s (capture controller)" % CTL_ID)
+
+
+def remove_ctl(root, acts):
+    fl = root.get("floating")
+    if not isinstance(fl, list):
+        return
+    keep = [f for f in fl if not is_ctl(f)]
+    if len(keep) == len(fl):
+        return
+    made = any(((f.get("content") or {}).get("props") or {}).get("list_added") is True for f in fl if is_ctl(f))
+    acts.append("remove floating block %s" % CTL_ID)
+    if keep or not made:
+        root["floating"] = keep
+    else:
+        del root["floating"]
 
 
 def walk(node, parent=None):
@@ -198,6 +245,7 @@ def patch(src, dst, bak, dry, cloned):
             parent["max"] = MAXPX
         else:
             print("NOTE max of %s left as it is: no Wingman block to keep the old value in" % parent.get("id"))
+    add_ctl(root, acts)
     clone = src != dst
     if clone and "cloned_from" not in root:
         cf = {"name": cloned}
@@ -243,6 +291,7 @@ def patch(src, dst, bak, dry, cloned):
 def unpatch(path, bak, dry):
     root, fmt = read(path)
     acts = []
+    remove_ctl(root, acts)
     ids = [w[0] for w in WING]
     stack, parent = find_stack(root)
     # The max Wingman raised goes back, unless the person changed it since.
@@ -505,6 +554,8 @@ no_stack_help() {
   for v in review edit changes; do
     say "        {\"id\":\"wingman-$v\",\"type\":\"block\",\"content\":{\"mod\":\"wingman\",\"props\":{\"view\":\"$v\"}}}"
   done
+  say "    - to the root's \"floating\" list, the capture controller:"
+  say "        {\"id\":\"wingman-capture\",\"content\":{\"mod\":\"wingman\",\"props\":{\"role\":\"capture\"}}}"
   say "    - set the tabs block's \"content\":{\"mod\":\"tabs-plus\"}"
   say "    - raise \"max\" of the column holding the stack to 2400"
   note_next "Add the Wingman blocks to your layout by hand (see above)."

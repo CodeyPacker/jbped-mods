@@ -186,6 +186,52 @@ function Find-Stack($root) {
 
 function Is-Number($v) { return ($v -is [int] -or $v -is [long] -or $v -is [decimal] -or $v -is [double]) }
 
+# The capture controller: an empty block in the root's floating list, always rendered. Marked like
+# the panel blocks (props.added = true); props.list_added = true when Add-Ctl created the floating
+# list, so Remove-Ctl removes the list too only then.
+$CTL_ID = "wingman-capture"
+
+function Is-Ctl($f) {
+  if (-not ($f -is [System.Collections.IDictionary])) { return $false }
+  $c = $f["content"]
+  if (-not ($c -is [System.Collections.IDictionary]) -or $c["mod"] -ne "wingman") { return $false }
+  return (($c["props"] -is [System.Collections.IDictionary]) -and $c["props"]["role"] -eq "capture")
+}
+
+# Returns the action text, or $null when nothing was added.
+function Add-Ctl($root) {
+  $fl = $null
+  if ($root.Contains("floating")) {
+    $fl = $root["floating"]
+    if (-not ($fl -is [System.Collections.IList])) { Say "  note: the layout's floating is not a list; capture controller not added"; return $null }
+  } else {
+    $fl = New-Object System.Collections.ArrayList
+  }
+  $made = -not $root.Contains("floating")
+  foreach ($f in $fl) { if (Is-Ctl $f) { return $null } }
+  foreach ($f in $fl) {
+    if ($f -is [System.Collections.IDictionary] -and $f["id"] -eq $CTL_ID) { Say "  note: a floating block with id $CTL_ID exists but is not Wingman's; skipped"; return $null }
+  }
+  $props = [ordered]@{ role = "capture"; added = $true }
+  if ($made) { $props["list_added"] = $true }
+  [void]$fl.Add([ordered]@{ id = $CTL_ID; content = ([ordered]@{ mod = "wingman"; props = $props }) })
+  $root["floating"] = $fl
+  return "add floating block $CTL_ID (capture controller)"
+}
+
+function Remove-Ctl($root) {
+  if (-not ($root["floating"] -is [System.Collections.IList])) { return $null }
+  $keep = New-Object System.Collections.ArrayList
+  foreach ($f in $root["floating"]) { if (-not (Is-Ctl $f)) { [void]$keep.Add($f) } }
+  if ($keep.Count -eq $root["floating"].Count) { return $null }
+  $made = $false
+  foreach ($f in $root["floating"]) {
+    if ((Is-Ctl $f) -and ($f["content"]["props"] -is [System.Collections.IDictionary]) -and $f["content"]["props"]["list_added"] -eq $true) { $made = $true }
+  }
+  if ($keep.Count -gt 0 -or -not $made) { $root["floating"] = $keep } else { $root.Remove("floating") }
+  return "remove floating block $CTL_ID"
+}
+
 # Adds the blocks. src may differ from dst (a clone). Sets $script:res to changed|unchanged|nostack.
 function Patch-Layout([string]$src, [string]$dst, [string]$bak, [string]$cloned) {
   $L = Read-Layout $src
@@ -239,6 +285,8 @@ function Patch-Layout([string]$src, [string]$dst, [string]$bak, [string]$cloned)
       $parent["max"] = $MAXPX
     } else { Say "  note: max of $($parent['id']) left as it is: no Wingman block to keep the old value in" }
   }
+  $a = Add-Ctl $root
+  if ($a) { $acts += $a }
   $clone = ($src -ne $dst)
   if ($clone -and -not $root.Contains("cloned_from")) {
     $cf = [ordered]@{ name = $cloned }
@@ -281,6 +329,8 @@ function Unpatch-Layout([string]$path, [string]$bak) {
   $root = $L.Root
   $ids = $WING | ForEach-Object { $_[0] }
   $acts = @()
+  $a = Remove-Ctl $root
+  if ($a) { $acts += $a }
   # The max Wingman raised goes back, unless the person changed it since.
   $e = Find-Stack $root
   if ($e) {
@@ -476,6 +526,8 @@ function Show-NoStackHelp {
   foreach ($v in @("review", "edit", "changes")) {
     Say "        {`"id`":`"wingman-$v`",`"type`":`"block`",`"content`":{`"mod`":`"wingman`",`"props`":{`"view`":`"$v`"}}}"
   }
+  Say "    - to the root's `"floating`" list, the capture controller:"
+  Say "        {`"id`":`"wingman-capture`",`"content`":{`"mod`":`"wingman`",`"props`":{`"role`":`"capture`"}}}"
   Say "    - set the tabs block's `"content`":{`"mod`":`"tabs-plus`"}"
   Say "    - raise `"max`" of the column holding the stack to 2400"
   NoteNext "Add the Wingman blocks to your layout by hand (see above)."

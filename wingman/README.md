@@ -47,10 +47,11 @@ Run it again at any time. A second install changes nothing. After you pull new c
 Everything is in the Herdr home (`$HERDR_APP_HOME`, else `~/.config/herdr-app`) and the Claude settings file (`$CLAUDE_CONFIG_DIR/settings.json`, else `~/.claude/settings.json`).
 
 1. `mods/wingman/` and `mods/tabs-plus/` are copied in. Older copies of these two mods are replaced. A mod folder that is a link is left alone.
-2. The active layout is edited in three ways. Each edit keeps what it replaced inside the node, so uninstall undoes exactly it:
+2. The active layout is edited in four ways. Each edit keeps what it replaced inside the node, so uninstall undoes exactly it:
    - Three blocks are added after the blocks already in `panel-body`: `wingman-review`, `wingman-edit`, `wingman-changes`, each with `props.added: true`.
    - The `tabs` block's mod `tabs` becomes `tabs-plus`, the old mod kept in `props.replaces`.
    - The panel column's `max` is raised to 2400 when it was lower. The old value is kept in `props.max_was` of the first Wingman block.
+   - The capture controller `wingman-capture` is added last to the layout root's `floating` list, with `props.added: true`, and `props.list_added: true` when the layout had no `floating` list.
 
    Nothing else in the layout changes.
    - If the active layout is your own, it is backed up as `<name>.json.bak-<timestamp>` and edited.
@@ -66,7 +67,7 @@ Herdr reloads mods and layouts by itself. Restart Claude Code sessions that were
 sh wingman/install.sh uninstall
 ```
 
-This removes the hook, the three blocks, the `tabs-plus` switch and the raised `max` from every layout that has them (each is backed up first), and both mod folders. The layout is back as it was: byte for byte when the file was in Herdr's own JSON style, node for node otherwise. A `<name>-copy.json` copy stays as yours, without Wingman, and you can delete it. A layout an older install patched has no markers: its blocks are removed, its `tabs-plus` and `max` stay.
+This removes the hook, the three blocks, the capture controller, the `tabs-plus` switch and the raised `max` from every layout that has them (each is backed up first), and both mod folders. The layout is back as it was: byte for byte when the file was in Herdr's own JSON style, node for node otherwise. A `<name>-copy.json` copy stays as yours, without Wingman, and you can delete it. A layout an older install patched has no markers: its blocks are removed, its `tabs-plus` and `max` stay.
 
 It also removes Wingman's own bindings (values starting `wingman.`) from the `mod:wingman` section of `keys.json`, and nobody else's. The installer never adds keys. The running mod writes its `mod:wingman` entries itself, only for keys Herdr binds globally, and never replaces a binding that isn't Wingman's.
 

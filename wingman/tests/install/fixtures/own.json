@@ -7,6 +7,15 @@
     },
     "theme": "catppuccin-mocha",
     "background": "canvas",
+    "floating": [
+        {
+            "id": "board",
+            "content": {
+                "mod": "board"
+            },
+            "edge": "left"
+        }
+    ],
     "children": [
         {
             "id": "sidebar",

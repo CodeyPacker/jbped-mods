@@ -59,13 +59,14 @@ const expectDiff = (before, after, want, what) => {
   assert.deepEqual(d, want, `${what}:\n${formatDiff(d)}`);
 };
 
-// What install does to a layout: three blocks added, the tabs block switched, the panel's max raised.
+// What install does to a layout: three blocks added, the capture controller added to `floating`,
+// the tabs block switched, the panel's max raised.
 const FOOTPRINT = {
   changed: [
     { id: "panel", fields: ["max"] },
     { id: "tabs", fields: ["content.mod", "content.props"] },
   ],
-  added: ["wingman-changes", "wingman-edit", "wingman-review"],
+  added: ["wingman-capture", "wingman-changes", "wingman-edit", "wingman-review"],
   removed: [],
 };
 const KEYS = { global: { "alt-up": "agent.prev" }, "mod:wingman": { "alt-up": "wingman.moveLineUp", "ctrl-q": "other.thing" }, terminal: { "ctrl-1": "terminal" } };
@@ -91,6 +92,7 @@ for (const nl of ["\n", "\r\n"]) {
       { view: "review", added: true, max_was: 900 }, { view: "edit", added: true }, { view: "changes", added: true },
     ]);
     assert.deepEqual(lay.children[1].children[0].content, { mod: "tabs-plus", props: { replaces: "tabs" } });
+    assert.deepEqual(lay.floating, [{ id: "wingman-capture", content: { mod: "wingman", props: { role: "capture", added: true, list_added: true } } }]);
     assert.equal(read(join(h.home, "keys.json")), keysBefore, "install leaves keys.json alone");
     assert.ok(existsSync(join(h.home, "mods/wingman")) && existsSync(join(h.home, "mods/tabs-plus")));
     assert.equal(readdirSync(join(h.home, "layouts")).filter((f) => f.endsWith(".json")).join(), "mine.json");
@@ -131,6 +133,27 @@ for (const nl of ["\n", "\r\n"]) {
     assert.ok(sameLayout(diffLayouts(JSON.parse(original), json(file))), "node for node");
     assert.deepEqual(json(file), JSON.parse(original));
     assert.equal(read(file), original);
+  } finally { rmSync(h.root, { recursive: true, force: true }); }
+}
+
+// 2b. A layout with floating blocks of its own (and one with an empty list): the controller goes
+//     last, and uninstall leaves the list as it was, empty or not.
+for (const floating of [[{ id: "board", content: { mod: "board" }, edge: "left" }], []]) {
+  const h = makeHome("float");
+  try {
+    const file = join(h.home, "layouts", "fl.json"), original = pretty({ ...mainLayout(), floating });
+    writeFileSync(file, original);
+    writeFileSync(join(h.home, "shared.json"), JSON.stringify({ layout: "fl" }));
+    run(h, "install");
+    const lay = json(file);
+    assert.deepEqual(lay.floating.map((f) => f.id), [...floating.map((f) => f.id), "wingman-capture"]);
+    assert.deepEqual(lay.floating.at(-1).content.props, { role: "capture", added: true });
+    expectDiff(JSON.parse(original), lay, FOOTPRINT, "install footprint with floating blocks");
+    const installed = read(file);
+    run(h, "install");
+    assert.equal(read(file), installed, "second install changes nothing");
+    run(h, "uninstall");
+    assert.equal(read(file), original, `uninstall restores floating ${JSON.stringify(floating.map((f) => f.id))}`);
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 }
 
