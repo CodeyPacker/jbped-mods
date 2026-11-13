@@ -3183,7 +3183,7 @@ export default class Review extends View {
   openSettings() {
     // A space on another machine adds the "Claude hook on <machine>" section.
     const machine = this.machine();
-    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 830 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 870 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -3980,7 +3980,7 @@ export default class Review extends View {
     const items = [
       { id: "explorer", labels: ["Explorer"], drop: Infinity, size: 11.5, pad: 16 },
       { id: "search", labels: [withKey("Search", this.kl("searchFiles")), "Search"], drop: Infinity, size: 11.5, pad: 16 },
-      { id: "agent", labels: ["Agent files", "Agent"], drop: Infinity, size: 11.5, pad: 16 },
+      { id: "agent", labels: ["Agent files", "Agent files", "Agent"], drop: Infinity, size: 11.5, pad: 16 }, // keeps its full label while only the Search key goes
     ];
     const fit = fitBar(width, items, 12, 2);
     return items.filter((it) => fit.has(it.id)).map((it) => [it.id, fit.get(it.id)]);
@@ -4766,7 +4766,7 @@ export default class Review extends View {
       .on_click((_e, cx) => flip(cx))
       .child(div().w(34).h(18).flex_none().rounded(9).p(2).bg(on ? t.accent : t.raised)
         .child(div().size(14).rounded(7).bg(t.foreground).when(on, (e) => e.ml(16))))
-      .child(v_flex().child(div().text_size(13).child(label)).child(div().text_size(11).text_color(t.dim).child(hint)));
+      .child(v_flex().flex_1().min_w(0).child(div().text_size(13).child(label)).child(div().text_size(11).text_color(t.dim).child(hint))); // the hint wraps instead of running past the dialog
     return v_flex().id("wingman-settings").track_focus(this.formHandle)
       .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
       .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
