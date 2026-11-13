@@ -5,6 +5,29 @@ import { createHash } from "node:crypto";
 
 const node = (s) => createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
 
+// First, before any other sha256Hex call: sha256Hex never reads crypto (in Herdr, crypto.subtle.digest
+// panicked the engine from the capture path). With crypto trapped it still gives the known vectors.
+{
+  const desc = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  let touched = 0;
+  const trap = new Proxy({}, { get() { touched++; throw new Error("crypto.subtle used"); } });
+  Object.defineProperty(globalThis, "crypto", { configurable: true, get() { touched++; return { subtle: trap }; } });
+  try {
+    const vectors = [
+      ["", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"],
+      ["abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"],
+      ["abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"], // two blocks
+      ["a".repeat(1000), "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"], // 16 blocks
+      ["é 中文 😀", node("é 中文 😀")], // 2-, 3- and 4-byte UTF-8 (against node:crypto's createHash, which the trap doesn't cover)
+      ["héllo wörld", "a1003f7d04a4115711d0b48a2eaf1359ce565d2d2a6fd65098dfcffadeeef59f"],
+    ];
+    for (const [text, want] of vectors) assert.equal(await sha256Hex(text), want, JSON.stringify(text.slice(0, 20)));
+    assert.equal(touched, 0, "crypto was never read");
+  } finally {
+    if (desc) Object.defineProperty(globalThis, "crypto", desc); else delete globalThis.crypto;
+  }
+}
+
 // FIPS 180-4 vectors.
 assert.equal(sha256Pure(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
 assert.equal(sha256Pure("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");

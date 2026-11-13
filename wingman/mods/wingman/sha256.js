@@ -1,7 +1,9 @@
 // SHA-256 of text as UTF-8 bytes, and UTF-8 byte counting and chunking. Pure: no Herdr imports.
-// Herdr's runtime (QuickJS) has no TextEncoder but has a native Buffer and crypto.subtle. A JS loop
-// there costs about 1 ms per KB, so the native ones are used when present (and checked once against
-// a known vector); the pure versions are the fallback and what the tests pin down.
+// Herdr's runtime (QuickJS) has no TextEncoder but has a native Buffer, used for the UTF-8 bytes
+// when present. Hashing is always plain JS: Herdr's crypto.subtle.digest is a host async function,
+// and calling it from the capture path (collectAll -> store.reconcile -> committed() -> sumOf)
+// panicked the app's JS engine ("tried to use async function in non async runtime") and stopped
+// that Wingman copy. Never call crypto.subtle here.
 
 const NativeBuffer = typeof globalThis.Buffer === "function" ? globalThis.Buffer : null;
 
@@ -127,20 +129,10 @@ export function sha256Bytes(bytes) {
 /** SHA-256 of `s` as UTF-8, pure JS. */
 export const sha256Pure = (s) => sha256Bytes(utf8(s));
 
-const hex = (buf) => Array.from(new Uint8Array(buf), (x) => x.toString(16).padStart(2, "0")).join("");
-const ABC = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-let subtle; // undefined: not checked yet; null: not usable
-
-/** SHA-256 of `s` as UTF-8: crypto.subtle when it gives the right answer for "abc", else pure JS. */
+/**
+ * SHA-256 of `s` as UTF-8, in plain JS (sha256Pure). Async only so callers keep awaiting it; it
+ * never calls a host async function.
+ */
 export async function sha256Hex(s) {
-  const bytes = utf8(s);
-  if (subtle === undefined) {
-    subtle = null;
-    try {
-      const c = globalThis.crypto?.subtle;
-      if (c && hex(await c.digest("SHA-256", new Uint8Array([97, 98, 99]))) === ABC) subtle = c;
-    } catch {}
-  }
-  if (subtle) { try { return hex(await subtle.digest("SHA-256", bytes)); } catch { subtle = null; } }
-  return sha256Bytes(bytes);
+  return sha256Bytes(utf8(s));
 }
