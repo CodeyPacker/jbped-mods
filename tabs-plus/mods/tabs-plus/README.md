@@ -4,11 +4,11 @@ Herdr's `tabs` mod (the tab bar) with a side panel that more mods can join. A cl
 
 ## What it adds
 
-- **Panel buttons for mod blocks.** Next to Files and Changes, a button for each block in the layout's `panel-body` stack that runs Wingman (one per view: Review, Edit, Changes) or Wayfindr. A block only gets a button when the layout has it.
-- **A width per panel tab.** Switching to a panel tab resizes the panel to the width it had last time, and dragging the panel records the width for the tab shown. Wingman and Wayfindr start at 960px.
-- **Commands for the palette.** `tabs-plus.wingmanReview`, `tabs-plus.wingmanEdit`, `tabs-plus.wingmanChanges` and `tabs-plus.wayfindr` select that panel tab and show the panel. A palette entry runs one command, and a hidden panel block gets no commands, so the tab bar, which is always shown, does it.
-- **A toggle for a key.** `tabs-plus.wayfindrToggle` hides the panel when Wayfindr is what it shows, else shows Wayfindr. The `wayfindr` share's `keys.json` binds it to `ctrl-shift-g`.
-- **Wayfindr's fullscreen.** When Wayfindr stops showing (another panel tab, Close, a space with the panel closed), the terminals come back and the panel gets its width again.
+- **Panel buttons for mod blocks.** Next to Files and Changes, a button for each block in the layout's `panel-body` stack that runs Wingman (one per view: Review, Edit, Changes). A block only gets a button when the layout has it.
+- **A width per panel tab.** Switching to a panel tab resizes the panel to the width it had last time, and dragging the panel records the width for the tab shown. Wingman starts at 960px.
+- **Commands for the palette.** `tabs-plus.wingmanReview`, `tabs-plus.wingmanEdit`, and `tabs-plus.wingmanChanges` select that panel tab and show the panel. A palette entry runs one command, and a hidden panel block gets no commands, so the tab bar, which is always shown, does it.
+- **A Wayfindr button.** When the layout has a `wayfindr` block (in `work-body`, see the Wayfindr README), a Wayfindr button after the Wingman buttons toggles it, lit while it is shown.
+- **Wayfindr covers the terminals.** While the `wayfindr` block is shown, the tab bar keeps `main` and `panel` hidden. When it hides, `main` comes back and the side panel returns to what the space had. The layout's hidden flags are the only state, so this holds across restarts.
 
 ## Install
 

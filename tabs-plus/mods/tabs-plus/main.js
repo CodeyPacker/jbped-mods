@@ -11,30 +11,21 @@ function find(node, id) {
   return null;
 }
 
-const WIDE = { "wingman-review": 960, "wingman-edit": 960, "wingman-changes": 960, "wayfindr": 960 }; // a first width for panels that want more than the panel's default
+const WIDE = { "wingman-review": 960, "wingman-edit": 960, "wingman-changes": 960 }; // a first width for panels that want more than the panel's default
 
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
-    // "Wayfindr: Open" in the palette: one command can't both pick the panel child and show the
-    // panel, and a hidden Wayfindr gets no commands, so the always-shown tab bar does it.
+    // "Wingman: Review" / "Wingman: Edit" in the palette: one command can't both pick the panel
+    // child and show the panel, so the always-shown tab bar does it.
     cx.spawn(async () => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^tabs-plus\./, "");
-        // "Wingman: Review" / "Wingman: Edit" in the palette, the same way.
-        const child = { wayfindr: "wayfindr", wingmanReview: "wingman-review", wingmanEdit: "wingman-edit", wingmanChanges: "wingman-changes" }[c];
+        const child = { wingmanReview: "wingman-review", wingmanEdit: "wingman-edit", wingmanChanges: "wingman-changes" }[c];
         if (child) { run("layout.select", { stack: "panel-body", child }); run("layout.show", { id: "panel" }); }
-        // "Wayfindr: Toggle" (its key): hides the panel when Wayfindr is what it shows, else shows Wayfindr.
-        // The fullscreen check in render puts the terminals back after a hide.
-        if (c === "wayfindrToggle") {
-          const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body");
-          const wf = (body?.children ?? []).find(x => x.content?.mod === "wayfindr");
-          if (!wf) continue;
-          if (panel && !panel.hidden && body.active === wf.id) run("layout.hide", { id: "panel" });
-          else { run("layout.select", { stack: "panel-body", child: wf.id }); run("layout.show", { id: "panel" }); }
-        }
       }
     });
+    setShared("wayfindr.fullscreen", null); // the old Wayfindr fullscreen's key; the layout is the state now
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     this.widths = JSON.parse(localStorage.getItem("panelWidths") ?? "{}");
   }
@@ -82,7 +73,22 @@ export default class Tabs extends View {
     localStorage.setItem("panels", JSON.stringify(this.panels));
   }
 
-  render() {
+  // Wayfindr shown <=> "main" hidden. Showing the "wayfindr" block hides the terminals and the side
+  // panel; hiding it shows the terminals and lets syncPanel put back this space's panel. The layout's
+  // hidden flags are the only state. Deferred: the layout can't change during render.
+  holdWayfindr(cx, wf, main) {
+    if (!wf || this.holding || Boolean(wf.hidden) !== Boolean(main?.hidden)) return;
+    this.holding = true;
+    cx.timer.after(0, () => {
+      this.holding = false;
+      const root = layout(), wf = find(root, "wayfindr"), main = find(root, "main");
+      if (!wf) return;
+      if (!wf.hidden && !main?.hidden) { run("layout.hide", { id: "main" }); run("layout.hide", { id: "panel" }); }
+      else if (wf.hidden && main?.hidden) { run("layout.show", { id: "main" }); this.space = null; }
+    });
+  }
+
+  render(cx) {
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
@@ -118,18 +124,15 @@ export default class Tabs extends View {
     // panel settings): one button per Wingman block, named for its view.
     const base = shared("workspace.panels") ?? ["files", "changes"];
     const wingmen = (body?.children ?? []).filter(c => c.content?.mod === "wingman");
-    const wayfindr = (body?.children ?? []).find(c => c.content?.mod === "wayfindr");
-    const enabled = [...base, ...[...wingmen, ...(wayfindr ? [wayfindr] : [])].map(c => c.id).filter(id => !base.includes(id))];
-    // Wayfindr's fullscreen hides "main" and stretches the panel. Leaving Wayfindr any way
-    // (another panel, closing it, a space whose panel is closed) puts them back.
-    const full = shared("wayfindr.fullscreen");
-    if (full && (!panel || panel.hidden || body?.active !== wayfindr?.id)) {
-      setShared("wayfindr.fullscreen", null);
-      run("layout.show", { id: "main" });
-      run("layout.resize", { id: "panel", px: full.px ?? WIDE.wayfindr });
+    const enabled = [...base, ...wingmen.map(c => c.id).filter(id => !base.includes(id))];
+    const wf = find(root, "wayfindr"), main = find(root, "main");
+    this.holdWayfindr(cx, wf, main);
+    // While Wayfindr covers the work area (or until the terminals are back), the panel it hid isn't
+    // a choice: nothing is recorded or restored.
+    if (!wf || (wf.hidden && !main?.hidden)) {
+      this.syncPanel(space, panel, body, enabled);
+      this.fitPanel(panel, body);
     }
-    this.syncPanel(space, panel, body, enabled);
-    this.fitPanel(panel, body);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
@@ -148,7 +151,10 @@ export default class Tabs extends View {
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
       .children(wingmen.map(c => panelButton(c.id, { edit: "Edit", changes: "Changes" }[c.content.props?.view] ?? "Review", "mods/wingman/wingman.svg")))
-      .when(Boolean(wayfindr), el => el.child(panelButton(wayfindr.id, "Wayfindr", "mods/wayfindr/wayfindr.svg")))
+      .when(Boolean(wf), el => el.child(h_flex().id("wayfindr-button").h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+        .text_size(12).bg(!wf.hidden ? t.selected : t.chrome).text_color(!wf.hidden ? t.foreground : t.muted)
+        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => run("layout.toggle", { id: "wayfindr" }))
+        .child(svg("mods/wayfindr/wayfindr.svg").size(14)).child("Wayfindr")))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-plus/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-plus/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-plus/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
