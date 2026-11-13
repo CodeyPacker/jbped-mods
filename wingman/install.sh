@@ -13,7 +13,8 @@
 #   --purge     with uninstall: also delete data/wingman
 #
 # Herdr home: $HERDR_APP_HOME, else ~/.config/herdr-app (on WSL with Herdr on Windows: the
-# Windows profile's .config/herdr-app). Claude settings: ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json.
+# Windows profile's .config/herdr-app). HERDR_APP_BIN: the herdr-app program to ask to switch layouts
+# (default: herdr-app on PATH, called with HERDR_APP_HOME set to that home). Claude settings: ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json.
 # Needs python3 to edit JSON.
 set -eu
 
@@ -71,7 +72,10 @@ fi
 
 # ---- JSON helper (python3) ----
 # pylayout patch SRC DST BACKUP|- DRY CLONE_NAME|-   add the blocks; DST may differ from SRC (clone)
-# pylayout unpatch FILE BACKUP DRY                   remove the blocks, restore the tabs mod
+# pylayout unpatch FILE BACKUP DRY                   undo exactly what patch did
+# pylayout keys FILE BACKUP DRY                      remove Wingman's bindings from keys.json
+# pylayout settings FILE DRY                         set hideHerdrPanels false in Wingman's settings.json
+# pylayout panels HOME BACKUP DRY                    put back the panel buttons Wingman hid (shared.json)
 # pylayout status FILE                               print: stack=<yes|no> blocks=<n> tabs=<mod|none>
 # pylayout active HOME                               print: <layout name> <shipped|own|missing>
 # Prints "ACT <text>" lines, "NOTE <text>" lines and one "RESULT=<changed|unchanged|nostack>".
@@ -83,8 +87,13 @@ WING = [("wingman-review", "review"), ("wingman-edit", "edit"), ("wingman-change
 MAXPX = 2400
 
 
+# What patch does to a layout (each edit is kept in the node itself, so unpatch undoes exactly it):
+#   - adds three blocks to the "panel-body" stack, each with props.added = true
+#   - the tabs block (mod "tabs") becomes "tabs-plus", the old mod kept in props.replaces
+#   - the max of the stack's parent, when below MAXPX, becomes MAXPX; the old max is kept in
+#     props.max_was on the first Wingman block
 def block(bid, view):
-    return {"id": bid, "type": "block", "content": {"mod": "wingman", "props": {"view": view}}}
+    return {"id": bid, "type": "block", "content": {"mod": "wingman", "props": {"view": view, "added": True}}}
 
 
 def walk(node, parent=None):
@@ -175,11 +184,20 @@ def patch(src, dst, bak, dry, cloned):
         print("NOTE no tabs block found; Wingman's panel buttons need a tabs block using mod tabs-plus")
     elif tabs["content"]["mod"] == "tabs":
         tabs["content"]["mod"] = "tabs-plus"
+        props = tabs["content"].get("props")
+        if not isinstance(props, dict):
+            props = tabs["content"]["props"] = {}
+        props["replaces"] = "tabs"
         acts.append("point block %s at tabs-plus" % tabs.get("id"))
     if parent is not None and isinstance(parent.get("max"), (int, float)) and not isinstance(parent.get("max"), bool) \
             and parent["max"] < MAXPX:
-        acts.append("raise max of %s from %s to %d" % (parent.get("id"), parent["max"], MAXPX))
-        parent["max"] = MAXPX
+        mark = next((c for c in stack["children"] if isinstance(c, dict) and is_wing(c)), None)
+        if mark is not None:
+            acts.append("raise max of %s from %s to %d" % (parent.get("id"), parent["max"], MAXPX))
+            mark["content"].setdefault("props", {}).setdefault("max_was", parent["max"])
+            parent["max"] = MAXPX
+        else:
+            print("NOTE max of %s left as it is: no Wingman block to keep the old value in" % parent.get("id"))
     clone = src != dst
     if clone and "cloned_from" not in root:
         cf = {"name": cloned}
@@ -193,6 +211,15 @@ def patch(src, dst, bak, dry, cloned):
             if isinstance(c, dict) and c.get("name") == cloned and c.get("version"):
                 cf["version"] = c["version"]
                 break
+        if "version" not in cf:
+            # Herdr refuses a cloned_from without a version. The app's own layout.clone is preferred
+            # (see layout_install); this is the offline fallback: the app version that last ran.
+            try:
+                v = json.load(open(os.path.join(os.path.dirname(here), "update-notes.json"), encoding="utf-8")).get("last_run")
+            except Exception:
+                v = None
+            cf["version"] = v if isinstance(v, str) and v else "0.0.0"
+            print("NOTE %s has no cloned_from.version to copy; wrote %s (the app's own clone is better: Duplicate layout)" % (cloned, cf["version"]))
         new = {}
         for k, v in root.items():
             new[k] = v
@@ -217,6 +244,16 @@ def unpatch(path, bak, dry):
     root, fmt = read(path)
     acts = []
     ids = [w[0] for w in WING]
+    stack, parent = find_stack(root)
+    # The max Wingman raised goes back, unless the person changed it since.
+    if stack is not None and parent is not None:
+        for c in stack["children"]:
+            p = c.get("content", {}).get("props") if isinstance(c, dict) and is_wing(c) else None
+            if isinstance(p, dict) and "max_was" in p:
+                if parent.get("max") == MAXPX:
+                    parent["max"] = p["max_was"]
+                    acts.append("put the max of %s back to %s" % (parent.get("id"), p["max_was"]))
+                break
     for n, _ in walk(root):
         kids = n.get("children")
         keep = [c for c in kids if not (isinstance(c, dict) and c.get("id") in ids and is_wing(c))] if isinstance(kids, list) else None
@@ -231,8 +268,13 @@ def unpatch(path, bak, dry):
                 else:
                     n.pop("active", None)
         c = n.get("content")
-        if n.get("type") == "block" and isinstance(c, dict) and c.get("mod") == "tabs-plus":
+        # Only a block Wingman switched (it kept the old mod in props.replaces) goes back.
+        if n.get("type") == "block" and isinstance(c, dict) and c.get("mod") == "tabs-plus" \
+                and isinstance(c.get("props"), dict) and c["props"].get("replaces") == "tabs":
             c["mod"] = "tabs"
+            del c["props"]["replaces"]
+            if not c["props"]:
+                del c["props"]
             acts.append("point block %s back at tabs" % n.get("id"))
     for a in acts:
         print("ACT " + a)
@@ -241,6 +283,72 @@ def unpatch(path, bak, dry):
     if not dry:
         print("ACT back up to %s" % os.path.basename(backup(path, bak)))
         write(path, root, fmt)
+    return result("changed")
+
+
+def put_back(lst, removed, original):
+    out = list(lst)
+    for name in [n for n in original if n in removed]:
+        if name in out:
+            continue
+        before = [n for n in original[: original.index(name)] if n in out]
+        out.insert(out.index(before[-1]) + 1 if before else 0, name)
+    return out
+
+
+def keys(path, bak, dry):
+    root, fmt = read(path)
+    sec = root.get("mod:wingman")
+    if not isinstance(sec, dict):
+        return result("unchanged")
+    mine = [k for k, v in sec.items() if isinstance(v, str) and v.startswith("wingman.")]
+    if not mine:
+        return result("unchanged")
+    for k in mine:
+        print("ACT remove binding %s from keys.json" % k)
+        del sec[k]
+    if not sec:
+        del root["mod:wingman"]
+    if not dry:
+        print("ACT back up to %s" % os.path.basename(backup(path, bak)))
+        write(path, root, fmt)
+    return result("changed")
+
+
+def settings(path, dry):
+    if not os.path.isfile(path):
+        return result("unchanged")
+    root, fmt = read(path)
+    if root.get("hideHerdrPanels") is not True:
+        return result("unchanged")
+    root["hideHerdrPanels"] = False
+    print("ACT turn off \"Hide Herdr's Files and Changes buttons\" in Wingman's settings")
+    if not dry:
+        write(path, root, fmt)
+    return result("changed")
+
+
+def panels(home, bak, dry):
+    path = os.path.join(home, "shared.json")
+    if not os.path.isfile(path):
+        return result("unchanged")
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    st = data.get("wingman.panelsHidden")
+    ok = lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)
+    if not (isinstance(st, dict) and st.get("on") is True and ok(st.get("removed")) and ok(st.get("original"))):
+        return result("unchanged")
+    cur = data.get("workspace.panels")
+    cur = cur if ok(cur) else ["files", "changes"]
+    data["workspace.panels"] = put_back(cur, st["removed"], st["original"])
+    data["wingman.panelsHidden"] = {"on": False, "removed": [], "original": []}
+    print("ACT put back %s in workspace.panels" % ", ".join(st["removed"]) if st["removed"] else "ACT clear Wingman's panel record")
+    if not dry:
+        print("ACT back up to %s" % os.path.basename(backup(path, bak)))
+        tmp = path + ".tmp-%d" % os.getpid()
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
     return result("changed")
 
 
@@ -289,6 +397,12 @@ try:
         patch(a[0], a[1], a[2], a[3] == "1", a[4])
     elif cmd == "unpatch":
         unpatch(a[0], a[1], a[2] == "1")
+    elif cmd == "keys":
+        keys(a[0], a[1], a[2] == "1")
+    elif cmd == "settings":
+        settings(a[0], a[1] == "1")
+    elif cmd == "panels":
+        panels(a[0], a[1], a[2] == "1")
     elif cmd == "status":
         status(a[0])
     elif cmd == "active":
@@ -352,10 +466,20 @@ layout_install() {
   esac
   lay="$home/layouts"
   if [ "$kind" = shipped ]; then
-    target="$name-wingman"
+    target="$name-copy"
+    [ -f "$lay/$name-wingman.json" ] && [ ! -f "$lay/$target.json" ] && target="$name-wingman" # an earlier install's copy
     say "  active layout \"$name\" is shipped (read-only); using the copy \"$target\""
+    case "$name" in *[!A-Za-z0-9._\ -]*) die "layout name \"$name\" has characters this installer won't pass on; rename the layout" ;; esac
+    # Herdr's own clone first (it records cloned_from with the right version and switches to the copy).
+    fresh=0
+    if [ ! -f "$lay/$target.json" ] && [ "$dry" != 1 ]; then
+      case "$(pylayout status "$lay/$name.json")" in
+        stack=yes*) if app_do layout.clone "{\"name\":\"$name\"}" && [ -f "$lay/$target.json" ]; then fresh=1; say "  cloned with Herdr's layout.clone"; fi ;;
+      esac
+    fi
     if [ -f "$lay/$target.json" ]; then
-      show patch "$lay/$target.json" "$lay/$target.json" "$lay/$target.json.bak-$ts" "$dry" "$name"
+      if [ "$fresh" = 1 ]; then bak=-; else bak="$lay/$target.json.bak-$ts"; fi
+      show patch "$lay/$target.json" "$lay/$target.json" "$bak" "$dry" "$name"
     else
       show patch "$lay/$name.json" "$lay/$target.json" - "$dry" "$name"
     fi
@@ -386,10 +510,17 @@ no_stack_help() {
   note_next "Add the Wingman blocks to your layout by hand (see above)."
 }
 
+# Runs `herdr-app do NAME JSON` against the app that owns $home. HERDR_APP_BIN names the program
+# (default herdr-app on PATH); with neither, nothing is run and the caller says what to do by hand.
+app_do() {
+  bin=${HERDR_APP_BIN:-}
+  [ -n "$bin" ] || bin=$(command -v herdr-app 2>/dev/null) || return 1
+  HERDR_APP_HOME="$home" "$bin" do "$@" >/dev/null 2>&1
+}
+
 switch_to() { # layout name
   if [ "$dry" = 1 ]; then act "switch to layout $1"; return; fi
-  if command -v herdr-app >/dev/null 2>&1 &&
-     herdr-app do layout.switch "{\"name\":\"$1\"}" >/dev/null 2>&1; then
+  if app_do layout.switch "{\"name\":\"$1\"}"; then
     say "  switched to layout $1"
     note_change "active layout is now $1"
   else
@@ -410,6 +541,36 @@ layout_uninstall() {
     fi
   done
   [ "$found" = 1 ] || say "  no layout had Wingman's blocks"
+}
+
+# ---- keys, panel buttons ----
+# Wingman writes its own "mod:wingman" section of keys.json while it runs, only where the key is
+# free (it never replaces a binding that isn't Wingman's). Uninstall removes only those bindings.
+keys_uninstall() {
+  say "Keys"
+  f="$home/keys.json"
+  [ -f "$f" ] || { say "  no keys.json"; return; }
+  show keys "$f" "$f.bak-$ts" "$dry"
+  case "$res" in changed) note_change "Wingman's bindings removed from keys.json (backup: keys.json.bak-$ts)" ;; *) say "  no Wingman bindings in keys.json" ;; esac
+}
+
+# The setting "Hide Herdr's Files and Changes buttons" removed entries from workspace.panels. Turn
+# it off through the running mod (it puts back exactly what it took); if the app isn't running or
+# doesn't answer, restore shared.json directly.
+panels_uninstall() {
+  say "Panel buttons"
+  show settings "$home/data/wingman/settings.json" "$dry"
+  [ "$res" = changed ] && note_change "Wingman's panel-button setting turned off"
+  if [ "$res" = changed ] && [ "$dry" != 1 ] && app_do wingman.settings; then
+    say "  asked the running Wingman to put the buttons back"
+    sleep 2
+  fi
+  show panels "$home" "$home/shared.json.bak-$ts" "$dry"
+  case "$res" in
+    changed) note_change "workspace.panels restored in shared.json"
+             note_next "If Herdr is running, check Files and Changes are back in the tab bar; Herdr may rewrite shared.json from memory." ;;
+    *) say "  nothing to put back" ;;
+  esac
 }
 
 # ---- hook ----
@@ -488,6 +649,8 @@ case "$action" in
     ;;
   uninstall)
     [ "$no_hook" = 1 ] && say "Hook skipped (--no-hook)" || hook_uninstall
+    panels_uninstall # first: it asks the running mod, which stops answering once its blocks leave the layout
+    keys_uninstall
     [ "$no_layout" = 1 ] && say "Layout skipped (--no-layout)" || layout_uninstall
     say "Mods"
     for name in wingman tabs-plus; do
