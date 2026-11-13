@@ -50,6 +50,7 @@ import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighb
 import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
+import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment)
 const base = (p) => p.split("/").pop();
@@ -279,6 +280,8 @@ export default class Review extends View {
     cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(1000, (cx) => this.anchorComments(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
+    // Session log source (agentview.js): reads only while this copy shows Agent files or Review.
+    this.agentFiles = new AgentFiles(this); cx.timer.every(5000, (cx) => this.agentFiles.tick(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
     // so a 2 s content check is what catches outside edits. "#index" keeps the index
     // checked even when no files are listed (e.g. right after a reset).
@@ -1190,6 +1193,7 @@ export default class Review extends View {
 
   /** P8: the workspace panel shows under the Explorer tree, so opening it with Search in the left column shows Explorer (Search is a click away). */
   showExplorer() {
+    if (this.search?.left === "agent") this.search.left = "explorer"; // Agent files: the panel is under Explorer too
     if (this.searchShown()) { this.search.left = "explorer"; this.searchFocus = false; if (this.searchInputs?.includes(this.inBar)) { this.inBar = null; this.handle.focus(); } }
   }
 
@@ -2403,7 +2407,7 @@ export default class Review extends View {
    */
   treeKey(e, cx) {
     const k = e.keystroke;
-    if (!(this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search.left !== "search")) { this.treeFocus = false; return false; }
+    if (!(this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search.left === "explorer")) { this.treeFocus = false; return false; }
     if (!keystrokeOf(e)) return false; // a modifier alone
     if (k === "enter" && this.treeDel) { this.confirmTreeDelete(cx); return true; }
     if (k === "escape") { if (this.treeDel) this.treeDel = null; else this.treeFocus = false; cx.notify(); return true; }
@@ -3683,6 +3687,7 @@ export default class Review extends View {
     this.search.left = which; this.searchFocus = false;
     if (which === "search") this.searchInput.focus();
     else { this.handle.focus(); this.refreshTrees(cx); }
+    if (which === "agent") this.agentFiles.show(cx);
     cx.notify();
   }
 
@@ -3921,9 +3926,10 @@ export default class Review extends View {
     return v_flex().id("left-column").h_full().min_h(0)
       .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(on ? 300 : 240).flex_none().border_r(1).border_color(t.border))
       .child(h_flex().h(30).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
-        .child(tab("explorer", "Explorer", !on))
-        .child(tab("search", `Search  ${this.kl("searchFiles")}`, on)))
-      .child(on ? this.renderSearch(t) : this.renderTree(t, full));
+        .child(tab("explorer", "Explorer", this.search.left === "explorer"))
+        .child(tab("search", `Search  ${this.kl("searchFiles")}`, on))
+        .child(tab("agent", "Agent files", this.search.left === "agent")))
+      .child(on ? this.renderSearch(t) : this.search.left === "agent" ? this.agentFiles.render(t) : this.renderTree(t, full));
   }
 
   renderSearch(t) {
@@ -4706,6 +4712,7 @@ export default class Review extends View {
         .child(toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)))
         .child(toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)))
         .child(toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)))
+        .child(toggle("set-sessionlog", "Read the agent's session log", "List the files Claude read and edited (Edit › Agent files) from its own log under ~/.claude/projects, outside the repo.", st.sessionLog ?? true, (cx) => this.setSetting({ sessionLog: !(st.sessionLog ?? true) }, cx)))
         .child(toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)))
         .child(v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
           .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
@@ -4861,6 +4868,7 @@ export default class Review extends View {
       .children(captureNotices(shared(CAPTURE_ERRORS), this.spaceId, this.stores.map(idOf), Date.now()).map((n, i) =>
         h_flex().id(`capture-err-${i}`).flex_none().px(12).py(4).items_center().bg(t.ansi3 + "22").border_b(1).border_color(t.border).text_size(12)
           .child(div().flex_1().min_w(0).truncate().child(n.text))))
+      .when(this.mode === "review", (e) => e.children(this.agentFiles.reviewLine(t))) // edits only the session log saw
       .child(h_flex().flex_1().min_h(0)
       .when(this.treeOnly(), (e) => e.child(this.renderLeft(t, true)))
       .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))
