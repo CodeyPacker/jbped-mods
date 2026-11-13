@@ -1,25 +1,25 @@
 # wayfindr
 
-Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in the side panel beside Files, Changes and Wingman, with a fullscreen mode. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Azure DevOps team boards, with Ticket detail, work today. Pull Requests, Launch and Review are still to come.
+Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in their own block that covers the terminals while it is open. Start a space from a Ticket, or a review from a Pull Request. Work in progress: GitHub Projects boards and Azure DevOps team boards, with Ticket detail, work today. Pull Requests, Launch and Review are still to come.
 
 ## Install
 
 1. Copy `mods/wayfindr/` to `~/.config/herdr-app/mods/` and run `herdr-app check ~/.config/herdr-app/mods/wayfindr`.
-2. In your layout (a clone of `main`, not a shipped one), add a Wayfindr block to the side panel's stack:
+2. In your layout (a clone of `main`, not a shipped one), add a hidden Wayfindr block to the `work-body` row, after `panel`:
 
    ```json
-   { "id": "wayfindr", "type": "block", "content": { "mod": "wayfindr" } }
+   { "id": "wayfindr", "type": "block", "content": { "mod": "wayfindr" }, "hidden": true }
    ```
 
-   as a child of `panel-body`. Keep the ids `wayfindr`, `panel`, `panel-body` and `main`: the tab bar button, the palette and fullscreen use them.
-3. Install the `tabs-plus` share from this repo (its README) and point the layout's `tabs` block at it. It shows a Wayfindr button for the block, runs `Wayfindr: Open` and `Wayfindr: Toggle` from the palette (`tabs-plus.wayfindr`, `tabs-plus.wayfindrToggle`), and leaves fullscreen when Wayfindr stops showing. Without it there is no button and those two palette entries do nothing.
-4. Merge this share's `keys.json` into `~/.config/herdr-app/keys.json`: it binds `ctrl-shift-g` to the toggle. Pick another key if that one is taken.
+   Give it no `size`: it takes the row's remaining width. Keep the ids `wayfindr`, `main` and `panel`: the palette, the key and the tab bar use them.
+3. Install the `tabs-plus` share from this repo (its README) and point the layout's `tabs` block at it. It shows a Wayfindr button for the block, and hides the terminals and the side panel while Wayfindr is shown. Without it there is no button and Wayfindr shows beside the terminals. The palette entries still work.
+4. Merge this share's `keys.json` into `~/.config/herdr-app/keys.json`: it binds `ctrl-shift-g` to `layout.toggle` for the `wayfindr` block. Pick another key if that one is taken.
 5. Create `~/.config/herdr-app/data/wayfindr.json` (below).
 6. Sign in where the runner runs commands: `gh auth login`, the per-Profile `az login` that Wayfindr shows (below), or export the token variable for a PAT or ClickUp Account.
 
 ## Use
 
-Tab bar: the Wayfindr button. Palette: `Wayfindr: Open`, `Wayfindr: Toggle`, `Wayfindr: Close`, `Wayfindr: Fullscreen`, `Wayfindr: Switch Profile`, `Wayfindr: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfindr shows one Profile at a time, and switching saves it as `activeProfile` in `wayfindr.json` (rewritten as formatted JSON), so it holds across restarts. Fullscreen hides the terminals and gives the panel the whole work area. Another panel, Close, or a space with the panel closed puts them back, and opening Wayfindr again returns to fullscreen. Wayfindr remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfindr saves them through az into `data/wayfindr-images/` in the herdr-app folder, and deletes ones saved over 30 days ago (a Ticket shown again saves them again). Click another card to switch it, or the Board outside the cards to close it. Arrow keys move between cards (left and right skip empty Columns, Home and End jump in a Column), Enter opens the card, and while the detail panel is open it follows the arrows. Esc closes the detail panel, then a second Esc leaves fullscreen. Toggle (`ctrl-shift-g` with this share's `keys.json`) shows Wayfindr, or hides it when it is what the panel shows. The tab bar (tabs-plus) runs it, because a hidden Wayfindr gets no commands.
+Tab bar: the Wayfindr button. Palette: `Wayfindr: Open`, `Wayfindr: Toggle`, `Wayfindr: Close`, `Wayfindr: Switch Profile`, `Wayfindr: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfindr shows one Profile at a time, and switching saves it as `activeProfile` in `wayfindr.json` (rewritten as formatted JSON), so it holds across restarts. Open covers the whole work area: the terminals and the side panel are hidden. Close, Esc or the key gives them back, with the side panel as the space had it. Wayfindr stays open when you switch spaces. Wayfindr remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfindr saves them through az into `data/wayfindr-images/` in the herdr-app folder, and deletes ones saved over 30 days ago (a Ticket shown again saves them again). Click another card to switch it, or the Board outside the cards to close it. Arrow keys move between cards (left and right skip empty Columns, Home and End jump in a Column), Enter opens the card, and while the detail panel is open it follows the arrows. Esc closes the detail panel, then a second Esc closes Wayfindr. Toggle (`ctrl-shift-g` with this share's `keys.json`) shows Wayfindr, or hides it when shown.
 
 ### Background checks
 

@@ -3,10 +3,9 @@
   "title": "Wayfindr",
   "focusable": true,
   "palette": [
-    { "title": "Wayfindr: Open", "command": "tabs-plus.wayfindr", "about": "Show Wayfindr in the side panel" },
-    { "title": "Wayfindr: Toggle", "command": "tabs-plus.wayfindrToggle", "about": "Show Wayfindr, or hide it when shown (ctrl-shift-g)" },
-    { "title": "Wayfindr: Close", "command": "wayfindr.close", "about": "Hide the side panel" },
-    { "title": "Wayfindr: Fullscreen", "command": "wayfindr.fullscreen", "about": "Give Wayfindr the whole work area, or give it back" },
+    { "title": "Wayfindr: Open", "command": "layout.show", "args": { "id": "wayfindr" }, "about": "Show Wayfindr over the terminals" },
+    { "title": "Wayfindr: Toggle", "command": "layout.toggle", "args": { "id": "wayfindr" }, "about": "Show Wayfindr over the terminals, or hide it (ctrl-shift-g)" },
+    { "title": "Wayfindr: Close", "command": "layout.hide", "args": { "id": "wayfindr" }, "about": "Hide Wayfindr and give the terminals back" },
     { "title": "Wayfindr: Switch Profile", "command": "wayfindr.profile", "about": "Show the next profile" },
     { "title": "Wayfindr: Refresh", "command": "wayfindr.refresh", "about": "Reload the configuration and data" }
   ]

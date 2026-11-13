@@ -1,5 +1,5 @@
 {
   "global": {
-    "ctrl-shift-g": "tabs-plus.wayfindrToggle"
+    "ctrl-shift-g": { "command": "layout.toggle", "args": { "id": "wayfindr" } }
   }
 }

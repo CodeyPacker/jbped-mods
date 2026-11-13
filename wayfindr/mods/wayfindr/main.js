@@ -1,7 +1,6 @@
-// Wayfindr: one Profile's Boards and Pull Requests, in the layout's side panel beside Wingman
-// (a "wayfindr" block in the "panel-body" stack; the tab bar's Wayfindr button shows it).
-// Fullscreen hides the "main" block and stretches the panel; tabs-plus undoes it when Wayfindr
-// stops showing. Esc closes the Ticket detail panel, then leaves fullscreen.
+// Wayfindr: one Profile's Boards and Pull Requests, in its own "wayfindr" block in the layout's
+// "work-body" row. tabs-plus hides the terminals and the side panel while it shows.
+// Esc closes the Ticket detail panel, then closes Wayfindr.
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
@@ -22,8 +21,6 @@ import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPr
 const VIEW_KEY = "wayfindr.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
 const IMAGE_DIR = "data/wayfindr-images"; // under Herdr's home: image() reads from there
-const FULL_KEY = "wayfindr.fullscreen"; // { px }: the panel's width before fullscreen
-const WANT_FULL_KEY = "wayfindr.wantFullscreen"; // the last fullscreen choice, kept across Close
 const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for the Board's "View in …" link
 const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
 // The Pull Request overlay's width as a fraction of Wayfindr's: 60% to start, dragged by its left edge.
@@ -32,11 +29,6 @@ const DIFF_LINES = 300; // a patch's lines shown before "Show N more lines"
 // A faint background of a theme color (#rrggbb), or none.
 const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
 
-function findNode(node, id) {
-  if (node?.id === id) return node;
-  for (const c of node?.children ?? []) { const f = findNode(c, id); if (f) return f; }
-  return null;
-}
 const configPath = () => `${appHome()}/data/wayfindr.json`;
 // Wranglr's config: its worktree rule is the default Worktree Placement when Wranglr is set up.
 const wranglrPath = () => `${appHome()}/wranglr.json`;
@@ -291,7 +283,6 @@ export default class Wayfindr extends View {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
         if (c === "focus") this.handle.focus();
         else if (c === "close") this.close_();
-        else if (c === "fullscreen") this.setFullscreen(!this.fullscreen);
         else if (c === "refresh") this.reload(cx);
         else if (c === "profile") await this.nextProfile(cx);
         cx.notify();
@@ -314,36 +305,18 @@ export default class Wayfindr extends View {
     for (const b of this.profile.boards) this.fetchBoard(b, cx);
   }
 
-  // Toasts unless Wayfindr is shown on the toast's own view. A click runs the toggle and lands on pendingView.
+  // Toasts unless Wayfindr is shown on the toast's own view. A click shows Wayfindr and lands on pendingView.
   announce(toasts, cx) {
     const shown = toasts.length ? this.shownNow() : false;
     for (const x of toasts) {
       if (shown && ((x.view === "prs" && this.view === "prs") || (x.view === "board" && this.view === "board" && this.board?.id === x.boardId))) continue;
-      notify({ title: x.title, body: x.body, level: "info", icon: "mods/wayfindr/wayfindr.svg", timeout: 12000, action: { name: "tabs-plus.wayfindr" } });
+      notify({ title: x.title, body: x.body, level: "info", icon: "mods/wayfindr/wayfindr.svg", timeout: 12000, action: { name: "layout.show", args: { id: "wayfindr" } } });
       this.pendingView = { view: x.view, boardId: x.boardId, until: Date.now() + 120000 };
     }
   }
 
-  get fullscreen() { return Boolean(shared(FULL_KEY)); }
-
-  // `remember` false leaves the wish as it was: Close leaves fullscreen but the next show goes back.
-  setFullscreen(on, { remember = true } = {}) {
-    if (remember) save(WANT_FULL_KEY, on ? "1" : "0");
-    const full = shared(FULL_KEY);
-    if (on && !full) {
-      const px = findNode(layout(), "panel")?.size?.px;
-      setShared(FULL_KEY, { px: typeof px === "number" ? px : null });
-      run("layout.hide", { id: "main" });
-      run("layout.resize", { id: "panel", weight: 1 });
-    } else if (!on && full) {
-      setShared(FULL_KEY, null);
-      run("layout.show", { id: "main" });
-      run("layout.resize", { id: "panel", px: full.px ?? 960 });
-    }
-  }
-
-  // Hidden from now: the next show is noticed at once (it refreshes, and goes back to fullscreen).
-  close_() { this.setFullscreen(false, { remember: false }); run("layout.hide", { id: "panel" }); this.hidden = true; }
+  // Hidden from now: the next show is noticed at once (it refreshes).
+  close_() { run("layout.hide", { id: "wayfindr" }); this.hidden = true; }
 
   shownNow() { return isShown(layout(), (n) => n.content?.mod === "wayfindr"); }
 
@@ -597,7 +570,7 @@ export default class Wayfindr extends View {
         for (const [id, st] of Object.entries(states ?? {})) {
           if (st?.ok !== false || this.signInToasted.has(id)) continue;
           this.signInToasted.add(id);
-          notify({ title: "Wayfindr: sign in needed", body: `${id}: ${st.reason}`, level: "warning", icon: "mods/wayfindr/wayfindr.svg", timeout: 12000, action: { name: "tabs-plus.wayfindr" } });
+          notify({ title: "Wayfindr: sign in needed", body: `${id}: ${st.reason}`, level: "warning", icon: "mods/wayfindr/wayfindr.svg", timeout: 12000, action: { name: "layout.show", args: { id: "wayfindr" } } });
         }
       }
       cx.notify();
@@ -1262,7 +1235,6 @@ export default class Wayfindr extends View {
       .child(h_flex().gap(2).items_center()
         .child(iconButton("wf-settings", "settings", t, (cx) => { this.openSettings(cx); cx.notify(); }, { on: this.view === "settings" }))
         .child(iconButton("wf-refresh", "refresh", t, (cx) => this.reload(cx)))
-        .child(iconButton("wf-full", this.fullscreen ? "exit-fullscreen" : "fullscreen", t, (cx) => { this.setFullscreen(!this.fullscreen); cx.notify(); }))
         .child(iconButton("wf-close", "close", t, () => this.close_())));
   }
 
@@ -1977,21 +1949,8 @@ export default class Wayfindr extends View {
       .child(body).child(grip);
   }
 
-  // Shown while fullscreen is wanted but off (Close, the tab bar, another panel left it): back to
-  // fullscreen. By state, not by noticing a hide, so a quick hide and show counts too. Deferred: the
-  // layout can't change during render.
-  restoreFullscreen(cx) {
-    if (this.restoring || this.fullscreen || load(WANT_FULL_KEY, "0") !== "1") return;
-    this.restoring = true;
-    cx.timer.after(0, () => {
-      this.restoring = false;
-      if (this.shownNow() && !this.fullscreen && load(WANT_FULL_KEY, "0") === "1") this.setFullscreen(true, { remember: false });
-    });
-  }
-
   render(cx) {
     if (this.hidden) this.watch(cx); // just shown: refresh in the background
-    this.restoreFullscreen(cx);
     const t = theme();
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
@@ -2009,7 +1968,7 @@ export default class Wayfindr extends View {
             this.handle.focus();
           } else if (this.moveOpen) this.moveOpen = null;
           else if (this.view === "prs" && this.selectedPr) this.closePr();
-          else if (this.selected) this.closeTicket(); else this.setFullscreen(false);
+          else if (this.selected) this.closeTicket(); else this.close_();
           cx.notify(); return;
         }
         if (this.typing) return; // keys in a text box are for the text
