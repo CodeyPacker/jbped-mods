@@ -1514,7 +1514,8 @@ export default class Wayfindr extends View {
         const wr = await this.readWranglr();
         const made = await makeLaunchWorktrees(prefix, folder, repos.map((r) => ({ path: r.path, name: repoName(r), worktrees: r.worktrees })), io, wr);
         const info = repos.map((r) => ({ id: r.id, branch: made.branch, worktree: made.worktrees?.[repoName(r)] ?? `${made.path}/${repoName(r)}` }));
-        run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
+        // machine "": the worktrees and the runner are on this computer. Left out, a click starts the space on the focused space's Machine.
+        run("space.new", { name, machine: "", folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, argv), task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
       } catch (e) {
         L.status = "error"; L.error = `Launch failed: ${e.message ?? e}`;
@@ -1659,7 +1660,8 @@ export default class Wayfindr extends View {
         const tpl = resolveTemplate(DEFAULT_REVIEW, templates?.review, repo.review);
         const wr = await this.readWranglr();
         const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree", wr);
-        run("space.new", { name, folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
+        // machine "": the worktrees and the runner are on this computer. Left out, a click starts the space on the focused space's Machine.
+        run("space.new", { name, machine: "", folder: made.space, argv: spaceArgv(runner, herdrWindow().platform, made.path, agentArgv(tpl)), task: reviewPrompt(pr, info, made.path, tpl) });
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
         else delete this.reviews[pr.key];
