@@ -50,8 +50,11 @@ import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighb
 import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
+import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
+import { fitBar, hunkButtons, withKey } from "./barfit.js";
 
-const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment)
+const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
+const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
 const base = (p) => p.split("/").pop();
 const SROW = 22; // a Search result row's height
 const TOK_CHARS = 4e6; // the highlight cache's texts, in characters (tok)
@@ -211,7 +214,7 @@ export default class Review extends View {
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
     this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
-    loadSettings().then((st) => { this.settings = st; });
+    cx.spawn(async (cx) => { this.settings = await loadSettings(); this.paint(cx); }); // host reads only from a task, never from init itself
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });
     // The pane takes the keyboard back after its popup closes.
@@ -240,7 +243,7 @@ export default class Review extends View {
           if (menu) { if (!menu[0] || allowedIn(menu[0], this.focusKind())) await menu[1](); }
           else if (BY_ID.has(c)) this.act(c, cx);
         }
-        cx.notify();
+        this.paint(cx);
       }
     });
     this.handle = cx.focus_handle(); this.scroll = VirtualListScrollHandle.new(); this.searchScroll = VirtualListScrollHandle.new(); this.treeScroll = ScrollHandle.new();
@@ -249,9 +252,13 @@ export default class Review extends View {
     this.views = new Map(); this.loop = new CaptureLoop({ id: this.id, log }); this.tokens = new Map();
     this.reset([]);
     this.queue = Promise.resolve(); this.writing = 0;
-    cx.timer.every(1000, (cx) => this.follow(cx));
+    // D7: async passes run in a task of their own. A timer's cx is the callback's only: a pass that
+    // awaits and then calls cx.notify() on it redraws nothing, so a repo found after the first look
+    // (spaces() and terminals() lag a new space by a moment) only showed on the next redraw from elsewhere.
+    cx.timer.every(1000, (cx) => { if (!this.following) cx.spawn(async (cx) => this.follow(cx)); });
     cx.timer.every(1000, () => crumb(`alive ${this.view ?? this.mode} leader=${!!this.loop.isLeader}`, null, ALIVE_MS)); // crash breadcrumbs: every copy, first 10 s after Changes shows
     cx.timer.every(250, (cx) => {
+      if (this.paintAsk) { this.paintAsk = false; cx.notify(); } // paint(): a redraw asked from a task, from this callback's own cx
       crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
       this.syncComments(cx);
       if (this.mode === "changes") {
@@ -272,10 +279,10 @@ export default class Review extends View {
       }
     });
     if (this.view === "changes") this.initChanges(cx);
-    cx.timer.every(500, (cx) => this.loop.lead(cx));
+    cx.timer.every(500, (cx) => { if (!this.loop.leading) cx.spawn(async (cx) => this.loop.lead(cx)); });
     // Renewed while a long capture pass runs too; so are the failing repos shared with the other copies.
     cx.timer.every(1000, () => { if (this.loop.isLeader) { this.loop.lease(); this.loop.publishCaptureErrors(); } });
-    cx.timer.every(3000, (cx) => this.loop.collectAll(cx));
+    cx.timer.every(3000, (cx) => { if (this.loop.isLeader) cx.spawn(async (cx) => this.loop.collectAll(cx)); });
     cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(1000, (cx) => this.anchorComments(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
@@ -283,13 +290,21 @@ export default class Review extends View {
     // so a 2 s content check is what catches outside edits. "#index" keeps the index
     // checked even when no files are listed (e.g. right after a reset).
     cx.timer.every(2000, (cx) => this.stores.length && this.onWatch(new Set(["#index", ...this.files.map((f) => norm(f.path ?? ""))]), cx));
-    this.follow(cx);
+    cx.spawn(async (cx) => this.follow(cx));
   }
+
+  /**
+   * Redraws this copy. D7: a cx.notify() from a task didn't always reach the pane: a copy made by
+   * a tab.new right after other tab.new calls redrew only from timer callbacks (until its tab was
+   * shown again), so a repo or tree found by a task stayed off screen. The 250 ms tick redraws
+   * again, from its own cx, whenever this was asked since its last run.
+   */
+  paint(cx) { this.paintAsk = true; cx.notify(); }
 
   /** Per-space view state; no stores means no repo found yet. */
   reset(stores) {
     this.stores = stores; this.files = []; this.sel = null; this.current = 0; this.history = [];
-    this.deferred = new Set(); this.indexTexts = {}; this.error = null;
+    this.deferred = new Set(); this.indexTexts = {}; this.error = null; this.loadError = null;
     this.cur = null; this.anchor = null; this.redo = []; this.hx = 0; this.opened = [];
     this.search = newSearch(); this.searchFocus = false;
     this.treeCur = this.treeEdit = this.treeDel = null; this.treeFocus = false;
@@ -333,7 +348,7 @@ export default class Review extends View {
         if (this.qo) { this.qo = null; if (this.inBar === this.quickInput) { this.inBar = null; this.handle.focus(); } }
         if (this.inBar === this.pathInput || this.inBar === this.treeInput) { this.inBar = null; this.handle.focus(); }
         this.menuItem = null; this.treeScrollTo = null;
-        cx.notify();
+        this.paint(cx);
       }
       // The roots are looked up once writes are done: a reload meanwhile could read a half-written file.
       if (!sp || this.writing) return;
@@ -423,9 +438,9 @@ export default class Review extends View {
    * confirm, Discard's confirm, Quick Open.
    */
   snapshotView() {
-    const { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, changeSig, unchecked, commitRoot, commitNote } = this;
+    const { stores, files, sel, current, history, indexTexts, error, loadError, status, redo, opened, search, changeSig, unchecked, commitRoot, commitNote } = this;
     for (const f of this.committed ?? []) this.unloadRow(f);
-    const v = { stores, files, sel, current, history, indexTexts, error, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
+    const v = { stores, files, sel, current, history, indexTexts, error, loadError, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
       treeCur: null, treeEdit: null, treeDel: null, treeFocus: false,
       committed: this.committed ?? [], changeSig, unchecked: unchecked ?? new Set(), committedOpen: this.committedOpen ?? new Set(), commitRoot, commitNote, commitMsg: this.commitInput?.value() ?? this.commitMsg ?? "", discardKey: null,
       ws: this.ws?.kind === "path" ? null : this.ws ?? null };
@@ -439,7 +454,7 @@ export default class Review extends View {
    * The state of `space`: this copy's own fields while it's shown, else its kept view (null when it's
    * gone). Work that outlives a space switch (a queued write, Replace All, a commit) reports here.
    */
-  stateOf(space) { return space === this.spaceId ? this : this.views.get(space) ?? null; }
+  stateOf(space) { return stateFor(this, space); }
 
   // ---- capture (leader only): captureloop.js, this.loop
 
@@ -497,11 +512,11 @@ export default class Review extends View {
         if (st) kept.push(await this.loadPlain(st, key.slice(i + 1), cx));
       }
       if (stale()) return;
-      this.files = kept; this.indexTexts = texts; this.status = null;
-      this.settle(); cx.notify();
+      this.files = kept; this.indexTexts = texts; this.status = null; loadOk(this);
+      this.settle(); this.paint(cx);
       // The review changed: the tree's counts and status letters follow.
       if (this.mode === "edit" && (this.treeOn || this.nvim())) this.refreshTrees(cx);
-    } catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+    } catch (e) { loadFailed(this, space, String(e.message ?? e)); this.paint(cx); }
   }
 
   /** A reloaded file, unless this pane holds unsaved edits to it: a disk change under them
@@ -557,13 +572,13 @@ export default class Review extends View {
   async reloadOne(f, cx) {
     if (f.plain) {
       const next = await this.loadPlain(f.store, f.rel, cx);
-      this.replace(f, next); this.settle(); cx.notify(); return;
+      this.replace(f, next); this.settle(); this.paint(cx); return;
     }
     const entry = (await f.store.index())[f.rel];
     const i = this.files.findIndex((x) => x.key === f.key);
     if (!entry || i < 0) return this.reloadAll(cx);
     this.files[i] = await this.withTokens(await f.store.load(f.rel, entry), cx);
-    this.settle(); cx.notify();
+    this.settle(); this.paint(cx);
   }
 
   // Watch events: our own writes match memory and are skipped; anything else reloads that file.
@@ -603,7 +618,7 @@ export default class Review extends View {
           const next = await this.mergeInto(f, { ...f, Ctext: c, Btext: b ?? "" }, cx);
           // Typed into while merging: merge again from the newer edits.
           if (!this.files.includes(f)) { this.deferred.add(norm(f.path)); continue; }
-          this.adoptMerge(f, next); cx.notify();
+          this.adoptMerge(f, next); this.paint(cx);
         }
       }
     } finally { this.draining = false; }
@@ -765,9 +780,9 @@ export default class Review extends View {
   toggleWrap(cx) {
     this.settings = { ...this.settings, wordWrap: !this.settings.wordWrap };
     this.hx = 0; this.selA = this.selB = null;
-    const next = this.settings;
-    cx.spawn(async () => { try { await saveSettings({ ...(await loadSettings()), wordWrap: next.wordWrap }); } catch (e) { this.error = String(e.message ?? e); } });
-    this.showCursor(); cx.notify();
+    const next = this.settings, space = this.spaceId;
+    cx.spawn(async () => { try { await saveSettings({ ...(await loadSettings()), wordWrap: next.wordWrap }); } catch (e) { failIn(this, space, String(e.message ?? e)); } });
+    this.showCursor(); this.paint(cx);
   }
 
   reveal() {
@@ -822,7 +837,7 @@ export default class Review extends View {
     const d = ev.delta_lines ? (ev.delta_lines.x || ev.delta_lines.y) * 20 : ev.delta.x || ev.delta.y;
     if (!d) return;
     this.setTabOffset((this.tabOffset ?? 0) - d);
-    cx.notify();
+    this.paint(cx);
     cx.stop_propagation();
   }
 
@@ -862,11 +877,11 @@ export default class Review extends View {
     this.recent = [rk, ...this.recent.filter((k) => k !== rk)].slice(0, 30);
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
     if (this.treeOnly()) {
-      if (store.on) { this.error = NVIM_NOTE; cx.notify(); return; }
+      if (store.on) { this.error = NVIM_NOTE; this.paint(cx); return; }
       const f = this.files.find((x) => x.key === key);
-      this.treeSel = key; this.revealInTree(key, cx); cx.notify();
+      this.treeSel = key; this.revealInTree(key, cx); this.paint(cx);
       try { await openInNvim(space, store.root, `${store.root}/${rel}`, at?.line ?? f?.hunks[0]?.n ?? 0); }
-      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      catch (e) { failIn(this, space, String(e.message ?? e)); this.paint(cx); }
       return;
     }
     if (!this.files.some((f) => f.key === key)) {
@@ -877,7 +892,7 @@ export default class Review extends View {
     if (!this.opened.includes(key)) this.opened.push(key);
     this.pick(key, cx);
     const f = this.file();
-    if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); cx.notify(); }
+    if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); this.paint(cx); }
     if (f && this.nvim()) this.toNvim(f, at?.line ?? f.hunks[0]?.n ?? 0, cx);
   }
 
@@ -888,15 +903,15 @@ export default class Review extends View {
     this.refreshTrees(cx);
     this.qo = { sel: 0, items: [] };
     this.quickInput.set_value(""); this.rankQuick();
-    this.quickInput.focus(); cx.notify();
+    this.quickInput.focus(); this.paint(cx);
   }
 
-  closeQuick(cx) { this.qo = null; this.inBar = null; this.handle.focus(); cx.notify(); }
+  closeQuick(cx) { this.qo = null; this.inBar = null; this.handle.focus(); this.paint(cx); }
 
   moveQuick(by, cx) {
     if (!this.qo?.items.length) return;
     const n = this.qo.items.length;
-    this.qo.sel = (this.qo.sel + by + n) % n; cx.notify();
+    this.qo.sel = (this.qo.sel + by + n) % n; this.paint(cx);
   }
 
   /** Every file of the space's repos, recent and changed ones first (the order an empty query shows). */
@@ -923,7 +938,7 @@ export default class Review extends View {
     if (!it) return;
     const at = /(:\d*(?::\d*)?)\s*$/.exec(this.quickInput.value())?.[1] ?? "";
     this.quickInput.set_value(it.rel + at);
-    this.rankQuick(); cx.notify();
+    this.rankQuick(); this.paint(cx);
   }
 
   rankQuick() {
@@ -939,7 +954,7 @@ export default class Review extends View {
     if (!q.name && q.at) {
       const f = this.file();
       this.closeQuick(cx);
-      if (f) { this.cur = this.clampPos(f, q.at); this.anchor = null; this.showCursor(); if (this.nvim()) this.toNvim(f, q.at.line, cx); cx.notify(); }
+      if (f) { this.cur = this.clampPos(f, q.at); this.anchor = null; this.showCursor(); if (this.nvim()) this.toNvim(f, q.at.line, cx); this.paint(cx); }
       return;
     }
     if (!it) return;
@@ -984,12 +999,12 @@ export default class Review extends View {
   toVSCode(cx) {
     const f = this.file();
     if (!f || f.Ctext === null) return;
-    if (f.store?.on) { this.error = EDITOR_NOTE; cx.notify(); return; }
+    if (f.store?.on) { this.error = EDITOR_NOTE; this.paint(cx); return; }
     if (this.dirty(f) && !f.conflict) this.save(cx, f);
-    const at = this.cur ?? { line: f.hunks[this.current]?.n ?? 0, col: 0 };
+    const at = this.cur ?? { line: f.hunks[this.current]?.n ?? 0, col: 0 }, space = this.spaceId;
     cx.spawn(async (cx) => {
       try { await openInEditor(this.settings.externalEditor, f.path, at.line, at.col, this.settings.externalCommand); }
-      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      catch (e) { failIn(this, space, String(e.message ?? e)); this.paint(cx); }
     });
   }
   treeOnly() { return this.mode === "edit" && this.nvim(); }
@@ -997,11 +1012,11 @@ export default class Review extends View {
   /** Opens `f` at `line` in the space's Neovim (N1). */
   toNvim(f, line, cx) {
     if (!f || f.Ctext === null) return;
-    if (f.store?.on) { this.error = NVIM_NOTE; cx.notify(); return; }
+    if (f.store?.on) { this.error = NVIM_NOTE; this.paint(cx); return; }
     const space = this.spaceId;
     cx.spawn(async (cx) => {
       try { await openInNvim(space, f.store.root, f.path, line); }
-      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      catch (e) { failIn(this, space, String(e.message ?? e)); this.paint(cx); }
     });
   }
 
@@ -1009,13 +1024,13 @@ export default class Review extends View {
   closeTab(key, cx) {
     const f = this.files.find((x) => x.key === key);
     if (f && this.dirty(f)) {
-      if (!this.settings.autosave || f.conflict) { this.error = `${base(f.rel)} has unsaved edits: save them first (${this.kl("save")})`; cx.notify(); return; }
+      if (!this.settings.autosave || f.conflict) { this.error = `${base(f.rel)} has unsaved edits: save them first (${this.kl("save")})`; this.paint(cx); return; }
       this.save(cx, f);
     }
     this.opened = this.opened.filter((k) => k !== key);
     if (f?.plain) this.files = this.files.filter((x) => x.key !== key);
     if (this.sel === key) { this.cur = this.anchor = null; this.hx = 0; }
-    this.error = null; this.settle(); cx.notify();
+    this.error = null; this.settle(); this.paint(cx);
   }
 
   // ---- W1 workspace: adding and removing repos -------------------------------------
@@ -1071,13 +1086,13 @@ export default class Review extends View {
   openFolder(cx) {
     if (!this.spaceId) return;
     this.showExplorer();
-    if (this.machine()) { this.ws = { kind: "path" }; this.pathInput.set_value(""); this.pathInput.focus(); cx.notify(); return; }
+    if (this.machine()) { this.ws = { kind: "path" }; this.pathInput.set_value(""); this.pathInput.focus(); this.paint(cx); return; }
     const sp = this.space(), put = (k, v) => { const s = this.stateOf(sp?.id); if (s) s[k] = v; }; // into its own space's state
     cx.spawn(async (cx) => {
       try {
         const dir = await pickFolder({ prompt: "Add a repo to this space" });
         if (!dir || this.spaceId !== sp?.id) return; // picked after leaving the space: nothing is added
-        this.showExplorer(); this.wsBusy = "Looking…"; cx.notify();
+        this.showExplorer(); this.wsBusySpace = sp?.id; this.wsBusy = "Looking…"; this.paint(cx);
         const st = await Store.open(dir).catch(() => null);
         if (!st) {
           const repos = await scanRepos(dir);
@@ -1091,7 +1106,7 @@ export default class Review extends View {
         if (offer) { put("ws", { kind: "worktree", root: st.root, ...offer }); return; }
         await this.addRepos([st.root], cx, sp);
       } catch (e) { put("error", String(e.message ?? e)); }
-      finally { this.wsBusy = null; cx.notify(); }
+      finally { this.wsBusy = null; this.paint(cx); }
     });
   }
 
@@ -1103,7 +1118,7 @@ export default class Review extends View {
     this.showExplorer();
     cx.spawn(async (cx) => {
       try {
-        this.wsBusy = "Looking…"; cx.notify();
+        this.wsBusySpace = sp?.id; this.wsBusy = "Looking…"; this.paint(cx);
         const st = await Store.open(dir, on).catch(() => null);
         if (!st) {
           const repos = await scanRepos(dir, on);
@@ -1117,7 +1132,7 @@ export default class Review extends View {
         if (offer) { put("ws", { kind: "worktree", root: st.root, on, ...offer }); return; }
         await this.addRepos([st.root], cx, sp);
       } catch (e) { put("error", String(e.message ?? e)); }
-      finally { this.wsBusy = null; cx.notify(); }
+      finally { this.wsBusy = null; this.paint(cx); }
     });
   }
 
@@ -1132,7 +1147,7 @@ export default class Review extends View {
       this.loop.misses?.delete(rootId(root, sp.machine ?? null));
     }
     if (this.spaceId === sp.id) { this.ws = null; this.error = null; }
-    cx.notify();
+    this.paint(cx);
     await this.follow(cx, true);
   }
 
@@ -1149,25 +1164,25 @@ export default class Review extends View {
           const info = await repoInfo(r.path, on);
           const offer = ws.kind === "worktree" ? ws : ws.asWorktrees && ws.offer && info && !info.linked ? { branch: ws.offer.branch, dest: ws.offer.dest.replace(/[^/]+$/, base(r.path)) } : null;
           if (offer) {
-            this.wsBusy = `Making a worktree for ${base(r.path)} on ${offer.branch}…`; cx.notify();
+            this.wsBusySpace = sp?.id; this.wsBusy = `Making a worktree for ${base(r.path)} on ${offer.branch}…`; this.paint(cx);
             await addWorktree(r.path, offer.dest, offer.branch, on);
             roots.push(offer.dest);
           } else roots.push(r.path);
         }
-        this.wsBusy = "Adding…"; cx.notify();
+        this.wsBusySpace = sp?.id; this.wsBusy = "Adding…"; this.paint(cx);
         await this.addRepos(roots, cx, sp);
-      } catch (e) { this.error = String(e.message ?? e); }
-      finally { this.wsBusy = null; cx.notify(); }
+      } catch (e) { failIn(this, sp?.id, String(e.message ?? e)); }
+      finally { this.wsBusy = null; this.paint(cx); }
     });
   }
 
   /** × on a repo header: asks first (open changes come back when it's added again). */
   askRemove(st, cx) {
-    if (this.files.some((f) => f.store === st && this.dirty(f))) { this.error = `${this.repoName(st)} has unsaved edits: save or undo them first`; cx.notify(); return; }
+    if (this.files.some((f) => f.store === st && this.dirty(f))) { this.error = `${this.repoName(st)} has unsaved edits: save or undo them first`; this.paint(cx); return; }
     const open = this.files.filter((f) => f.store === st).reduce((n, f) => n + (f.plain ? 0 : f.hunks.length), 0);
     this.ws = { kind: "remove", st, open, linked: null };
-    this.showExplorer(); cx.notify();
-    if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root, st.on ?? null).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; cx.notify(); } });
+    this.showExplorer(); this.paint(cx);
+    if (!st.plain) cx.spawn(async (cx) => { const info = await repoInfo(st.root, st.on ?? null).catch(() => null); if (this.ws?.st === st) { this.ws.linked = !!info?.linked; this.paint(cx); } });
   }
 
   confirmRemove(deleteWorktree, cx) {
@@ -1175,14 +1190,14 @@ export default class Review extends View {
     if (ws?.kind !== "remove" || !sp || this.wsBusy) return;
     cx.spawn(async (cx) => {
       try {
-        if (deleteWorktree) { this.wsBusy = `Deleting the worktree ${ws.st.root}…`; cx.notify(); await removeWorktree(ws.st.root, ws.st.on ?? null); }
+        if (deleteWorktree) { this.wsBusySpace = sp?.id; this.wsBusy = `Deleting the worktree ${ws.st.root}…`; this.paint(cx); await removeWorktree(ws.st.root, ws.st.on ?? null); }
         await removeFolder(sp, ws.st.asked ?? ws.st.root);
         if (ws.st.asked && norm(ws.st.asked) !== norm(ws.st.root)) await removeFolder(sp, ws.st.root);
         const s = this.stateOf(sp.id); // its own space's state, shown or not
         if (s) { s.ws = null; s.error = null; }
         await this.follow(cx, true);
       } catch (e) { const s = this.stateOf(sp.id); if (s) s.error = String(e.message ?? e); }
-      finally { this.wsBusy = null; cx.notify(); }
+      finally { this.wsBusy = null; this.paint(cx); }
     });
   }
 
@@ -1200,17 +1215,18 @@ export default class Review extends View {
     if (was) { shut.delete(id); open.add(id); } else { shut.add(id); open.delete(id); }
     try { localStorage.setItem("repoShut", JSON.stringify([...shut])); localStorage.setItem("repoOpen", JSON.stringify([...open])); } catch {}
     if (was && st.plain) this.loadFolder(st, this.rootTree(st), "", cx);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** The add, pick, worktree and remove panels, under the tree (or the status line without one). */
   workspacePanel(t) {
     const ws = this.ws;
-    if (!ws && !this.wsBusy) return null;
+    const busy = this.wsBusySpace === this.spaceId ? this.wsBusy : null; // another space's add or remove isn't this one's
+    if (!ws && !busy) return null;
     const box = v_flex().id("ws-panel").mx(8).my(6).p(8).gap(6).rounded(6).bg(t.raised).text_size(11);
     const actions = (...btns) => h_flex().gap(6).flex_wrap().children(btns.filter(Boolean));
-    const cancel = this.button("ws-cancel", "Cancel", t.background, (cx) => { this.ws = null; cx.notify(); });
-    if (this.wsBusy) return box.child(div().text_color(t.muted).child(this.wsBusy));
+    const cancel = this.button("ws-cancel", "Cancel", t.background, (cx) => { this.ws = null; this.paint(cx); });
+    if (busy) return box.child(div().text_color(t.muted).child(busy));
     if (ws.kind === "path") {
       return box.child(div().text_color(t.muted).child(`A repo, or a folder of repos, on ${this.machine() ?? "the space's machine"}`))
         .child(Input.new(this.pathInput))
@@ -1220,10 +1236,10 @@ export default class Review extends View {
       const n = ws.repos.filter((r) => r.on && !r.has).length;
       return box.child(div().text_color(t.muted).child(`Repos in ${ws.parent}`))
         .children(ws.repos.map((r, i) => h_flex().id(`ws-pick-${i}`).gap(6).items_center().cursor_pointer()
-          .when(!r.has, (e) => e.on_click((_e, cx) => { r.on = !r.on; cx.notify(); }))
+          .when(!r.has, (e) => e.on_click((_e, cx) => { r.on = !r.on; this.paint(cx); }))
           .child(div().w(12).text_color(r.has ? t.dim : t.foreground).child(r.has ? "✓" : r.on ? "☑" : "☐"))
           .child(div().flex_1().min_w(0).truncate().text_color(r.has ? t.dim : t.foreground).child(base(r.path) + (r.has ? " (in this space)" : "")))))
-        .when(!!ws.offer, (e) => e.child(h_flex().id("ws-as-wt").gap(6).items_center().cursor_pointer().on_click((_e, cx) => { ws.asWorktrees = !ws.asWorktrees; cx.notify(); })
+        .when(!!ws.offer, (e) => e.child(h_flex().id("ws-as-wt").gap(6).items_center().cursor_pointer().on_click((_e, cx) => { ws.asWorktrees = !ws.asWorktrees; this.paint(cx); })
           .child(div().w(12).child(ws.asWorktrees ? "☑" : "☐"))
           .child(div().flex_1().min_w(0).text_color(t.muted).child(`Main clones as new worktrees on ${ws.offer.branch}, beside the others`))))
         .child(actions(n ? this.button("ws-add", `Add ${n} repo${n === 1 ? "" : "s"}`, t.accent + "55", (cx) => this.confirmAdd(cx)) : null, cancel));
@@ -1232,7 +1248,7 @@ export default class Review extends View {
       return box.child(div().text_color(t.foreground).child(`${base(ws.root)} is a main clone. This space's worktrees are on ${ws.branch}.`))
         .child(div().text_color(t.muted).child(`A new worktree goes in ${ws.dest}`))
         .child(actions(this.button("ws-wt", `Add a worktree on ${ws.branch}`, t.accent + "55", (cx) => this.confirmAdd(cx)),
-          this.button("ws-clone", "Add the clone itself", t.background, (cx) => { const sp = this.space(); cx.spawn(async (cx) => { try { await this.addRepos([ws.root], cx, sp); } catch (e) { this.error = String(e.message ?? e); cx.notify(); } }); }),
+          this.button("ws-clone", "Add the clone itself", t.background, (cx) => { const sp = this.space(); cx.spawn(async (cx) => { try { await this.addRepos([ws.root], cx, sp); } catch (e) { failIn(this, sp?.id, String(e.message ?? e)); this.paint(cx); } }); }),
           cancel));
     }
     if (ws.kind === "remove") {
@@ -1253,7 +1269,7 @@ export default class Review extends View {
     if (this.settings.autosave) this.saveAll(cx); // leaving a view saves (Q46)
     this.mode = mode;
     if (mode === "edit" && (this.treeOn || this.nvim())) this.refreshTrees(cx);
-    this.settle(); this.handle.focus(); cx.notify();
+    this.settle(); this.handle.focus(); this.paint(cx);
   }
 
   /**
@@ -1271,7 +1287,7 @@ export default class Review extends View {
     const f = key || extra ? null : this.file();
     if (this.settings.autosave) this.saveAll(cx);
     at ??= f ? this.cur ?? (f.hunks[this.current] ? { line: f.hunks[this.current].n, col: 0 } : null) : null;
-    if (!showView(view)) { this.error = `This layout has no Wingman ${view === "edit" ? "Edit" : view === "changes" ? "Changes" : "Review"} panel`; cx.notify(); return; }
+    if (!showView(view)) { this.error = `This layout has no Wingman ${view === "edit" ? "Edit" : view === "changes" ? "Changes" : "Review"} panel`; this.paint(cx); return; }
     setShared(GOTO, { view, space: this.spaceId, key: key ?? f?.openKey ?? f?.key ?? null, at, ...(extra ?? {}), stamp: Date.now() });
   }
 
@@ -1294,7 +1310,7 @@ export default class Review extends View {
           // Changes: a row still loading goes to the line once its hunks are in (loadRow).
           if (f?.lazy && g.at) this.gotoLine = { key: f.key, line }; else this.toLine(f, line);
         }
-        cx.notify();
+        this.paint(cx);
       }
     }
     // The comments dialog's Jump, when the layout has no Edit or Review panel: a pane copy opens it in Edit.
@@ -1305,7 +1321,7 @@ export default class Review extends View {
         const store = this.stores.find((st) => st.root === j.root);
         if (!store) this.error = "That comment's folder isn't open in this space";
         else { if (this.mode !== "edit") this.setMode("edit", cx); cx.spawn(async (cx) => this.openFile(store, j.rel, cx, { line: j.line, col: 0 })); }
-        cx.notify();
+        this.paint(cx);
       }
     }
     // Another copy renamed or deleted something: its tabs and tree follow here too.
@@ -1343,12 +1359,12 @@ export default class Review extends View {
 
   initChanges(cx) {
     this.unchecked = new Set(); this.discardKey = null; this.commitNote = null; this.commitRoot = null; this.committing = false;
-    this.commitInput = TextareaState.new({ placeholder: "Commit message (Ctrl+Enter commits the checked files)", rows: 3 });
+    this.commitInput = TextareaState.new({ placeholder: "Commit message (Ctrl+Enter commits)", rows: 3 });
     this.commitInput.on("submit", (e, cx) => { if (e?.secondary) this.commit(cx); });
-    this.commitInput.on("change", (_e, cx) => cx.notify());
+    this.commitInput.on("change", (_e, cx) => this.paint(cx));
     this.commitInput.on("focus", () => { this.inBar = this.commitInput; this.treeFocus = false; });
     this.commitInput.on("blur", () => { if (this.inBar === this.commitInput) this.inBar = null; });
-    cx.timer.every(2000, (cx) => this.refreshChanges(cx));
+    cx.timer.every(2000, (cx) => { if (!this.refreshing) cx.spawn(async (cx) => this.refreshChanges(cx)); });
   }
 
   /** Review publishes its open change count per file, for the Changes view's tags. */
@@ -1447,19 +1463,19 @@ export default class Review extends View {
       if (sel) { await this.loadRowNow(sel, cx); if (stale()) return; }
       crumb("loadChanges: after loadRowNow selected", "changes");
       // The committed rows from the last load stay meanwhile (this space's: kept per space).
-      this.files = files; this.changeSig = sig.join("\0"); this.status = null;
+      this.files = files; this.changeSig = sig.join("\0"); this.status = null; loadOk(this);
       if (this.discardKey && !files.some((f) => f.key === this.discardKey)) this.discardKey = null;
       crumb(`loadChanges: list set (${files.length} files), before settle+notify`, "changes");
-      this.settle(); cx.notify();
+      this.settle(); this.paint(cx);
       crumb("loadChanges: after settle+notify", "changes");
       const committed = [];
       for (const { st, head, done } of heads) if (head) { crumb(`loadChanges: before committedRows ${st.root}`, "changes"); committed.push(...(await this.committedRows(st, head, done))); crumb(`loadChanges: after committedRows ${st.root}`, "changes"); }
       if (stale()) return;
       this.committed = committed;
       crumb(`loadChanges: committed set (${committed.length}), before settle+notify`, "changes");
-      this.settle(); cx.notify();
+      this.settle(); this.paint(cx);
       crumb("loadChanges: after committed settle+notify", "changes");
-    } catch (e) { crumb(`loadChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); if (!stale()) { this.error = String(e.message ?? e); cx.notify(); } }
+    } catch (e) { crumb(`loadChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); loadFailed(this, space, String(e.message ?? e)); this.paint(cx); }
     finally { this.loadingChanges = false; crumb("loadChanges exit", "changes"); }
   }
 
@@ -1601,7 +1617,7 @@ export default class Review extends View {
       await this.loadRowNow(f, cx);
       if (this.gotoLine?.key === f.key) { if (this.sel === f.key) this.toLine(f, this.gotoLine.line); this.gotoLine = null; }
       crumb(`loadRow: before settle+notify ${f.key}`, "changes");
-      this.settle(); cx.notify();
+      this.settle(); this.paint(cx);
       crumb(`loadRow: after settle+notify ${f.key}`, "changes");
     });
   }
@@ -1718,7 +1734,7 @@ export default class Review extends View {
     // One check at a time: WSL git on a Windows drive takes over a second per status.
     if (this.refreshing || this.loadingChanges || this.committing) return;
     if (!this.repos().length) {
-      if (this.files.length || this.committed?.length || this.changeSig) { this.files = []; this.committed = []; this.changeSig = null; this.discardKey = null; this.settle(); cx.notify(); }
+      if (this.files.length || this.committed?.length || this.changeSig) { this.files = []; this.committed = []; this.changeSig = null; this.discardKey = null; this.settle(); this.paint(cx); }
       return;
     }
     if (!this.changesShown()) return;
@@ -1726,23 +1742,29 @@ export default class Review extends View {
     if (remote && Date.now() - (this.changesAt ?? 0) < REMOTE.changesMs) return;
     this.refreshing = true;
     crumb("refreshChanges enter", "changes");
+    // What this pass finds is its space's: a pass that outlives a space switch or a change of roots
+    // is dropped, and its error lands in its own space's state (D1: never in the space shown by then).
+    const space = this.spaceId, stores = this.stores, moved = () => this.spaceId !== space || this.stores !== stores;
     try {
       const sig = [];
       for (const st of this.repos()) { crumb(`refreshChanges: before changeSigOf ${st.root}`, "changes"); sig.push(...(await this.changeSigOf(st)).sig); crumb(`refreshChanges: after changeSigOf ${st.root}`, "changes"); }
+      if (moved()) return;
       let stale = sig.join("\0") !== this.changeSig;
       // A file whose texts aren't loaded is covered by the status and line counts; a loaded one's
       // text is read again (another machine's are covered by stampOf's hashes).
       for (const f of this.files) { if (stale) break; if (!f.error && !f.lazy && f.Ctext !== undefined && !f.store?.on && (crumb(`refreshChanges: before readTextFile ${f.path}`, "changes"), (await readTextFile(f.path)) !== f.Ctext)) stale = true; }
       crumb(`refreshChanges: stale=${stale}`, "changes");
+      if (moved()) return;
       if (stale) { crumb("refreshChanges: before loadChanges", "changes"); await this.loadChanges(cx); crumb("refreshChanges: after loadChanges", "changes"); }
-    } catch (e) { crumb(`refreshChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); this.error = String(e.message ?? e); cx.notify(); }
+      else if (loadOk(this)) this.paint(cx);
+    } catch (e) { crumb(`refreshChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); loadFailed(this, space, String(e.message ?? e)); this.paint(cx); }
     finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); crumb("refreshChanges exit", "changes"); }
   }
 
   /** Puts a file back as HEAD has it (asked first by the button). Unsaved edits in Edit block it. */
   discard(f, cx) {
     this.discardKey = null;
-    if (this.heldElsewhere([f.key]).length) { this.error = `${base(f.rel)} has unsaved edits in Edit: save or discard them there first`; cx.notify(); return; }
+    if (this.heldElsewhere([f.key]).length) { this.error = `${base(f.rel)} has unsaved edits in Edit: save or discard them there first`; this.paint(cx); return; }
     const space = this.spaceId;
     cx.spawn(async (cx) => {
       const s = () => this.stateOf(space) ?? {}; // its own space's state, shown or not
@@ -1758,7 +1780,7 @@ export default class Review extends View {
       } catch (e) { s().error = String(e.message ?? e); }
       await this.loadChanges(cx);
     });
-    cx.notify();
+    this.paint(cx);
   }
 
   /** The repo the commit box commits to: the one picked, else the first with changes. */
@@ -1776,10 +1798,10 @@ export default class Review extends View {
     const rels = this.checkedIn(st).map((f) => f.rel), spec = st.tempPath("pathspec");
     let cmds;
     try { cmds = commitCommands(rels, this.commitInput.value(), spec); }
-    catch (e) { this.error = String(e.message ?? e); cx.notify(); return; }
+    catch (e) { this.error = String(e.message ?? e); this.paint(cx); return; }
     const held = this.heldElsewhere(this.checkedIn(st).map((f) => f.key));
-    if (held.length) { this.error = `Unsaved edits in Edit: ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}. Save or discard them first`; cx.notify(); return; }
-    this.committing = true; this.error = null; this.commitNote = null; cx.notify();
+    if (held.length) { this.error = `Unsaved edits in Edit: ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}. Save or discard them first`; this.paint(cx); return; }
+    this.committing = true; this.committingIn = this.spaceId; this.error = null; this.commitNote = null; this.paint(cx);
     const space = this.spaceId, s = () => this.stateOf(space) ?? {}; // the note lands in its own space's state
     cx.spawn(async (cx) => {
       try {
@@ -1795,7 +1817,7 @@ export default class Review extends View {
         s().unchecked?.clear();
       } catch (e) { s().error = String(e.message ?? e); }
       finally { this.committing = false; }
-      await this.loadChanges(cx); cx.notify();
+      await this.loadChanges(cx); this.paint(cx);
     });
   }
 
@@ -1810,11 +1832,11 @@ export default class Review extends View {
     if (what === "toggle") {
       const open = (this.committedOpen ??= new Set());
       if (open.has(r.id)) open.delete(r.id); else open.add(r.id);
-      this.settle(); cx.notify(); return;
+      this.settle(); this.paint(cx); return;
     }
     const f = r.f;
-    if (what === "check") { if (this.unchecked.has(f.key)) this.unchecked.delete(f.key); else this.unchecked.add(f.key); cx.notify(); return; }
-    if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; cx.notify(); }
+    if (what === "check") { if (this.unchecked.has(f.key)) this.unchecked.delete(f.key); else this.unchecked.add(f.key); this.paint(cx); return; }
+    if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; this.paint(cx); }
   }
 
   renderChanges(t) {
@@ -1850,14 +1872,14 @@ export default class Review extends View {
     if (!this.crumbBuilt) { this.crumbBuilt = true; crumb(`renderChanges: built ${rows.length} rows, building tree`, "changes"); }
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
       .child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
-        .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); cx.notify(); }).child(box(all)))
+        .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); this.paint(cx); }).child(box(all)))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`))
         .when(adds + dels > 0, (e) => e.child(h_flex().flex_none().gap(4).text_size(11)
           .child(div().text_color(t.ansi2).child(`+${adds}`)).child(div().text_color(t.ansi1).child(`−${dels}`)))))
       // A virtual list (rows of known heights): its rows can't hold handlers, so the pointer's x is
       // kept from the area around it and a click (clickChange) tells the checkbox from the row by it.
       .child(div().id("chg-list").flex_1().min_h(0).pt(4).relative().overflow_hidden()
-        .on_size_change((size, cx) => { if (!this.crumbSized) { this.crumbSized = true; crumb(`on_size_change: first Changes list size ${size.width}x${size.height}`, "changes"); } if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; cx.notify(); } })
+        .on_size_change((size, cx) => { if (!this.crumbSized) { this.crumbSized = true; crumb(`on_size_change: first Changes list size ${size.width}x${size.height}`, "changes"); } if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; this.paint(cx); } })
         .on_mouse_move((ev) => { this.chgX = ev.local_position?.x ?? null; })
         .on_mouse_down("left", (ev) => { this.chgX = ev.local_position?.x ?? null; })
         .when(rows.length > 0, (e) => e
@@ -1868,11 +1890,11 @@ export default class Review extends View {
       .child(v_flex().flex_none().p(8).gap(6).border_t(1).border_color(t.border)
         .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.repos().filter((s) => this.files.some((f) => f.store === s)).map((s) =>
           div().id(`repo-${s.root}`).h(22).px(8).flex().items_center().rounded(5).text_size(11).cursor_pointer()
-            .bg(s === st ? t.accent + "77" : t.raised).on_click((_e, cx) => { this.commitRoot = s.root; cx.notify(); }).child(base(s.root))))))
+            .bg(s === st ? t.accent + "77" : t.raised).on_click((_e, cx) => { this.commitRoot = s.root; this.paint(cx); }).child(base(s.root))))))
         .child(Textarea.new(this.commitInput).h(72).px(8).py(6).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12))
         .when(open > 0, (e) => e.child(div().text_size(11).text_color(t.ansi3).child(`${open} checked file${open === 1 ? " has" : "s have"} changes still to review`)))
         .when(!!this.commitNote, (e) => e.child(div().text_size(11).text_color(t.dim).child(this.commitNote)))
-        .child(this.button("commit", this.committing ? "Committing…" : `Commit ${checked.length} file${checked.length === 1 ? "" : "s"}${multi && st ? ` to ${base(st.root)}` : ""}`, checked.length && !this.committing ? t.accent + "88" : t.raised, (cx) => this.commit(cx)).h(28).justify_center()));
+        .child(this.button("commit", this.committing && this.committingIn === this.spaceId ? "Committing…" : `Commit ${checked.length} file${checked.length === 1 ? "" : "s"}${multi && st ? ` to ${base(st.root)}` : ""}`, checked.length && !this.committing ? t.accent + "88" : t.raised, (cx) => this.commit(cx)).h(28).justify_center()));
   }
 
   /** ctrl-b: shows or hides the tree, switching to the Edit view first if needed. */
@@ -1880,7 +1902,7 @@ export default class Review extends View {
     if (this.mode !== "edit") { this.treeOn = true; return this.setMode("edit", cx); }
     this.treeOn = !this.treeOn;
     if (this.treeOn) this.refreshTrees(cx);
-    cx.notify();
+    this.paint(cx);
   }
 
   // ---- D1: the Explorer tree ------------------------------------------------------
@@ -1931,7 +1953,7 @@ export default class Review extends View {
           R.listSig.set(rel, sig);
           if (error) R.errors.set(rel, error); else R.errors.delete(rel);
           setFolder(R.tree, rel, res.entries, res.more); R.ver++;
-          cx.notify();
+          this.paint(cx);
         }
       } finally { this.listing = false; }
     });
@@ -1942,7 +1964,7 @@ export default class Review extends View {
     toggle(R.tree, rel); R.ver++;
     // Opening a disk-listed folder lists it again (its old listing shows meanwhile).
     if (R.tree.open.has(rel)) this.loadFolder(st, R, rel, cx, true);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Opens the folders above a file, loading those that have no listing yet. */
@@ -2031,7 +2053,7 @@ export default class Review extends View {
       } catch (e) { log(`tree: ${e.message ?? e}`); }
       finally {
         this.treeBusy = false;
-        if (changed) { if (this.qo) this.rankQuick(); cx.notify(); }
+        if (changed) { if (this.qo) this.rankQuick(); this.paint(cx); }
         if (this.treeAgain) { this.treeAgain = false; this.refreshTrees(cx, true); }
       }
     });
@@ -2077,7 +2099,7 @@ export default class Review extends View {
   gotoRoot(target, cx) {
     if (this.rootShut(target)) this.toggleRepo(target, cx);
     this.treeCur = this.treeItem(target, "", true); this.treeFocus = true; this.searchFocus = false; this.treeDel = null;
-    this.treeScrollTo = `${target.root}|`; this.handle.focus(); cx.notify();
+    this.treeScrollTo = `${target.root}|`; this.handle.focus(); this.paint(cx);
   }
 
   renderTree(t, full = false) {
@@ -2190,7 +2212,7 @@ export default class Review extends View {
     this.treeCur = this.treeItem(st, row.rel, row.dir); this.treeFocus = true; this.searchFocus = false;
     this.treeDel = null;
     if (this.treeEdit && !this.treeEdit.busy) this.endTreeEdit(cx, false);
-    this.handle.focus(); cx.notify();
+    this.handle.focus(); this.paint(cx);
   }
 
   /** The right-click menu for a row or root header (the popup copy sends its command back: treeMenuCmd). */
@@ -2213,7 +2235,7 @@ export default class Review extends View {
         : [{ cmd: "treeRename", label: "Rename…", key: this.kl("renameItem") }, { cmd: "treeDelete", label: "Delete", key: this.kl("deleteItem") }]),
     ];
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
-    cx.notify();
+    this.paint(cx);
   }
 
   /** A tree menu command. Every shown copy gets it; only the copy that opened the menu acts. */
@@ -2235,11 +2257,11 @@ export default class Review extends View {
       treeExternal: () => this.externalItem(st, it, cx),
       treeRefresh: () => this.refreshRoot(st, cx),
     })[c]?.();
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Shows the error line (the tree's own in the Neovim layout). */
-  treeNote(msg, cx) { this.error = msg; cx.notify(); }
+  treeNote(msg, cx) { this.error = msg; this.paint(cx); }
 
   /** Files at `rel` or under it with unsaved edits, in this copy or another: why it can't be renamed or deleted, or null. */
   unsavedUnder(st, rel) {
@@ -2285,7 +2307,7 @@ export default class Review extends View {
     this.treeFocus = true; this.treeScrollTo = "edit"; this.error = null;
     this.treeInput.set_value(name);
     this.focusTreeInput(true);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Puts the keyboard in the name box; `select`: Rename's name before its extension is selected (while untouched). */
@@ -2301,7 +2323,7 @@ export default class Review extends View {
     this.treeEdit = null;
     if (this.inBar === this.treeInput) this.inBar = null;
     if (keep) { this.treeFocus = true; this.handle.focus(); }
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Enter in the name box: checks the name (shown under the box, which stays), then creates or renames. */
@@ -2316,8 +2338,8 @@ export default class Review extends View {
       if (!t.error && t.same) return this.endTreeEdit(cx);
       if (!t.error) { const why = this.unsavedUnder(st, e.rel); if (why) t = { error: why }; }
     } else t = newTarget({ root: st.root, dir: e.dir, name, kind: e.kind === "newFolder" ? "dir" : "file", windows });
-    if (t.error) { e.error = t.error; cx.notify(); return; }
-    e.busy = true; e.error = null; cx.notify();
+    if (t.error) { e.error = t.error; this.paint(cx); return; }
+    e.busy = true; e.error = null; this.paint(cx);
     cx.spawn(async (cx) => {
       try {
         if (e.kind === "newFile") await createFile(t.path, st.root, { on });
@@ -2326,7 +2348,7 @@ export default class Review extends View {
       } catch (err) {
         e.busy = false; e.error = String(err.message ?? err);
         if (this.treeEdit === e) this.treeInput.focus();
-        cx.notify(); return;
+        this.paint(cx); return;
       }
       if (this.treeEdit === e) this.endTreeEdit(cx);
       this.treeCur = this.treeItem(st, t.rel, e.isDir);
@@ -2341,7 +2363,7 @@ export default class Review extends View {
         const [o, rel] = this.own(st, t.rel);
         if (this.sel === `${o.root}|${rel}`) this.treeFocus = false;
       }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -2361,7 +2383,7 @@ export default class Review extends View {
     if (this.treeEdit) this.endTreeEdit(cx, false);
     this.treeDel = { ...it, count, busy: false, error: null };
     this.treeCur = it; this.treeFocus = true; this.treeScrollTo = `${st.root}|${it.rel}`; this.error = null;
-    this.handle.focus(); cx.notify();
+    this.handle.focus(); this.paint(cx);
   }
 
   /** The delete confirm, under the row it names. */
@@ -2372,7 +2394,7 @@ export default class Review extends View {
       .when(!!d.error, (e) => e.child(div().text_color(t.ansi1).child(d.error)))
       .child(h_flex().gap(6)
         .child(this.button("tree-del-yes", d.busy ? "Deleting…" : "Delete", t.ansi1 + "88", (cx) => this.confirmTreeDelete(cx)))
-        .child(this.button("tree-del-no", "Cancel", t.background, (cx) => { this.treeDel = null; cx.notify(); })));
+        .child(this.button("tree-del-no", "Cancel", t.background, (cx) => { this.treeDel = null; this.paint(cx); })));
   }
 
   /** The confirm's Delete (or Enter): deletes permanently, then the tree and tabs follow. */
@@ -2380,16 +2402,16 @@ export default class Review extends View {
     const d = this.treeDel, st = this.itemStore(d);
     if (!st || d.busy) return;
     const why = this.unsavedUnder(st, d.rel); // edits made since the confirm opened
-    if (why) { d.error = why; cx.notify(); return; }
-    d.busy = true; d.error = null; cx.notify();
+    if (why) { d.error = why; this.paint(cx); return; }
+    d.busy = true; d.error = null; this.paint(cx);
     const path = under(st.root, d.rel), on = st.on ?? null;
     cx.spawn(async (cx) => {
       try { if (d.dir) await deleteTree(path, st.root, { on }); else await deleteFile(path, st.root, { on }); }
-      catch (e) { if (e.code !== "missing") { d.busy = false; d.error = String(e.message ?? e); cx.notify(); return; } }
+      catch (e) { if (e.code !== "missing") { d.busy = false; d.error = String(e.message ?? e); this.paint(cx); return; } }
       if (this.treeDel === d) this.treeDel = null;
       this.treeCur = null;
       this.afterFileOp(st, { removed: d.rel, isDir: d.dir }, cx);
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -2406,7 +2428,7 @@ export default class Review extends View {
     if (!(this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search.left !== "search")) { this.treeFocus = false; return false; }
     if (!keystrokeOf(e)) return false; // a modifier alone
     if (k === "enter" && this.treeDel) { this.confirmTreeDelete(cx); return true; }
-    if (k === "escape") { if (this.treeDel) this.treeDel = null; else this.treeFocus = false; cx.notify(); return true; }
+    if (k === "escape") { if (this.treeDel) this.treeDel = null; else this.treeFocus = false; this.paint(cx); return true; }
     const id = this.kIdx.tree.get(k) ?? this.kIdx.pane.get(k);
     if (id) { this.act(id, cx); return true; }
     if (["up", "down", "left", "right", "home", "end"].includes(k)) { this.treeMove(k, cx); return true; }
@@ -2442,7 +2464,7 @@ export default class Review extends View {
     if (toggle && it.link) return this.gotoRoot(it.link, cx);
     if (toggle) { if (it.root) this.toggleRepo(it.st, cx); else this.toggleDir(it.st, it.rel, cx); }
     this.treeCur = this.treeItem(it.st, it.rel, it.dir); this.treeScrollTo = `${it.st.root}|${it.rel}`;
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Enter or Space on the selected row: a file opens (Enter: the editor takes the keyboard), a folder or root opens or closes, a link goes to its root. */
@@ -2456,15 +2478,16 @@ export default class Review extends View {
     const [o, rel] = this.own(it.st, it.rel), key = `${o.root}|${rel}`;
     const at = enter && !(this.sel === key && this.cur) ? { line: 0, col: 0 } : null; // Enter puts the cursor in the file
     if (enter) this.treeFocus = false;
-    cx.spawn(async (cx) => { await this.openFile(it.st, it.rel, cx, at); cx.notify(); });
+    cx.spawn(async (cx) => { await this.openFile(it.st, it.rel, cx, at); this.paint(cx); });
   }
 
   /** Reveal in File Explorer / Finder / the file manager (this computer's roots only). */
   revealItem(st, it, cx) {
     if (st.on) return;
+    const space = this.spaceId;
     cx.spawn(async (cx) => {
       try { await revealPath(under(st.root, it.rel), it.dir); }
-      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      catch (e) { failIn(this, space, String(e.message ?? e)); this.paint(cx); }
     });
   }
 
@@ -2473,9 +2496,10 @@ export default class Review extends View {
     if (st.on || it.dir) return;
     const [o, rel] = this.own(st, it.rel), f = this.files.find((x) => x.key === `${o.root}|${rel}`);
     if (f && this.dirty(f) && !f.conflict) this.save(cx, f);
+    const space = this.spaceId;
     cx.spawn(async (cx) => {
       try { await openInEditor(this.settings.externalEditor, under(st.root, it.rel), 0, 0, this.settings.externalCommand); }
-      catch (e) { this.error = String(e.message ?? e); cx.notify(); }
+      catch (e) { failIn(this, space, String(e.message ?? e)); this.paint(cx); }
     });
   }
 
@@ -2527,7 +2551,7 @@ export default class Review extends View {
     if (this.mode === "edit") this.refreshTrees(cx, true);
     if (mine && now != null) { const [o, rel] = this.own(st, now), k = `${o.root}|${rel}`; this.revealInTree(k, cx); this.treeScrollTo = k; }
     if (gone != null) this.followTabs(st, gone, to, cx);
-    cx.notify();
+    this.paint(cx);
   }
 
   /**
@@ -2577,7 +2601,7 @@ export default class Review extends View {
         if (!this.opened.includes(key)) this.opened.push(key);
         if (r.sel) this.pick(key, cx);
       }
-      this.settle(); cx.notify();
+      this.settle(); this.paint(cx);
     });
   }
 
@@ -2625,7 +2649,7 @@ export default class Review extends View {
     const sideways = ev.modifiers?.shift ? (ev.delta_lines ? ev.delta_lines.y * 3 * this.cw() : ev.delta.y) : dx;
     if (ev.modifiers?.shift || Math.abs(dx) > Math.abs(ev.delta_lines?.y ?? ev.delta.y)) {
       if (this.wrapCols()) return; // wrapped lines don't scroll sideways
-      this.hx = Math.max(0, this.hx - sideways); cx.notify(); cx.stop_propagation(); return;
+      this.hx = Math.max(0, this.hx - sideways); this.paint(cx); cx.stop_propagation(); return;
     }
     const lines = ev.delta_lines?.y ?? ev.delta.y / ROW;
     this.wheelAcc = (this.wheelAcc ?? 0) - lines;
@@ -2634,7 +2658,7 @@ export default class Review extends View {
     this.wheelAcc -= step;
     this.scrollTo((this.top ?? 0) + step);
     if (this.dragging && this.dragY != null) this.dragTo(this.dragY);
-    cx.notify();
+    this.paint(cx);
     cx.stop_propagation();
   }
 
@@ -2667,7 +2691,7 @@ export default class Review extends View {
     if (this.dragY < ROW) this.scrollTo((this.top ?? 0) - 1);
     else if (this.dragY > (this.viewH ?? 400) - ROW) this.scrollTo((this.top ?? 0) + 1);
     this.dragTo(this.dragY);
-    cx.notify();
+    this.paint(cx);
   }
 
   dragTo(y) {
@@ -2696,11 +2720,13 @@ export default class Review extends View {
 
   /** A hunk's button row: which button the x position falls on. */
   rowButton(i, x, cx) {
-    if (x >= GUTTER + BTN_GAP && x < GUTTER + BTN_GAP + BTN_W) this.hunk("reject", i, cx);
-    else if (x >= GUTTER + 2 * BTN_GAP + BTN_W && x < GUTTER + 2 * (BTN_GAP + BTN_W)) this.hunk("accept", i, cx);
-    else if (x >= GUTTER + 3 * BTN_GAP + 2 * BTN_W && x < GUTTER + 3 * (BTN_GAP + BTN_W)) this.askPrompt(i, cx);
-    else if (x >= GUTTER + 4 * BTN_GAP + 3 * BTN_W && x < GUTTER + 4 * (BTN_GAP + BTN_W)) this.commentHunk(i, cx);
-    else { this.current = i; cx.notify(); }
+    // The widths the row was drawn with (hunkButtons): narrower without keys in a narrow diff.
+    const { w, shown } = this.hunkBtns(), at = (k) => k < shown && x >= GUTTER + (k + 1) * BTN_GAP + k * w && x < GUTTER + (k + 1) * (BTN_GAP + w);
+    if (at(0)) this.hunk("reject", i, cx);
+    else if (at(1)) this.hunk("accept", i, cx);
+    else if (at(2)) this.askPrompt(i, cx);
+    else if (at(3)) this.commentHunk(i, cx);
+    else { this.current = i; this.paint(cx); }
   }
 
   step(by, cx) {
@@ -2709,7 +2735,7 @@ export default class Review extends View {
     if (!f.hunks.length) return;
     this.current = (this.current + by + f.hunks.length) % f.hunks.length;
     if (this.cur) { const h = f.hunks[this.current]; this.cur = this.clampPos(f, { line: h.n, col: 0 }); this.anchor = null; }
-    this.reveal(); cx.notify();
+    this.reveal(); this.paint(cx);
   }
 
   stepFile(by, cx) {
@@ -2729,7 +2755,7 @@ export default class Review extends View {
       if (old && this.settings.autosave && this.dirty(old) && !old.conflict) this.save(cx, old);
       this.cur = this.anchor = null; this.hx = 0;
     }
-    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); cx.notify();
+    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); this.paint(cx);
     if (this.mode === "changes") { const f = this.file(); if (f) f.usedAt = Date.now(); this.loadRow(f, cx); } // a row's texts load when it's picked
   }
 
@@ -2741,7 +2767,7 @@ export default class Review extends View {
    */
   run(plan, cx, feedback = []) {
     if (!plan.length || this.mode === "changes") return;
-    if (plan.some(([f]) => f.conflict)) { this.error = "Pick Keep mine or Take agent's first"; cx.notify(); return; }
+    if (plan.some(([f]) => f.conflict)) { this.error = "Pick Keep mine or Take agent's first"; this.paint(cx); return; }
     // Panel split: another copy (Edit) holds unsaved edits to these files. Review acts on what's
     // on disk, so they're saved first (autosave on) or left to the user (off).
     const held = this.heldElsewhere(plan.map(([f]) => f.key));
@@ -2753,7 +2779,7 @@ export default class Review extends View {
         cx.timer.after(800, (cx) => this.onWatch(paths, cx));
         this.error = `Saving your edits to ${names} in Edit first: try again in a moment`;
       } else this.error = `${names} has unsaved edits in Edit: save or discard them there first`;
-      cx.notify(); return;
+      this.paint(cx); return;
     }
     const entry = { snaps: [], writes: [], feedback }, jobs = [], notes = [];
     for (const [f, action] of plan) {
@@ -2767,7 +2793,7 @@ export default class Review extends View {
       jobs.push([state, writes]);
     }
     this.history.push(entry); this.redo = []; capSteps(this.history);
-    this.error = null; this.settle(); this.reveal(); cx.notify();
+    this.error = null; this.settle(); this.reveal(); this.paint(cx);
     this.enqueue(async () => {
       for (const [f, ws] of jobs) for (const w of ws) entry.writes.push(await f.store.apply(f, w));
       for (const m of feedback) await this.noteToClaude(m, () => queueFeedback(m.terminal, m.text, { on: m.on }));
@@ -2784,7 +2810,7 @@ export default class Review extends View {
       const i = this.files.findIndex((f) => f.key === snap.key);
       if (i >= 0) this.files[i] = snap;
     }
-    this.sel = entry.snaps[0].key; this.error = null; this.settle(); this.reveal(); cx.notify();
+    this.sel = entry.snaps[0].key; this.error = null; this.settle(); this.reveal(); this.paint(cx);
     this.enqueue(async () => {
       await entry.snaps[0].store.undo(entry.writes);
       for (const m of entry.feedback) await this.noteToClaude(m, () => withdrawFeedback(m.terminal, m.text, { on: m.on }));
@@ -2798,7 +2824,11 @@ export default class Review extends View {
   async noteToClaude(m, send) {
     if (!m.on) return send();
     try { return await send(); }
-    catch (e) { this.status = hookKnown(m.on) === false ? NOTES_NOTE(m.on) : `Note to Claude on ${m.on} not sent: ${e.message ?? e}`; return false; }
+    catch (e) {
+      const s = this.stateOf(this.jobSpace === undefined ? this.spaceId : this.jobSpace); // the queued job's space, shown or not
+      if (s) s.status = hookKnown(m.on) === false ? NOTES_NOTE(m.on) : `Note to Claude on ${m.on} not sent: ${e.message ?? e}`;
+      return false;
+    }
   }
 
   /** Undo or redo of an edit: memory only. What's on disk stays, so the file shows as unsaved. */
@@ -2808,7 +2838,7 @@ export default class Review extends View {
     other.push({ edit: true, key: entry.key, state: bare(now), cur: this.cur, at: 0 }); capSteps(other);
     this.replace(now, { ...entry.state, diskC: now.diskC, diskB: now.diskB, conflict: now.conflict, edited: true });
     this.sel = entry.key; this.cur = entry.cur; this.anchor = null;
-    this.settle(); this.showCursor(); this.retokenize(cx); cx.notify();
+    this.settle(); this.showCursor(); this.retokenize(cx); this.paint(cx);
   }
 
   redoEdit(cx) {
@@ -2823,15 +2853,16 @@ export default class Review extends View {
     // returns, so the queue must never hold one across an await.
     const prev = this.queue;
     this.queue = new Promise((done) => cx.spawn(async (cx) => {
-      try { await prev; await job(); }
+      // One job runs at a time: what it reports outside its writes (noteToClaude) goes to its space.
+      try { await prev; this.jobSpace = space; await job(); }
       catch (e) {
         // Disk no longer matches memory: drop undo (it would act on stale state) and reread everything.
         const s = this.stateOf(space);
         if (s) { s.error = String(e.message ?? e); s.history = []; (s.deferred ??= new Set()).add("*"); }
       } finally {
-        this.writing--; done();
+        this.jobSpace = undefined; this.writing--; done();
         if (!this.writing && this.deferred.size) await this.drain(cx);
-        cx.notify();
+        this.paint(cx);
       }
     }));
   }
@@ -2864,8 +2895,8 @@ export default class Review extends View {
   /** O1: a reason for the last rejection, sent along as its own note. */
   askReason(cx) {
     const r = this.lastReject;
-    if (!r) { this.error = "Nothing rejected yet to comment on"; cx.notify(); return; }
-    if (r.remote) { this.status = REASON_NOTE(r.remote); cx.notify(); return; }
+    if (!r) { this.error = "Nothing rejected yet to comment on"; this.paint(cx); return; }
+    if (r.remote) { this.status = REASON_NOTE(r.remote); this.paint(cx); return; }
     this.openForm({ form: "reason", terminal: r.terminal, file: r.file, where: r.where, quote: r.quote, on: r.on ?? null });
   }
 
@@ -2877,7 +2908,7 @@ export default class Review extends View {
     const f = this.file();
     if (!f) return;
     const terminal = this.target(f);
-    if (!terminal) { this.error = "No agent to send to: none made this change, and the space doesn't have exactly one"; cx.notify(); return; }
+    if (!terminal) { this.error = "No agent to send to: none made this change, and the space doesn't have exactly one"; this.paint(cx); return; }
     const file = f.as ?? agentPath(f.path, terminal), sel = this.selection(f);
     if (sel) return this.openForm({ form: "prompt", terminal, file, ...this.quote(f, sel) });
     if (!f.hunks[i]) return;
@@ -2910,7 +2941,7 @@ export default class Review extends View {
       try { this.cmts.set(space, await loadComments(cmtIo, cmtDir(), space)); }
       catch (e) { log(`comments: ${e.message ?? e}`); this.cmts.set(space, { v: 1, comments: [], undo: null }); }
       finally { this.cmtLoading = false; }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -2938,7 +2969,7 @@ export default class Review extends View {
         this.cmts.set(space, next); this.cmtSeen.set(space, shared(COMMENTS)?.[space] ?? 0);
       } catch (e) { log(`comments: ${e.message ?? e}`); }
       finally { this.anchoring = false; }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -2977,9 +3008,9 @@ export default class Review extends View {
   /** alt-m: a comment on the selection, the cursor's line, or the current change. */
   commentHere(cx) {
     const f = this.file(), why = this.commentBlocked(f);
-    if (why) { this.error = why; cx.notify(); return; }
+    if (why) { this.error = why; this.paint(cx); return; }
     const span = this.commentSpan(f);
-    if (!span) { this.error = "Put the cursor on a line, or select lines, to comment on"; cx.notify(); return; }
+    if (!span) { this.error = "Put the cursor on a line, or select lines, to comment on"; this.paint(cx); return; }
     this.openCommentForm(this.commentDraft(f, span[0], span[1]));
   }
 
@@ -2988,11 +3019,11 @@ export default class Review extends View {
     const f = this.file(), h = f?.hunks[i], why = this.commentBlocked(f);
     if (!h) return;
     this.current = i;
-    if (why) { this.error = why; cx.notify(); return; }
+    if (why) { this.error = why; this.paint(cx); return; }
     const last = Math.max(0, linesOf(f).length - 1), a = Math.min(h.n, last), b = Math.max(a, Math.min(h.n + h.nc - 1, last));
     const removal = h.nc ? {} : { snippet: snippetOf(f.B, h.o, h.oc), anchor: snippetOf(linesOf(f), a, 1) };
     this.openCommentForm(this.commentDraft(f, a, b, { kind: "hunk", by: f.by ?? null, ...removal }));
-    cx.notify();
+    this.paint(cx);
   }
 
   /**
@@ -3002,7 +3033,7 @@ export default class Review extends View {
   rejectWithComment(cx) {
     const f = this.file(), i = this.current, h = f?.hunks[i], why = this.commentBlocked(f);
     if (!h) return;
-    if (why) { this.error = why; cx.notify(); return; }
+    if (why) { this.error = why; this.paint(cx); return; }
     const draft = this.commentDraft(f, h.n, h.n, {
       kind: "rejected", by: f.by ?? null, end: h.n + Math.max(1, h.oc),
       snippet: snippetOf(f.C, h.n, h.nc),
@@ -3052,7 +3083,7 @@ export default class Review extends View {
     if (extend && this.lineSel(f)) this.selB = i;
     else { this.selA = this.selB = i; this.selFor = rows; }
     this.ensureVisible(i);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Shift+Up/Down: grow or shrink the selection from its moving end (or start at the current hunk). */
@@ -3066,7 +3097,7 @@ export default class Review extends View {
     this.select(this.selB + by, true, cx);
   }
 
-  clearSelection(cx) { this.selA = this.selB = null; this.anchor = null; cx.notify(); }
+  clearSelection(cx) { this.selA = this.selB = null; this.anchor = null; this.paint(cx); }
 
   /** The changed lines in the selection: baseline indexes of removed lines, current indexes of added. */
   picks(f, sel) {
@@ -3083,7 +3114,7 @@ export default class Review extends View {
     const f = this.file(), sel = f && this.selection(f);
     if (!sel) return false;
     const { pick, rows, any } = this.picks(f, sel);
-    if (!any) { this.error = "The selection has no changed lines"; cx.notify(); return true; }
+    if (!any) { this.error = "The selection has no changed lines"; this.paint(cx); return true; }
     const where = `your change at ${this.quoteRows(f, rows).where}`;
     if (how === "reject") this.noteReject(f, where, rows.filter((r) => r.kind === "+" || r.kind === "-"));
     this.selA = this.selB = null; this.anchor = null;
@@ -3186,7 +3217,7 @@ export default class Review extends View {
 
   /** Panel split: the Review copy keeps no unsaved text. */
   readOnly(cx) {
-    this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; cx.notify();
+    this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; this.paint(cx);
   }
 
   cw() { return this.charW ?? 7.2; }
@@ -3211,20 +3242,20 @@ export default class Review extends View {
     if (r.hunk != null) this.current = r.hunk;
     // Editor "nvim": a click opens Neovim at that line; Wingman stays the review.
     if (this.nvim()) return this.toNvim(f, r.side === "new" ? r.line : r.hunk != null ? f.hunks[r.hunk].n : 0, cx);
-    if (r.side !== "new") { cx.notify(); return; } // removed lines are read-only
+    if (r.side !== "new") { this.paint(cx); return; } // removed lines are read-only
     const p = this.posAt(f, r, x), lines = linesOf(f);
     this.selA = this.selB = null; this.goalX = null;
     if (ev.click_count === 2 && (this.view === "review" || this.mode === "changes")) return this.handOff("edit", cx, p);
-    if (ev.click_count === 2) { [this.anchor, this.cur] = wordAt(lines, p); cx.notify(); return; }
+    if (ev.click_count === 2) { [this.anchor, this.cur] = wordAt(lines, p); this.paint(cx); return; }
     if (ev.click_count >= 3) {
       this.anchor = { line: p.line, col: 0 };
       this.cur = p.line + 1 < lines.length ? { line: p.line + 1, col: 0 } : { line: p.line, col: body(lines[p.line]).length };
-      cx.notify(); return;
+      this.paint(cx); return;
     }
     if (ev.modifiers?.shift && this.cur) this.anchor ??= this.cur; else this.anchor = p;
     this.cur = p;
     this.dragging = true; this.tdrag = true; this.dragY = y; this.dragX = x;
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Keeps the cursor on screen: its row, and its column when lines are long. */
@@ -3245,7 +3276,7 @@ export default class Review extends View {
     if (!f || !this.cur) return;
     if (extend) this.anchor ??= this.cur; else this.anchor = null;
     this.cur = this.clampPos(f, to); this.selA = this.selB = null; this.goalX = null;
-    this.showCursor(); cx.notify();
+    this.showCursor(); this.paint(cx);
   }
 
   /** Up/Down and PageUp/PageDown keep the column the cursor started from. */
@@ -3298,7 +3329,7 @@ export default class Review extends View {
     const start = cmp(a, b) <= 0 ? a : b;
     this.anchor = select ? start : null; this.cur = cursor;
     this.selA = this.selB = null; this.goalX = null; this.error = null;
-    this.settle(); this.showCursor(); this.retokenize(cx); cx.notify();
+    this.settle(); this.showCursor(); this.retokenize(cx); this.paint(cx);
   }
 
   /** Rewrites whole lines l1..l2 (indent, outdent) and keeps them selected. */
@@ -3317,7 +3348,7 @@ export default class Review extends View {
       cx.spawn(async (cx) => {
         const newTok = await this.tok(f.Ctext ?? "", f.rel, cx), oldTok = await this.tok(f.Btext, f.rel, cx);
         const g = this.files.find((x) => x.key === f.key);
-        if (g && g.Ctext === f.Ctext && g.Btext === f.Btext) { g.newTok = newTok; g.oldTok = oldTok; cx.notify(); }
+        if (g && g.Ctext === f.Ctext && g.Btext === f.Btext) { g.newTok = newTok; g.oldTok = oldTok; this.paint(cx); }
       });
     });
   }
@@ -3378,7 +3409,7 @@ export default class Review extends View {
         if (!sel && opens) {
           const inner = indent + indentUnit(lines);
           this.type("\n" + inner + "\n" + indent, cx);
-          this.cur = { line: c.line + 1, col: inner.length }; this.showCursor(); cx.notify();
+          this.cur = { line: c.line + 1, col: inner.length }; this.showCursor(); this.paint(cx);
           return true;
         }
         return this.type("\n" + indent, cx), true;
@@ -3392,7 +3423,7 @@ export default class Review extends View {
       }
       case "escape":
         if (!sel) return false;
-        this.anchor = null; cx.notify(); return true;
+        this.anchor = null; this.paint(cx); return true;
     }
     if (ctrl && !m.alt) return false; // ctrl keys are actions (keymap.js)
     // Typed characters; Ctrl+Alt is AltGr on Windows keyboards.
@@ -3420,11 +3451,11 @@ export default class Review extends View {
       join: () => joinLines(lines, l1, l2),
       comment: () => toggleComment(lines, l1, l2, commentFor(f.rel), anchor, cur),
     }[name]?.();
-    if (!op) { if (name === "comment" && !commentFor(f.rel)) { this.error = `No comment syntax known for ${base(f.rel)}`; cx.notify(); } return; }
+    if (!op) { if (name === "comment" && !commentFor(f.rel)) { this.error = `No comment syntax known for ${base(f.rel)}`; this.paint(cx); } return; }
     this.type(op.text, cx, { from: op.from, to: op.to });
     const g = this.file();
     this.anchor = op.anchor && this.clampPos(g, op.anchor); this.cur = this.clampPos(g, op.cur);
-    this.showCursor(); cx.notify();
+    this.showCursor(); this.paint(cx);
   }
 
   /**
@@ -3440,14 +3471,14 @@ export default class Review extends View {
       this.type(ch + inner + close, cx);
       this.anchor = { line: sa.line, col: sa.col + 1 };
       this.cur = sa.line === sb.line ? { line: sa.line, col: sb.col + 1 } : { line: sb.line, col: sb.col };
-      this.showCursor(); cx.notify();
+      this.showCursor(); this.paint(cx);
       return true;
     }
     const c = this.cur, d = typed(ch, body(lines[c.line]), c.col);
     if (d?.skip) return this.move({ line: c.line, col: c.col + 1 }, false, cx), true;
     if (!d?.insert) return false;
     this.type(d.insert, cx, { group: true });
-    this.cur = { line: this.cur.line, col: this.cur.col - 1 }; this.showCursor(); cx.notify();
+    this.cur = { line: this.cur.line, col: this.cur.col - 1 }; this.showCursor(); this.paint(cx);
     return true;
   }
 
@@ -3464,7 +3495,7 @@ export default class Review extends View {
       const close = closingTag(ls, at, c.col, kind);
       if (!close) return false;
       this.type(">" + close, cx, { group: true });
-      this.cur = { line: this.cur.line, col: this.cur.col - close.length }; this.showCursor(); cx.notify();
+      this.cur = { line: this.cur.line, col: this.cur.col - close.length }; this.showCursor(); this.paint(cx);
       return true;
     }
     const rest = completeClose(ls, at, c.col, kind);
@@ -3487,7 +3518,7 @@ export default class Review extends View {
     this.pathInput.on("submit", (_e, cx) => this.addPath(cx));
     this.qo = null; this.recent = []; // Quick Open: null, or { sel, items }; recent: file keys, newest first
     this.initSearch();
-    this.quickInput.on("change", (_e, cx) => { this.rankQuick(); cx.notify(); });
+    this.quickInput.on("change", (_e, cx) => { this.rankQuick(); this.paint(cx); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
     for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) {
       i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
@@ -3496,7 +3527,7 @@ export default class Review extends View {
     // The tree's name box for New File…, New Folder… and Rename…: Enter does it, Esc cancels.
     this.treeInput = InputState.new({ placeholder: "" });
     this.treeInput.on("submit", (_e, cx) => this.commitTreeEdit(cx));
-    this.treeInput.on("change", (_e, cx) => { if (this.treeEdit?.error) { this.treeEdit.error = null; cx.notify(); } });
+    this.treeInput.on("change", (_e, cx) => { if (this.treeEdit?.error) { this.treeEdit.error = null; this.paint(cx); } });
     this.treeInput.on("focus", () => { this.inBar = this.treeInput; this.searchFocus = false; });
     this.treeInput.on("blur", () => { if (this.inBar === this.treeInput) this.inBar = null; });
     // Typing a query jumps to the first match from where the search started (VS Code's incremental find).
@@ -3510,7 +3541,7 @@ export default class Review extends View {
     const f = this.file();
     if (!f) return;
     this.bar = { mode };
-    if (mode === "line") { this.lineInput.set_value(""); this.lineInput.focus(); cx.notify(); return; }
+    if (mode === "line") { this.lineInput.set_value(""); this.lineInput.focus(); this.paint(cx); return; }
     // A selection on one line becomes the query.
     if (this.hasTextSel()) {
       const [a, b] = this.ordered();
@@ -3518,10 +3549,10 @@ export default class Review extends View {
     }
     this.findFrom = null;
     (mode === "replace" && this.findInput.value() ? this.replaceInput : this.findInput).focus();
-    cx.notify();
+    this.paint(cx);
   }
 
-  closeFind(cx) { this.bar = null; this.inBar = null; this.handle.focus(); cx.notify(); }
+  closeFind(cx) { this.bar = null; this.inBar = null; this.handle.focus(); this.paint(cx); }
 
   findFlag(k, cx) { this.findOpts = { ...this.findOpts, [k]: !this.findOpts[k] }; this.findStep(0, cx); }
 
@@ -3548,12 +3579,12 @@ export default class Review extends View {
   findStep(dir, cx) {
     const f = this.file(), { ms } = this.matches(f);
     if (this.bar) this.bar.note = null;
-    if (!f || !ms.length) { cx.notify(); return; }
+    if (!f || !ms.length) { this.paint(cx); return; }
     const p = this.hasTextSel() ? this.ordered()[0] : this.cur ?? { line: 0, col: 0 };
     const i = dir === 0 ? nextMatch(ms, this.findFrom ?? { line: 0, col: 0 }, true) : dir > 0 ? nextMatch(ms, p) : prevMatch(ms, p);
     const m = ms[i];
     this.anchor = { line: m.line, col: m.from }; this.cur = { line: m.line, col: m.to };
-    this.showCursor(); cx.notify();
+    this.showCursor(); this.paint(cx);
   }
 
   replaceOne(cx) {
@@ -3580,14 +3611,14 @@ export default class Review extends View {
     }
     this.history[this.history.length - 1].at = 0; // later typing starts its own undo step
     if (this.bar) this.bar.note = `Replaced ${ms.length}`;
-    cx.notify();
+    this.paint(cx);
   }
 
   goToLine(cx) {
     const f = this.file(), p = parseLine(this.lineInput.value());
     if (!f || !p) return;
     this.cur = this.clampPos(f, p); this.anchor = null;
-    this.closeFind(cx); this.showCursor(); cx.notify();
+    this.closeFind(cx); this.showCursor(); this.paint(cx);
   }
 
   findBar(f, t) {
@@ -3610,7 +3641,7 @@ export default class Review extends View {
         .child(this.button("find-prev", "↑", t.raised, (cx) => this.findStep(-1, cx)))
         .child(this.button("find-next", "↓", t.raised, (cx) => this.findStep(1, cx)))
         .child(div().flex_1())
-        .child(this.button("find-mode", mode === "replace" ? "Hide replace" : `Replace  ${this.kl("replace")}`, t.raised, (cx) => { this.bar = { mode: mode === "replace" ? "find" : "replace" }; cx.notify(); }))
+        .child(this.button("find-mode", mode === "replace" ? "Hide replace" : `Replace  ${this.kl("replace")}`, t.raised, (cx) => { this.bar = { mode: mode === "replace" ? "find" : "replace" }; this.paint(cx); }))
         .child(this.button("find-close", "×", t.raised, (cx) => this.closeFind(cx))))
       .when(mode === "replace", (e) => e.child(h_flex().gap(6).items_center()
         .child(box(this.replaceInput, 240))
@@ -3638,7 +3669,7 @@ export default class Review extends View {
         const s = this.search, v = i.value();
         if (v === s[k]) return; // refilled on a space switch, or nothing changed
         s[k] = v; s.confirm = false; s.note = null;
-        if (k === "replace") cx.notify(); else this.scheduleSearch(cx);
+        if (k === "replace") this.paint(cx); else this.scheduleSearch(cx);
       });
     }
     for (const i of [this.searchInput, this.includeInput, this.excludeInput]) i.on("submit", (_e, cx) => this.runSearch(cx));
@@ -3675,7 +3706,7 @@ export default class Review extends View {
     if (q) { s.query = q; s.note = null; this.searchInput.set_value(q); }
     this.searchInput.focus();
     if (q || (s.query && !s.results && !s.running)) this.runSearch(cx);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** The left column's switch: "explorer" or "search". */
@@ -3683,14 +3714,14 @@ export default class Review extends View {
     this.search.left = which; this.searchFocus = false;
     if (which === "search") this.searchInput.focus();
     else { this.handle.focus(); this.refreshTrees(cx); }
-    cx.notify();
+    this.paint(cx);
   }
 
   /** Typing searches 300 ms after the last key, from 2 characters; an empty box clears the results. */
   scheduleSearch(cx) {
     const s = this.search;
-    if (!s.query) { s.seq++; s.results = null; s.running = false; s.sel = null; cx.notify(); return; }
-    cx.notify();
+    if (!s.query) { s.seq++; s.results = null; s.running = false; s.sel = null; this.paint(cx); return; }
+    this.paint(cx);
     if (s.query.length < 2) return;
     const tick = (s.tick = (s.tick ?? 0) + 1);
     cx.timer.after(300, (cx) => { if (s.tick === tick && this.search === s) this.runSearch(cx); });
@@ -3699,18 +3730,18 @@ export default class Review extends View {
   searchFlag(k, cx) {
     const s = this.search;
     s.opts = { ...s.opts, [k]: !s.opts[k] }; s.confirm = false; s.note = null;
-    if (s.query) this.runSearch(cx); else cx.notify();
+    if (s.query) this.runSearch(cx); else this.paint(cx);
   }
 
   /** Searches every repo of the space, one after another; a newer search drops this one's results. */
   runSearch(cx) {
     const s = this.search, q = s.query, seq = ++s.seq;
     s.confirm = false;
-    if (!q) { s.results = null; s.running = false; cx.notify(); return; }
+    if (!q) { s.results = null; s.running = false; this.paint(cx); return; }
     const opts = { query: q, ...s.opts, include: s.include, exclude: s.exclude }, repos = this.repos();
-    try { grepArgs(opts); } catch (e) { s.results = { opts, files: [], total: 0, truncated: false, error: e.message }; s.running = false; cx.notify(); return; }
-    if (!repos.length) { s.results = null; s.running = false; cx.notify(); return; }
-    s.running = true; cx.notify();
+    try { grepArgs(opts); } catch (e) { s.results = { opts, files: [], total: 0, truncated: false, error: e.message }; s.running = false; this.paint(cx); return; }
+    if (!repos.length) { s.results = null; s.running = false; this.paint(cx); return; }
+    s.running = true; this.paint(cx);
     cx.spawn(async (cx) => {
       const files = [], errors = [];
       let total = 0, truncated = false;
@@ -3724,7 +3755,7 @@ export default class Review extends View {
       }
       s.results = { opts, files, total, truncated, error: errors[0] ?? null };
       s.running = false; s.collapsed = new Set(); s.shutVer++;
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -3740,7 +3771,7 @@ export default class Review extends View {
     const s = this.search, shut = s.collapsed.has(key);
     if (open === !shut) return;
     if (shut) s.collapsed.delete(key); else s.collapsed.add(key);
-    s.shutVer++; cx.notify();
+    s.shutVer++; this.paint(cx);
   }
 
   /** Up/Down in the results; Up from the first row goes back to the search box. */
@@ -3749,9 +3780,9 @@ export default class Review extends View {
     if (!rows.length) return;
     let i = rows.findIndex((r) => r.key === s.sel);
     i = i < 0 ? (by > 0 ? 0 : rows.length - 1) : i + by;
-    if (i < 0) { this.searchFocus = false; this.searchInput.focus(); cx.notify(); return; }
+    if (i < 0) { this.searchFocus = false; this.searchInput.focus(); this.paint(cx); return; }
     i = Math.min(i, rows.length - 1);
-    s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); cx.notify();
+    s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); this.paint(cx);
   }
 
   /** Left: to a match's file, then collapses it. Right: expands a file. */
@@ -3762,7 +3793,7 @@ export default class Review extends View {
       s.sel = `f|${row.file.key}`;
       const i = rows.findIndex((r) => r.key === s.sel);
       if (i >= 0) this.searchScroll.scroll_to_item(i);
-      cx.notify(); return;
+      this.paint(cx); return;
     }
     if (row.kind === "file") this.toggleResultFile(row.file.key, open, cx);
   }
@@ -3782,7 +3813,7 @@ export default class Review extends View {
     s.sel = key;
     if (row.kind === "match") return this.openResult(row, cx, false);
     this.toggleResultFile(row.file.key, s.collapsed.has(row.file.key), cx);
-    this.handle.focus(); this.searchFocus = true; cx.notify();
+    this.handle.focus(); this.searchFocus = true; this.paint(cx);
   }
 
   /** Opens a match's file at its line, as Quick Open's name:line:col does, with the match selected. */
@@ -3799,17 +3830,17 @@ export default class Review extends View {
         this.goalX = null; this.selA = this.selB = null; this.showCursor();
       }
       this.searchFocus = !toEditor;
-      cx.notify();
+      this.paint(cx);
     });
   }
 
   /** Keys while a Search box has the keyboard. Esc: back to the editor; Down (search box): into the results. */
   searchKey(k, cx, done) {
-    if (k === "escape") { this.inBar = null; this.handle.focus(); cx.notify(); return done(); }
+    if (k === "escape") { this.inBar = null; this.handle.focus(); this.paint(cx); return done(); }
     if (k === "down" && this.inBar === this.searchInput && this.searchRows().length) {
       const s = this.search, rows = this.searchRows(), i = Math.max(0, rows.findIndex((r) => r.key === s.sel));
       this.inBar = null; this.searchFocus = true; this.handle.focus();
-      s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); cx.notify();
+      s.sel = rows[i].key; this.searchScroll.scroll_to_item(i); this.paint(cx);
       return done();
     }
     const id = this.kIdx.find.get(k), flag = { findCase: "cased", findWord: "word", findRegex: "regex" }[id];
@@ -3824,7 +3855,7 @@ export default class Review extends View {
     const go = {
       up: () => this.moveResult(-1, cx), down: () => this.moveResult(1, cx), enter: () => this.enterResult(cx),
       left: () => this.foldResult(false, cx), right: () => this.foldResult(true, cx),
-      escape: () => { this.searchFocus = false; cx.notify(); },
+      escape: () => { this.searchFocus = false; this.paint(cx); },
     }[k];
     if (go) { go(); return true; }
     const id = this.kIdx.pane.get(k);
@@ -3841,7 +3872,7 @@ export default class Review extends View {
   askReplaceAll(cx) {
     const s = this.search;
     if (!s.results?.total || s.running || s.busy || !s.replace || !this.replaceTargets().files.length) return;
-    s.confirm = true; s.note = null; cx.notify();
+    s.confirm = true; s.note = null; this.paint(cx);
   }
 
   /** A file outside the review as Replace All reads it: its own baseline, like loadPlain. */
@@ -3869,9 +3900,9 @@ export default class Review extends View {
     const held = [...new Set([...this.files.filter((f) => keys.includes(f.key) && this.dirty(f)).map((f) => f.key), ...this.heldElsewhere(keys)])];
     if (held.length) {
       s.note = { text: `Unsaved edits in ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}: save or discard them first`, error: true };
-      cx.notify(); return;
+      this.paint(cx); return;
     }
-    s.busy = true; s.note = { text: "Replacing…", error: false }; cx.notify();
+    s.busy = true; s.note = { text: "Replacing…", error: false }; this.paint(cx);
     // The job holds its own files and stores, and `s` is its space's Search state: a space switch
     // meanwhile neither waits for it nor gets its note (P7).
     const out = { n: 0, files: 0, skipped: [] }, space = this.spaceId;
@@ -3908,7 +3939,7 @@ export default class Review extends View {
       const parts = [`Replaced ${many(out.n, "occurrence")} in ${many(out.files, "file")}`];
       if (out.skipped.length) parts.push(`skipped ${out.skipped.join(", ")}`);
       s.note = { text: parts.join("; "), error: out.skipped.length > 0 };
-      if (this.search === s) this.runSearch(cx); else cx.notify();
+      if (this.search === s) this.runSearch(cx); else this.paint(cx);
     });
   }
 
@@ -3937,7 +3968,7 @@ export default class Review extends View {
       .child(v_flex().flex_none().px(6).pt(6).pb(4).gap(4)
         .child(h_flex().gap(4).items_center()
           .child(div().id("search-more").w(16).h(22).flex().flex_none().items_center().justify_center().rounded(4).text_size(10).text_color(t.dim).cursor_pointer()
-            .hover((st) => st.bg(t.hover)).on_click((_e, cx) => { s.more = !s.more; cx.notify(); }).child(s.more ? "▾" : "▸"))
+            .hover((st) => st.bg(t.hover)).on_click((_e, cx) => { s.more = !s.more; this.paint(cx); }).child(s.more ? "▾" : "▸"))
           .child(div().flex_1().min_w(0).child(Input.new(this.searchInput)))
           .child(chip("search-cased", "Aa", s.opts.cased, (cx) => this.searchFlag("cased", cx)))
           .child(chip("search-word", "W", s.opts.word, (cx) => this.searchFlag("word", cx)))
@@ -3954,11 +3985,11 @@ export default class Review extends View {
         .when(remote > 0, (e) => e.child(div().text_color(t.dim).child(`${many(remote, "file")} on another machine left out: saving there isn't built yet.`)))
         .child(h_flex().gap(6)
           .child(this.button("search-replace-yes", "Replace", t.ansi1 + "55", (cx) => this.replaceAllFiles(cx)))
-          .child(this.button("search-replace-no", "Cancel", t.background, (cx) => { s.confirm = false; cx.notify(); })))))
+          .child(this.button("search-replace-no", "Cancel", t.background, (cx) => { s.confirm = false; this.paint(cx); })))))
       .when(preview && !targets.length, (e) => e.child(div().flex_none().px(8).pb(4).text_size(11).text_color(t.dim).child("Replace isn't available for files on other machines yet")))
       .when(!!s.note, (e) => e.child(div().flex_none().px(8).pb(4).text_size(11).text_color(s.note.error ? t.ansi1 : t.dim).child(s.note.text)))
       .child(div().id("search-results").flex_1().min_h(0).relative().overflow_hidden()
-        .on_size_change((size, cx) => { if (Math.abs((this.searchH ?? 0) - size.height) > 0.5) { this.searchH = size.height; cx.notify(); } })
+        .on_size_change((size, cx) => { if (Math.abs((this.searchH ?? 0) - size.height) > 0.5) { this.searchH = size.height; this.paint(cx); } })
         .when(rows.length > 0, (e) => e
           .child(v_virtual_list("search-rows", rows.length, SROW, (i) => rows[i].key,
             (range) => rows.slice(range.start, range.end).map((row) => this.searchRow(row, t, multi, preview)))
@@ -4022,12 +4053,12 @@ export default class Review extends View {
 
   save(cx, f = this.file()) {
     if (!f) return;
-    if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; cx.notify(); return; }
+    if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; this.paint(cx); return; }
     const writes = this.saveWrites(f);
     if (!writes.length) return;
     const notes = writes.map((w) => this.editNote(f, w)).filter(Boolean);
     this.replace(f, { ...f, diskC: f.Ctext, diskB: f.Btext });
-    cx.notify();
+    this.paint(cx);
     const space = this.spaceId;
     this.enqueue(async () => {
       let done = 0;
@@ -4071,7 +4102,7 @@ export default class Review extends View {
     if (!k[how]) { this.cur = this.anchor = null; cx.spawn(async (cx) => this.reloadOne({ ...f, conflict: null }, cx)); return; }
     cx.spawn(async (cx) => {
       const next = await this.merged(k.nf, k[how].Ctext, k[how].Btext, cx);
-      if (this.files.includes(f)) { this.adoptMerge(f, next); cx.notify(); }
+      if (this.files.includes(f)) { this.adoptMerge(f, next); this.paint(cx); }
     });
   }
 
@@ -4148,7 +4179,7 @@ export default class Review extends View {
     const f = this.file();
     if (!this.cur || !this.editable(f)) return;
     const lines = linesOf(f), c = this.cur, sel = this.hasTextSel(), lineEnd = (l) => ({ line: l, col: body(lines[l]).length });
-    if (how === "all") { this.anchor = { line: 0, col: 0 }; this.cur = lineEnd(lines.length - 1); cx.notify(); return; }
+    if (how === "all") { this.anchor = { line: 0, col: 0 }; this.cur = lineEnd(lines.length - 1); this.paint(cx); return; }
     if (how === "paste") { const t = cx.read_from_clipboard(); if (t) this.type(t, cx); return; }
     cx.write_to_clipboard(this.copyText(f));
     if (how !== "cut") return;
@@ -4168,7 +4199,7 @@ export default class Review extends View {
       return;
     }
     if (this.commitInput && this.inBar === this.commitInput) return; // the commit message box types its own keys
-    if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); cx.notify(); done(); } return; }
+    if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); this.paint(cx); done(); } return; }
     // The tree's name box: Esc cancels; Enter (submit) does it; every other key types.
     if (this.treeInput && this.inBar === this.treeInput) { if (k === "escape") { this.endTreeEdit(cx); done(); } return; }
     // A Search box has the keyboard (searchKey); then the results, after Down or a click (resultsKey).
@@ -4205,10 +4236,10 @@ export default class Review extends View {
     if (this.form.form === "keys") {
       this.formHandle = cx.focus_handle(); this.formHandle.focus();
       this.keySearch = InputState.new({ placeholder: "Search shortcuts by action or key" });
-      this.keySearch.on("change", (_e, cx) => cx.notify());
+      this.keySearch.on("change", (_e, cx) => this.paint(cx));
       cx.spawn(async (cx) => {
         this.overrides = await loadKeys(); this.km = resolve(this.overrides);
-        this.herdr = herdrGlobal((await readTextFile(`${appHome()}/keys.json`)) ?? "{}"); cx.notify();
+        this.herdr = herdrGlobal((await readTextFile(`${appHome()}/keys.json`)) ?? "{}"); this.paint(cx);
       });
       return;
     }
@@ -4220,7 +4251,7 @@ export default class Review extends View {
         const v = this.extInput.value(); this.extTyped = v;
         cx.timer.after(500, (cx) => { if (this.extTyped === v && v !== (this.st?.externalCommand ?? "")) this.setSetting({ externalCommand: v }, cx); });
       });
-      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); cx.notify(); });
+      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.paint(cx); });
       if (this.form.machine) this.hookAction(null, cx);
       return;
     }
@@ -4230,7 +4261,7 @@ export default class Review extends View {
     // A text area: Enter adds a line, Ctrl+Enter sends (also caught on the form, in case the
     // text area doesn't report it as a submit).
     this.input = TextareaState.new({ placeholder: this.form.form === "reason" ? "Why it was rejected" : "What should the agent do here?", rows: 3 });
-    this.input.on("change", (_e, cx) => { this.text = this.input.value(); cx.notify(); });
+    this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.paint(cx); });
     this.input.on("submit", (e, cx) => { if (e?.secondary) this.submitForm(cx); });
     this.input.focus();
     cx.timer.after(300, () => this.input.focus());
@@ -4291,7 +4322,7 @@ export default class Review extends View {
     this.text = this.form.text ?? "";
     // One line: Enter saves (submit), Esc cancels.
     this.input = InputState.new({ placeholder: "What should the agent change here?", value: this.text });
-    this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.formError = null; cx.notify(); });
+    this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.formError = null; this.paint(cx); });
     this.input.on("submit", (_e, cx) => this.saveComment(cx));
     this.input.focus();
     cx.timer.after(300, () => this.input.focus());
@@ -4302,14 +4333,14 @@ export default class Review extends View {
     const { space, draft, id, overlay } = this.form;
     if (this.sending) return;
     const made = id ? checkText(this.text) : makeComment(draft, this.text);
-    if (made.error) { this.formError = made.error; cx.notify(); return; }
-    this.sending = true; cx.notify();
+    if (made.error) { this.formError = made.error; this.paint(cx); return; }
+    this.sending = true; this.paint(cx);
     // Write first, close after: closing ends this copy, and its unfinished work with it.
     cx.spawn(async (cx) => {
       try {
         await changeComments(space, (s) => (id ? editComment(s, id, this.text) : addComment(s, made.comment)));
         closeOverlay(overlay);
-      } catch (e) { this.formError = String(e.message ?? e); this.sending = false; cx.notify(); }
+      } catch (e) { this.formError = String(e.message ?? e); this.sending = false; this.paint(cx); }
     });
   }
 
@@ -4336,7 +4367,8 @@ export default class Review extends View {
       .when(!!this.formError, (e) => e.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(this.formError)))
       .child(div().flex_1())
       .child(h_flex().flex_none().items_center().gap(8)
-        .child(div().flex_1().text_size(11).text_color(t.dim).child("Enter saves, Esc cancels. Comments wait in the list (Comments in the header) until you send them to the agent."))
+        // Wraps (min_w 0) rather than pushing the count and Save out of the dialog.
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child("Enter saves, Esc cancels. Comments wait in the Comments list until you send them."))
         .child(div().flex_none().text_size(11).text_color(n > MAX_COMMENT ? t.ansi1 : t.dim).child(`${n}/${MAX_COMMENT}`))
         .child(div().id("comment-save").flex_none().whitespace_nowrap().h(30).px(14).flex().items_center().rounded(8).bg(t.solid).text_color(t.solid_foreground).text_size(12.5).cursor_pointer()
           .when(!!this.sending, (e) => e.opacity(0.5)).on_click((_e, cx) => this.saveComment(cx)).child("Save  ⏎")));
@@ -4360,7 +4392,7 @@ export default class Review extends View {
       try { this.cs = await loadComments(cmtIo, cmtDir(), space); }
       catch (e) { this.note = `Comments not read: ${e.message ?? e}`; this.cs ??= { v: 1, comments: [], undo: null }; }
       finally { this.cListLoading = false; }
-      cx.notify();
+      this.paint(cx);
       for (const c of this.cs.comments) {
         if (!c.root || this.branches.has(c.root)) continue;
         this.branches.set(c.root, null);
@@ -4370,7 +4402,7 @@ export default class Review extends View {
           if (b) this.branches.set(c.root, b === "HEAD" ? "detached HEAD" : b);
         } catch {} // not a git repo (a plain folder), or the machine didn't answer: no branch in the header
       }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -4381,16 +4413,16 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       try { this.cs = await changeComments(space, op); this.cSeen = shared(COMMENTS)?.[space] ?? 0; this.note = done; }
       catch (e) { this.note = String(e.message ?? e); }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
-  startEdit(c, cx) { this.editing = c.id; this.editInput.set_value(c.text); this.editInput.focus(); this.note = null; cx.notify(); }
+  startEdit(c, cx) { this.editing = c.id; this.editInput.set_value(c.text); this.editInput.focus(); this.note = null; this.paint(cx); }
 
   saveEdit(cx) {
     const id = this.editing, text = this.editInput.value(), v = checkText(text);
     if (!id) return;
-    if (v.error) { this.note = v.error; cx.notify(); return; }
+    if (v.error) { this.note = v.error; this.paint(cx); return; }
     this.editing = null;
     this.listChange((s) => editComment(s, id, text), cx);
     this.formHandle.focus();
@@ -4424,20 +4456,20 @@ export default class Review extends View {
   startSend(cx) {
     if (this.busy || !this.cs?.comments.length) return;
     const why = this.sendBlocked();
-    if (why) { this.note = why; cx.notify(); return; }
+    if (why) { this.note = why; this.paint(cx); return; }
     const ch = this.commentTarget();
     this.confirmTo = null; this.pickList = null;
     if (ch.error) this.note = ch.error;
     else if (ch.pick) this.pickList = ch.pick.map((a) => a.address);
     else return this.toTarget(ch.address, cx);
-    cx.notify();
+    this.paint(cx);
   }
 
   /** A working agent asks first (confirmTo); otherwise the comments go now. */
   toTarget(address, cx) {
     this.pickList = null;
     const a = agents().find((x) => x.address === address);
-    if (a && ACTIVE.has(a.status) && this.confirmTo !== address) { this.confirmTo = address; this.note = null; cx.notify(); return; }
+    if (a && ACTIVE.has(a.status) && this.confirmTo !== address) { this.confirmTo = address; this.note = null; this.paint(cx); return; }
     this.confirmTo = null;
     this.sendNow(address, cx);
   }
@@ -4446,9 +4478,9 @@ export default class Review extends View {
     const space = this.form.space, cs = (this.cs?.comments ?? []).slice(0, MAX_BATCH), ids = cs.map((c) => c.id);
     if (!cs.length || this.busy) return;
     const prompt = this.promptFor(cs, address), bad = promptProblem(prompt);
-    if (bad) { this.note = bad; cx.notify(); return; }
+    if (bad) { this.note = bad; this.paint(cx); return; }
     const who = agentLabel(agents().find((a) => a.address === address) ?? { address }), many = `${cs.length} comment${cs.length === 1 ? "" : "s"}`;
-    this.busy = `Sending ${many} to ${who}…`; this.note = null; cx.notify();
+    this.busy = `Sending ${many} to ${who}…`; this.note = null; this.paint(cx);
     cx.spawn(async (cx) => {
       let sent = false;
       try {
@@ -4460,7 +4492,7 @@ export default class Review extends View {
         this.cSeen = shared(COMMENTS)?.[space] ?? 0;
         this.note = `Sent ${many} to ${who}. Undo clear puts them back in the list.`;
       } catch (e) { this.note = sent ? `Sent, but the list wasn't cleared: ${e.message ?? e}` : `Not sent: ${e.message ?? e}`; }
-      this.busy = null; cx.notify();
+      this.busy = null; this.paint(cx);
     });
   }
 
@@ -4471,7 +4503,7 @@ export default class Review extends View {
     const address = this.commentTarget().address ?? null;
     cx.write_to_clipboard(this.promptFor(cs, address));
     this.note = address ? `Prompt copied, paths as ${agentLabel(agents().find((a) => a.address === address) ?? { address })} sees them` : "Prompt copied, with full paths (no single agent to send to)";
-    cx.notify();
+    this.paint(cx);
   }
 
   renderCommentList() {
@@ -4492,7 +4524,7 @@ export default class Review extends View {
       .child(this.editing === c.id
         ? h_flex().gap(6).items_center().child(div().flex_1().min_w(0).child(Input.new(this.editInput)))
           .child(this.button(`cm-save-${c.id}`, "Save", t.accent + "55", (cx) => this.saveEdit(cx)).flex_none())
-          .child(this.button(`cm-cancel-${c.id}`, "Cancel", t.raised, (cx) => { this.editing = null; this.formHandle.focus(); cx.notify(); }).flex_none())
+          .child(this.button(`cm-cancel-${c.id}`, "Cancel", t.raised, (cx) => { this.editing = null; this.formHandle.focus(); this.paint(cx); }).flex_none())
         : div().text_size(12.5).whitespace_normal().child(c.text));
     const off = (b) => b.opacity(0.45);
     const canSend = cs.length && !blocked && !this.busy && !ch?.error;
@@ -4502,7 +4534,7 @@ export default class Review extends View {
         if (this.editing) this.editing = null;
         else if (this.pickList || this.confirmTo) { this.pickList = null; this.confirmTo = null; }
         else closeOverlay(overlay);
-        this.formHandle.focus(); cx.notify(); cx.stop_propagation();
+        this.formHandle.focus(); this.paint(cx); cx.stop_propagation();
       })
       .size_full().min_h(0).p(16).gap(8).bg(t.popover).text_color(t.foreground)
       .child(h_flex().flex_none().items_center().gap(8)
@@ -4517,11 +4549,11 @@ export default class Review extends View {
       .when(!!this.pickList, (e) => e.child(v_flex().flex_none().gap(4).p(8).rounded(6).bg(t.raised)
         .child(div().text_size(12).child("Send to which agent?"))
         .children(this.pickList.map((address) => this.button(`cm-pick-${address}`, `${name(address)}${ACTIVE.has(agents().find((a) => a.address === address)?.status) ? " (working)" : ""}`, t.background, (cx) => this.toTarget(address, cx))))
-        .child(this.button("cm-pick-cancel", "Cancel", t.background, (cx) => { this.pickList = null; cx.notify(); }))))
+        .child(this.button("cm-pick-cancel", "Cancel", t.background, (cx) => { this.pickList = null; this.paint(cx); }))))
       .when(!!this.confirmTo, (e) => e.child(h_flex().flex_none().gap(8).items_center().p(8).rounded(6).bg(t.ansi3 + "22")
         .child(div().flex_1().text_size(12).child(`${name(this.confirmTo)} ${agents().find((a) => a.address === this.confirmTo)?.status === "blocked" ? "is waiting on a question" : "is working"}. Send now anyway? It arrives as your next message.`))
         .child(this.button("cm-confirm", "Send anyway", t.accent + "55", (cx) => this.toTarget(this.confirmTo, cx)).flex_none())
-        .child(this.button("cm-confirm-no", "Cancel", t.raised, (cx) => { this.confirmTo = null; cx.notify(); }).flex_none())))
+        .child(this.button("cm-confirm-no", "Cancel", t.raised, (cx) => { this.confirmTo = null; this.paint(cx); }).flex_none())))
       .when(!!(this.busy || this.note), (e) => e.child(div().flex_none().text_size(12).text_color(this.busy ? t.muted : t.foreground).child(this.busy ?? this.note)))
       .child(h_flex().flex_none().gap(6).items_center()
         .when(cs.length > 0, (e) => e.child(this.button("cm-clear", "Clear all", t.ansi1 + "40", (cx) => this.listChange((s) => clearComments(s, "cleared"), cx, "Cleared. Undo clear puts them back.")).flex_none()))
@@ -4574,7 +4606,7 @@ export default class Review extends View {
       ...(hasSel ? [{ cmd: "clear", label: "Clear selection", key: "Esc" }] : []),
     ];
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
-    cx.notify();
+    this.paint(cx);
   }
 
   // ---- settings popup (Q47) ---------------------------------------------------
@@ -4583,7 +4615,7 @@ export default class Review extends View {
   setSetting(patch, cx) {
     this.st = { ...this.st, ...patch };
     const next = this.st;
-    cx.notify();
+    this.paint(cx);
     cx.spawn(async () => {
       try { await saveSettings(next); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
     });
@@ -4597,7 +4629,7 @@ export default class Review extends View {
     const on = this.form.machine;
     if (this.hook?.busy) return;
     this.hook = { ...this.hook, busy: how ? (how === "install" ? "Installing…" : "Removing…") : "Checking…", ...(how ? { result: null, failed: false } : {}) };
-    cx.notify();
+    this.paint(cx);
     cx.spawn(async (cx) => {
       let result = this.hook.result, failed = this.hook.failed;
       try {
@@ -4611,7 +4643,7 @@ export default class Review extends View {
       } catch (e) {
         this.hook = { status: this.hook?.status ?? null, result: String(e.message ?? e), failed: true };
       }
-      cx.notify();
+      this.paint(cx);
     });
   }
 
@@ -4620,7 +4652,7 @@ export default class Review extends View {
   /** Saves the shortcut overrides, updates Herdr's mod:wingman section, and tells the pane. */
   setKeys(next, cx) {
     this.overrides = next; this.km = resolve(next); this.rec = null; this.pending = null;
-    cx.notify();
+    this.paint(cx);
     const km = this.km;
     cx.spawn(async () => {
       try { await saveKeys(next); await syncHerdrKeys(km); run("wingman.settings"); } catch (e) { log(`keys: ${e.message ?? e}`); }
@@ -4632,11 +4664,11 @@ export default class Review extends View {
     const k = keystrokeOf(e);
     if (!k) return;
     cx.stop_propagation();
-    if (k === "escape") { this.rec = null; this.keyMsg = null; cx.notify(); return; }
+    if (k === "escape") { this.rec = null; this.keyMsg = null; this.paint(cx); return; }
     const why = refused(k);
-    if (why) { this.keyMsg = `${keyLabel(k)} can't be bound: it's ${why}.`; cx.notify(); return; }
+    if (why) { this.keyMsg = `${keyLabel(k)} can't be bound: it's ${why}.`; this.paint(cx); return; }
     const others = holders(this.km, k, this.rec);
-    if (others.length) { this.pending = { id: this.rec, key: k, others }; this.rec = null; this.keyMsg = null; cx.notify(); return; }
+    if (others.length) { this.pending = { id: this.rec, key: k, others }; this.rec = null; this.keyMsg = null; this.paint(cx); return; }
     this.keyMsg = null;
     this.setKeys(bind(this.overrides, this.km, this.rec, k), cx);
   }
@@ -4661,7 +4693,7 @@ export default class Review extends View {
           .children(keys.map((k) => chip(a.id, k)))
           .when(recording, (e) => e.child(div().h(22).px(8).flex().items_center().rounded(4).bg(t.accent + "55").text_size(11).child("Press a key… (Esc cancels)")))
           .when(!recording, (e) => e.child(div().id(`add-${a.id}`).h(22).px(6).flex().items_center().rounded(4).text_size(11).text_color(t.dim).cursor_pointer()
-            .hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { this.rec = a.id; this.pending = null; this.keyMsg = null; this.formHandle.focus(); cx.notify(); }).child("+ key")))
+            .hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => { this.rec = a.id; this.pending = null; this.keyMsg = null; this.formHandle.focus(); this.paint(cx); }).child("+ key")))
           .when(changed, (e) => e.child(div().id(`reset-${a.id}`).h(22).px(6).flex().items_center().rounded(4).text_size(11).text_color(t.dim).cursor_pointer()
             .hover((s) => s.bg(t.raised).text_color(t.foreground)).on_click((_e, cx) => this.setKeys(resetKey(this.overrides, a.id), cx)).child("Reset")))));
     }
@@ -4669,7 +4701,7 @@ export default class Review extends View {
     return v_flex().id("wingman-keys").track_focus(this.formHandle)
       .on_key_down((e, cx) => {
         if (this.rec) return this.recordKey(e, cx);
-        if (e.key === "escape") { if (this.pending) { this.pending = null; cx.notify(); } else closeOverlay(overlay); cx.stop_propagation(); }
+        if (e.key === "escape") { if (this.pending) { this.pending = null; this.paint(cx); } else closeOverlay(overlay); cx.stop_propagation(); }
       })
       .size_full().p(16).gap(8).bg(t.popover).text_color(t.foreground)
       .child(h_flex().items_center().gap(8)
@@ -4682,7 +4714,7 @@ export default class Review extends View {
       .when(!!p, (e) => e.child(h_flex().gap(8).items_center().p(8).rounded(6).bg(t.ansi3 + "22").text_size(12)
         .child(div().flex_1().child(`${keyLabel(p.key)} is bound to ${p.others.map((o) => BY_ID.get(o).label).join(", ")}. Move it to ${BY_ID.get(p.id).label}?`))
         .child(this.button("keys-move", "Move it", t.accent + "55", (cx) => this.setKeys(bind(this.overrides, this.km, p.id, p.key), cx)))
-        .child(this.button("keys-cancel", "Cancel", t.raised, (cx) => { this.pending = null; cx.notify(); }))))
+        .child(this.button("keys-cancel", "Cancel", t.raised, (cx) => { this.pending = null; this.paint(cx); }))))
       .child(v_flex().id("keys-list").flex_1().min_h(0).overflow_y_scrollbar().children(km ? rows : [div().id("keys-loading").text_size(12).text_color(t.dim).child("Loading…")]));
   }
 
@@ -4756,6 +4788,66 @@ export default class Review extends View {
 
   // ---- view ----------------------------------------------------------------
 
+  /**
+   * The file bar's hint and buttons that fit its width now, each with its label (barfit.fitBar):
+   * Map id -> label, absent when not shown. Keys go first, then long labels, then whole buttons
+   * (the editor button first, Save and Discard never). The file tabs keep at least TABS_MIN.
+   */
+  fileBar(f, vis) {
+    const items = [], add = (id, labels, drop, size = 11, pad = 20, group) => items.push({ id, labels, drop, size, pad, group });
+    if (vis.length > 1 && this.mode !== "changes") {
+      const pos = `${vis.findIndex((x) => x.key === this.sel) + 1}/${vis.length}`;
+      add("pos", [`${pos} · ${this.kl("prevFile")}/${this.kl("nextFile")}`, pos], 2, 10, 12);
+    }
+    if (f && this.nvim()) add("nvim", [withKey("Neovim", this.kl("openInNvim")), "Neovim"], 3);
+    if (this.dirty(f)) add("save", [withKey("Save", this.kl("save")), "Save"], Infinity);
+    if (f && this.mode === "edit" && this.editable(f)) add("add-comment", [withKey("+ Comment", this.kl("addComment")), "+ Comment"], 4);
+    if (this.mode === "changes" && f && !f.committed) {
+      if (this.discardKey === f.key) { add("discard-yes", ["Discard all changes to this file", "Discard all changes", "Discard"], Infinity); add("discard-no", ["Cancel"], Infinity); }
+      else add("discard", ["Discard file", "Discard"], Infinity);
+    }
+    if (this.mode !== "changes" && f && !f.plain && f.hunks.length > 0) {
+      add("reject-file", [withKey("Reject file", this.kl("rejectFile")), "Reject file", "Reject"], 5, 11, 20, "file");
+      add("accept-file", [withKey("Accept file", this.kl("acceptFile")), "Accept file", "Accept"], 5, 11, 20, "file");
+    }
+    const ed = editorName(this.settings.externalEditor);
+    if (f) add("vscode", [withKey(ed, this.kl("openInVSCode")), ed], 1);
+    return fitBar(this.px(this.barW), items, TABS_MIN + 16);
+  }
+
+  /**
+   * The header's buttons that fit the pane's width now (as fileBar): Comments and Settings always
+   * stay. The subtitle shrinks first (it truncates), down to SUBTITLE_MIN.
+   */
+  headerBar(total, ncomments) {
+    const items = [], add = (id, labels, drop, group) => items.push({ id, labels, drop, size: 11, pad: 20, group });
+    if (this.lastReject && !this.lastReject.remote) add("reason", [withKey("Comment last rejection", this.kl("reason")), "Comment last rejection", "Reason"], 1);
+    if (total > 0 && this.mode === "review") { add("reject-all", ["Reject all files", "Reject all"], 2, "all"); add("accept-all", ["Accept all files", "Accept all"], 2, "all"); }
+    if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`], Infinity);
+    add("settings", ["⚙ Settings", "⚙"], Infinity);
+    const fixed = 24 + 64 + (this.view ? 0 : 120) + SUBTITLE_MIN + 10 * 3; // padding, "Wingman", the Review/Edit switch, the subtitle, gaps
+    return fitBar(this.px(this.paneW), items, fixed, 10);
+  }
+
+  /**
+   * The header's counts. Review and Edit: the agent's open changes and the files they're in, and the
+   * undo steps. Changes (D5): what its list holds, the uncommitted files, and how many of them still
+   * have changes to review in Review (the list's "n to review" tags, from REVIEW). Changes doesn't
+   * count changes (hunks): a row's hunks are only known once its texts load.
+   */
+  counts(total, vis) {
+    const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+    if (this.mode !== "changes") return `${plural(total, "change")} in ${plural(vis.length, "file")} · ${this.history.length} undoable`;
+    const review = shared(REVIEW), open = this.files.filter((f) => (review?.[f.key] ?? 0) > 0).length;
+    return `${plural(this.files.length, "uncommitted file")}${open ? ` · ${open} to review` : ""}`;
+  }
+
+  /** The change header row's buttons for the diff's width now (barfit.hunkButtons). */
+  hunkBtns() { return hunkButtons(this.px(this.viewW), GUTTER, BTN_GAP, BUTTONS); }
+
+  /** A measured size (on_size_change: screen px) in element px, as w() and the bars' estimates use. */
+  px(measured) { return measured / (this.unit ?? 1); }
+
   button(id, label, bg, onClick) {
     return div().id(id).h(22).px(10).flex().items_center().rounded(5).cursor_pointer().bg(bg).text_size(11)
       .hover((s) => s.opacity(0.85)).on_click((_e, cx) => { this.handle?.focus(); onClick(cx); }).child(label);
@@ -4769,14 +4861,14 @@ export default class Review extends View {
     }
     if (r.kind === "@") {
       // Row renderers can't hold handlers; the input layer maps clicks here to a button by x (rowButton).
-      const current = r.hunk === this.current;
+      // A narrow diff drops the keys, then "change n of m", then the last buttons (hunkButtons).
+      const current = r.hunk === this.current, hb = this.hunkBtns();
+      const btn = (label, key, bg) => div().w(hb.w).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(bg).text_size(11).whitespace_nowrap().child(hb.keys ? withKey(label, this.kl(key)) : label);
       return h_flex().w_full().h(ROW).flex_none().gap(BTN_GAP).items_center().bg(current ? t.selected : t.raised)
         .child(div().w(GUTTER).flex_none())
-        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi1 + (current ? "99" : "55")).text_size(11).child(`Reject  ${this.kl("reject")}`))
-        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi2 + (current ? "99" : "55")).text_size(11).child(`Accept  ${this.kl("accept")}`))
-        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi4 + (current ? "77" : "40")).text_size(11).child(`Ask  ${this.kl("comment")}`))
-        .child(div().w(BTN_W).flex_none().h(16).rounded(4).flex().items_center().justify_center().bg(t.ansi5 + (current ? "77" : "40")).text_size(11).child(`Comment  ${this.kl("addComment")}`))
-        .child(div().flex_1().pl(8).text_color(t.dim).text_size(11).child(`change ${r.hunk + 1} of ${f.hunks.length}${this.hunkComments(f, r.hunk)}`));
+        .children([btn("Reject", "reject", t.ansi1 + (current ? "99" : "55")), btn("Accept", "accept", t.ansi2 + (current ? "99" : "55")),
+          btn("Ask", "comment", t.ansi4 + (current ? "77" : "40")), btn("Comment", "addComment", t.ansi5 + (current ? "77" : "40"))].slice(0, hb.shown))
+        .when(hb.note, (e) => e.child(div().flex_1().min_w(0).pl(8).truncate().text_color(t.dim).text_size(11).child(`change ${r.hunk + 1} of ${f.hunks.length}${this.hunkComments(f, r.hunk)}`)));
     }
     // A line with a review comment on it: its number on a tinted background (paler when the comment's code moved or changed).
     const cm = r.side === "new" && !r.cont ? (this.cmtSpans ?? []).find((s) => r.line >= s.a && r.line <= s.b) : null;
@@ -4838,8 +4930,13 @@ export default class Review extends View {
     const ncomments = this.comments().length;
     this.cmtSpans = f && ncomments ? spansOn(this.comments(), f.key) : []; // read by row()
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
-    const away = this.machine();
+    const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .on_size_change((size, cx) => { if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
+      // Sizes come back in screen px, the app's zoom included (w(100) measures 120 at zoom 1.2), and
+      // the bars are laid out in element px: this 100 px probe gives the ratio (px()).
+      .child(div().id("unit-probe").absolute().top(0).left(0).w(100).h(0)
+        .on_size_change((size, cx) => { const u = size.width / 100; if (u > 0 && Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Wingman"))
@@ -4848,15 +4945,16 @@ export default class Review extends View {
           div().id(`mode-${m}`).h(22).px(8).flex().items_center().rounded(4).text_size(12).cursor_pointer()
             .when(this.mode === m, (e) => e.bg(t.selected)).on_click((_e, cx) => this.setMode(m, cx))
             .child(m === "review" ? "Review" : "Edit")))))
-        .child(div().text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${total} change${total === 1 ? "" : "s"} in ${vis.length} file${vis.length === 1 ? "" : "s"} · ${this.history.length} undoable${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
+        .child(div().flex_shrink(1).min_w(0).text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${this.counts(total, vis)}${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
         .child(div().flex_1())
-        .when(!!this.lastReject && !this.lastReject.remote, (e) => e.child(this.button("reason", `Comment last rejection  ${this.kl("reason")}`, t.raised, (cx) => this.askReason(cx))))
-        .when(total > 0 && this.mode === "review", (e) => e
-          .child(this.button("reject-all", "Reject all files", t.ansi1 + "55", (cx) => this.everything("reject", cx)))
-          .child(this.button("accept-all", "Accept all files", t.ansi2 + "55", (cx) => this.everything("accept", cx))))
+        .when(hb.has("reason"), (e) => e.child(this.button("reason", hb.get("reason"), t.raised, (cx) => this.askReason(cx)).flex_none().whitespace_nowrap()))
+        .when(hb.has("reject-all"), (e) => e
+          .child(this.button("reject-all", hb.get("reject-all"), t.ansi1 + "55", (cx) => this.everything("reject", cx)).flex_none().whitespace_nowrap()))
+        .when(hb.has("accept-all"), (e) => e
+          .child(this.button("accept-all", hb.get("accept-all"), t.ansi2 + "55", (cx) => this.everything("accept", cx)).flex_none().whitespace_nowrap()))
         // Review comments: the count opens the list (send to the agent, jump, edit, delete).
-        .when(!!this.spaceId, (e) => e.child(this.button("comments", `Comments ${ncomments}  ${this.kl("commentList")}`, ncomments ? t.ansi5 + "55" : t.raised, () => this.openCommentList()).flex_none().whitespace_nowrap()))
-        .child(this.button("settings", "⚙ Settings", t.raised, () => this.openSettings()).flex_none()))
+        .when(hb.has("comments"), (e) => e.child(this.button("comments", hb.get("comments"), ncomments ? t.ansi5 + "55" : t.raised, () => this.openCommentList()).flex_none().whitespace_nowrap()))
+        .child(this.button("settings", hb.get("settings"), t.raised, () => this.openSettings()).flex_none().whitespace_nowrap()))
       // A failing repo's capture (the leader's, shared): a warning row each, the rest of the view works.
       .children(captureNotices(shared(CAPTURE_ERRORS), this.spaceId, this.stores.map(idOf), Date.now()).map((n, i) =>
         h_flex().id(`capture-err-${i}`).flex_none().px(12).py(4).items_center().bg(t.ansi3 + "22").border_b(1).border_color(t.border).text_size(12)
@@ -4866,10 +4964,12 @@ export default class Review extends View {
       .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))
       .when(this.mode === "changes", (e) => e.child(this.renderChanges(t)))
       .when(!this.treeOnly(), (e) => e.child(v_flex().flex_1().min_w(0).h_full()
-      // File tabs scroll sideways in their own area; the hint and file buttons stay pinned right.
-      .child(h_flex().h(36).flex_none().px(8).gap(4).items_center().border_b(1).border_color(t.border)
+      // File tabs scroll sideways in their own area; the hint and file buttons stay pinned right,
+      // fitted to the bar's width (fileBar: keys go first, then long labels, then whole buttons).
+      .child(h_flex().id("file-bar").h(36).flex_none().px(8).gap(4).items_center().border_b(1).border_color(t.border)
+        .on_size_change((size, cx) => { if (Math.abs((this.barW ?? 0) - size.width) > 0.5) { this.barW = size.width; this.paint(cx); } })
         .child(div().id("file-tabs").flex_1().min_w(0).h_full().relative().overflow_hidden()
-          .on_size_change((size, cx) => { this.tabViewW = size.width; this.setTabOffset(this.tabOffset ?? 0); if (this.sel) this.showTab(this.sel); cx.notify(); })
+          .on_size_change((size, cx) => { this.tabViewW = size.width; this.setTabOffset(this.tabOffset ?? 0); if (this.sel) this.showTab(this.sel); this.paint(cx); })
           .on_scroll_wheel((ev, cx) => this.tabWheel(ev, cx))
           .when(this.mode === "changes" && !!f, (e) => e.child(div().absolute().top(0).bottom(0).left(4).flex().items_center().text_size(12).text_color(t.muted).child(f?.rel ?? "")))
           .when(this.mode !== "changes", (e) => e.child(h_flex().absolute().top(0).bottom(0).left(-(this.tabOffset ?? 0)).children(vis.map((x) => this.tab(x, t)))))
@@ -4879,21 +4979,19 @@ export default class Review extends View {
             return e.child(div().absolute().bottom(1).h(2).rounded(1).bg(t.dim)
               .left(((this.tabOffset ?? 0) / total) * view).w(Math.max(24, (view / total) * view)));
           }))
-        .when(vis.length > 1 && this.mode !== "changes", (e) => e.child(div().flex_none().whitespace_nowrap().text_size(10).text_color(t.dim).px(6).child(`${vis.findIndex((x) => x.key === this.sel) + 1}/${vis.length} · ${this.kl("prevFile")}/${this.kl("nextFile")}`)))
-        .when(!!f && this.nvim(), (e) => e.child(this.button("nvim", `Neovim  ${this.kl("openInNvim")}`, t.raised, (cx) => this.toNvim(f, f.hunks[this.current]?.n ?? 0, cx)).flex_none().whitespace_nowrap()))
-        .when(this.dirty(f), (e) => e.child(this.button("save", `Save  ${this.kl("save")}`, t.accent + "55", (cx) => this.save(cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("pos"), (e) => e.child(div().flex_none().whitespace_nowrap().text_size(10).text_color(t.dim).px(6).child(fb.get("pos"))))
+        .when(fb.has("nvim"), (e) => e.child(this.button("nvim", fb.get("nvim"), t.raised, (cx) => this.toNvim(f, f.hunks[this.current]?.n ?? 0, cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("save"), (e) => e.child(this.button("save", fb.get("save"), t.accent + "55", (cx) => this.save(cx)).flex_none().whitespace_nowrap()))
         // A review comment on the cursor's line or the selection (Review also has one on each change).
-        .when(!!f && this.mode === "edit" && this.editable(f), (e) => e.child(this.button("add-comment", `+ Comment  ${this.kl("addComment")}`, t.ansi5 + "40", (cx) => this.commentHere(cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("add-comment"), (e) => e.child(this.button("add-comment", fb.get("add-comment"), t.ansi5 + "40", (cx) => this.commentHere(cx)).flex_none().whitespace_nowrap()))
         // Only a file with the agent's changes (an opened file's own edits aren't the agent's).
-        .when(this.mode === "changes" && !!f && !f.committed, (e) => this.discardKey === f.key
-          ? e.child(this.button("discard-yes", "Discard all changes to this file", t.ansi1 + "88", (cx) => this.discard(f, cx)).flex_none().whitespace_nowrap())
-            .child(this.button("discard-no", "Cancel", t.raised, (cx) => { this.discardKey = null; cx.notify(); }).flex_none())
-          : e.child(this.button("discard", "Discard file", t.ansi1 + "40", (cx) => { this.discardKey = f.key; cx.notify(); }).flex_none().whitespace_nowrap()))
-        .when(this.mode !== "changes" && !!f && !f.plain && f.hunks.length > 0, (e) => e
-          .child(this.button("reject-file", `Reject file  ${this.kl("rejectFile")}`, t.ansi1 + "40", (cx) => this.wholeFile("reject", cx)).flex_none().whitespace_nowrap())
-          .child(this.button("accept-file", `Accept file  ${this.kl("acceptFile")}`, t.ansi2 + "40", (cx) => this.wholeFile("accept", cx)).flex_none().whitespace_nowrap()))
-        .when(!!f, (e) => e.child(this.button("vscode", `${editorName(this.settings.externalEditor)}  ${this.kl("openInVSCode")}`, t.raised, (cx) => this.toVSCode(cx)).flex_none().whitespace_nowrap())))
-      .when(!(this.mode === "edit" && this.treeOn) && !!(this.ws || this.wsBusy), (e) => e.child(this.workspacePanel(t)))
+        .when(fb.has("discard-yes"), (e) => e.child(this.button("discard-yes", fb.get("discard-yes"), t.ansi1 + "88", (cx) => this.discard(f, cx)).flex_none().whitespace_nowrap())
+          .child(this.button("discard-no", "Cancel", t.raised, (cx) => { this.discardKey = null; this.paint(cx); }).flex_none()))
+        .when(fb.has("discard"), (e) => e.child(this.button("discard", fb.get("discard"), t.ansi1 + "40", (cx) => { this.discardKey = f.key; this.paint(cx); }).flex_none().whitespace_nowrap()))
+        .when(fb.has("reject-file"), (e) => e.child(this.button("reject-file", fb.get("reject-file"), t.ansi1 + "40", (cx) => this.wholeFile("reject", cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("accept-file"), (e) => e.child(this.button("accept-file", fb.get("accept-file"), t.ansi2 + "40", (cx) => this.wholeFile("accept", cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("vscode"), (e) => e.child(this.button("vscode", fb.get("vscode"), t.raised, (cx) => this.toVSCode(cx)).flex_none().whitespace_nowrap())))
+      .when(!(this.mode === "edit" && this.treeOn) && !!(this.ws || (this.wsBusy && this.wsBusySpace === this.spaceId)), (e) => e.child(this.workspacePanel(t)))
       .when(!!f && !!this.bar, (e) => e.child(this.findBar(f, t)))
       .when(!!f?.conflict, (e) => e.child(h_flex().px(12).py(6).gap(8).items_center().bg(t.ansi3 + "22").text_size(12)
         .child(div().flex_1().child(f?.conflict?.theirs ? "The agent changed the same lines you're editing." : "The file was deleted while you were editing it."))
@@ -4903,10 +5001,10 @@ export default class Review extends View {
         .child(div().flex_1().min_w(0).text_color(this.error || picked?.error ? t.ansi1 : t.muted).child(this.error ?? this.status ?? (f?.lazy ? `Loading ${f.rel}…` : picked?.error ? `${picked.rel}: ${picked.error}` : this.mode === "edit" ? `No file open: pick one in the file tree (${this.kl("toggleTree")}) or Quick Open (${this.kl("quickOpen")})` : this.mode === "changes" ? "No uncommitted changes" : "No changes to review")))
         .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
-        .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; cx.notify(); })
+        .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; this.paint(cx); })
         // One character's width in the diff font, for cursor columns (the font is monospace).
         .child(div().absolute().top(0).left(0).opacity(0).whitespace_nowrap().child("0".repeat(100))
-          .on_size_change((size, cx) => { const w = size.width / 100; if (w > 0 && Math.abs(w - (this.charW ?? 0)) > 0.001) { this.charW = w; cx.notify(); } }))
+          .on_size_change((size, cx) => { const w = size.width / 100; if (w > 0 && Math.abs(w - (this.charW ?? 0)) > 0.001) { this.charW = w; this.paint(cx); } }))
         .child(v_virtual_list("review-rows", rows.length, ROW, (i) => rows[i].kind === "@" ? `h${rows[i].hunk}` : `r${i}`,
           (range) => {
             // The list calls this twice a frame: once with [0, 1) to measure a row, then with
