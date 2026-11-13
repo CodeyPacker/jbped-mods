@@ -74,10 +74,11 @@ function iconButton(id, icon, t, onClick, { on = false } = {}) {
     .child(svg(`mods/wayfindr/icons/${icon}.svg`).size(14));
 }
 
-function button(id, label, t, onClick, { on = false } = {}) {
+// `inert`: under the Pull Request overlay's scrim, which takes the events: no hover or pointer cursor.
+function button(id, label, t, onClick, { on = false, inert = false } = {}) {
   return h_flex().id(id).h(26).px(10).flex_none().items_center().rounded(6)
-    .text_size(12).text_color(on ? t.foreground : t.muted).bg(on ? t.selected : t.background).cursor_pointer()
-    .hover((s) => s.bg(t.hover).text_color(t.foreground))
+    .text_size(12).text_color(on ? t.foreground : t.muted).bg(on ? t.selected : t.background)
+    .when(!inert, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)))
     .on_mouse_down("left", stop).on_click((_e, cx) => onClick(cx))
     .child(label);
 }
@@ -154,18 +155,21 @@ const placementText = (w, wr) => w === "wranglr" ? (wr ? `Wranglr's rule (${wr.w
   : w === "herdr" ? "Herdr's worktrees folder" : w === "beside" ? "beside the clone" : w;
 
 // Several clones of the Pull Request's repo: one button per clone, then Cancel. `review` as in prRow.
-function cloneChooser(id, review, t) {
+function cloneChooser(id, review, t, inert = false) {
   return v_flex().id(id).gap(4).items_start()
     .child(div().text_size(11).text_color(t.dim).child("Several clones found. Review in:"))
-    .children(review.state.hits.map((h, i) => button(`${id}-${i}`, hitLabel(h, t), t, (cx) => review.choose(h.path, cx))))
-    .child(button(`${id}-cancel`, "Cancel", t, (cx) => review.cancel(cx)));
+    .children(review.state.hits.map((h, i) => button(`${id}-${i}`, hitLabel(h, t), t, (cx) => review.choose(h.path, cx), { inert })))
+    .child(button(`${id}-cancel`, "Cancel", t, (cx) => review.cancel(cx), { inert }));
 }
 
 // `review`: { state, start, choose, cancel } from reviewActions.
-// `select`: { selected, onClick }, the row opens the Pull Request panel.
+// `select`: { selected, onClick, inert }, the row opens the Pull Request panel; inert while the overlay's
+// scrim covers the list (hit testing has no occlusion, so the row's hover is left off instead).
 function prRow(pr, t, review = null, select = null) {
+  const inert = Boolean(select?.inert);
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
-    .when(Boolean(select), (el) => el.cursor_pointer().when(select.selected, (r) => r.bg(t.selected))
+    .when(Boolean(select?.selected), (el) => el.bg(t.selected))
+    .when(Boolean(select) && !inert, (el) => el.cursor_pointer()
       .hover((s) => s.bg(select.selected ? t.selected : t.hover))
       .on_mouse_down("left", stop).on_click((_e, cx) => select.onClick(cx)))
     .child(v_flex().flex_1().min_w(0).gap(4)
@@ -174,10 +178,10 @@ function prRow(pr, t, review = null, select = null) {
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
       .child(div().text_size(11).text_color(t.dim).truncate()
         .child(`${pr.id} · ${pr.author.name}${prAge(pr)}`))
-      .when(review?.state?.status === "choose", (el) => el.child(cloneChooser(`wf-pr-choose-${pr.key}`, review, t))))
+      .when(review?.state?.status === "choose", (el) => el.child(cloneChooser(`wf-pr-choose-${pr.key}`, review, t, inert))))
     .when(Boolean(review?.state?.status === "error"), (el) => el.child(div().max_w(260).flex_none().text_size(11).text_color(t.blocked).child(review.state.error)))
     .when(Boolean(review), (el) => el.child(button(`wf-pr-review-${pr.key}`, review.state?.status === "busy" ? (review.state.message ?? "Starting…") : "Review", t,
-      (cx) => review.start(cx), { on: review.state?.status === "busy" })))
+      (cx) => review.start(cx), { on: review.state?.status === "busy", inert })))
     .when(Boolean(pr.url), (el) => el.child(div().flex_none().text_size(12).on_mouse_down("left", stop).child(TextView.markdown(`wf-pr-open-${pr.key}`, link("Open in browser", pr.url)))));
 }
 
@@ -1800,6 +1804,7 @@ export default class Wayfindr extends View {
       .when(entry.status === "loading" || Boolean(entry.at), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim)
         .child(entry.status === "loading" ? (entry.data ? "Refreshing…" : "Loading…") : `Updated ${formatAge(Date.now() - entry.at)}`)));
     const signedOut = (id) => this.signIn?.[id]?.ok === false;
+    const inert = Boolean(this.selectedPr);
     const lists = entry.data ?? [];
     const ok = lists.filter((l) => !l.error && !signedOut(l.account));
     const accounts = new Map(p.accounts.map((a) => [a.id, a]));
@@ -1813,7 +1818,7 @@ export default class Wayfindr extends View {
           ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
             .children(g.prs.map((pr) => prRow(pr, t, this.reviewActions(l.account, pr),
-              { selected: this.selectedPr?.pr.key === pr.key, onClick: (cx) => this.openPr(l.account, pr, cx) })))),
+              { selected: this.selectedPr?.pr.key === pr.key, inert, onClick: (cx) => this.openPr(l.account, pr, cx) })))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
       });
@@ -1825,14 +1830,28 @@ export default class Wayfindr extends View {
       ...lists.filter((l) => l.error && !signedOut(l.account)).map((l) => note(`${l.account}: couldn't load Pull Requests: ${l.error}`, t.blocked)),
     ];
     const body = entry.data ? [section("Mine", "mine"), section("Needs my review", "needsReview")] : (entry.status === "loading" ? [] : [note("No Pull Requests yet.")]);
-    // The list fills the view; the Pull Request overlay covers its right part. A click on the list
-    // outside a row closes the overlay. Rows and buttons stop their own.
+    // The list fills the view; with a Pull Request open, the scrim covers the list and the overlay
+    // covers the scrim's right part. A click on the scrim closes the overlay.
     return div().id("wf-prs-wrap").relative().size_full()
       .child(v_flex().id("wf-prs-area").size_full().min_h(0)
-        .on_click((_e, cx) => { if (this.selectedPr) { this.closePr(); cx.notify(); } })
         .child(bar)
         .child(v_flex().id("wf-prs").flex_1().min_h(0).px(16).pb(16).gap(16).overflow_y_scrollbar().children([...top, ...body])))
-      .when(Boolean(this.selectedPr), (el) => el.child(this.prPanel(t)));
+      .when(Boolean(this.selectedPr), (el) => el.child(this.prScrim(t)).child(this.prPanel(t)));
+  }
+
+  // Under the overlay, over the whole list: a dimmed layer that takes every press, release, move and
+  // wheel event, so nothing reaches the list under the overlay (events go to every element under the
+  // pointer until one stops them; there is no occlusion to lean on). It does what the root's press does
+  // (focus, a stale drag), carries the overlay's edge drag with its own width as the whole, and a click
+  // on it closes the overlay. The overlay stops its own clicks so they don't count as one.
+  prScrim(t) {
+    return div().id("wf-pr-scrim").absolute().top(0).bottom(0).left(0).right(0).bg(t.background).opacity(0.6)
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.handle.focus(); this.prDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      .on_mouse_down("right", stop)
+      .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.prDragEnd(cx); })
+      .on_mouse_move((e, cx) => { cx.stop_propagation(); this.prDragMove(e, cx); })
+      .on_scroll_wheel(stop)
+      .on_click((_e, cx) => { cx.stop_propagation(); this.closePr(); cx.notify(); });
   }
 
   // The overlay's width: the live drag value, else the remembered one, else 60%.
@@ -1842,9 +1861,10 @@ export default class Wayfindr extends View {
     return Number.isFinite(v) && v >= PR_W_MIN && v <= PR_W_MAX ? v : PR_W_DEFAULT;
   }
 
-  // The left-edge drag: the press records where it started and the width then; each move over
-  // Wayfindr turns the distance into a fraction of Wayfindr's width (the root's bounds); the
-  // release keeps it. A release outside Wayfindr isn't reported, so the next press clears a stale drag.
+  // The left-edge drag: the press records where it started and the width then; each move turns the
+  // distance into a fraction of the handling element's width (the scrim's, which is the list's; the
+  // root's once the pointer leaves the list); the release keeps it. A release outside Wayfindr isn't
+  // reported, so the next press clears a stale drag.
   prDragMove(e, cx) {
     if (!this.prDrag || !e.bounds?.width) return;
     const frac = Math.min(PR_W_MAX, Math.max(PR_W_MIN, this.prDrag.from + (this.prDrag.x - e.position.x) / e.bounds.width));
@@ -1947,9 +1967,10 @@ export default class Wayfindr extends View {
     const grip = div().id("wf-pr-grip").absolute().top(0).bottom(0).left(0).w(6).cursor_col_resize()
       .hover((s) => s.bg(t.accent)).when(Boolean(this.prDrag), (el) => el.bg(t.accent))
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.prDrag = { x: e.position.x, from: this.prFrac, frac: this.prFrac }; cx.notify(); });
-    // Wheel events end here: the body has had them, the list under the overlay must not.
+    // Wheel events end here: the body has had them, the list under the overlay must not. Clicks end
+    // here too: the scrim under the overlay closes it on a click of its own.
     return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0).w(`${Math.round(this.prFrac * 1000) / 10}%`)
-      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg().on_scroll_wheel(stop)
+      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg().on_scroll_wheel(stop).on_click(stop)
       .child(head)
       .when(rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
         .child(cloneChooser("wf-pr-panel-choose", review, t))))
