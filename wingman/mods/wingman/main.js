@@ -43,6 +43,7 @@ import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
 import { spans as spansOf } from "./spans.js";
+import { sync as syncPanels } from "./panels.js";
 import { addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
 import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup.js";
 import { capSteps } from "./undocap.js";
@@ -201,7 +202,7 @@ export default class Review extends View {
     if (props()?.form) return this.initForm(cx);
     this.id = Math.random().toString(36).slice(2);
     this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
-    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false };
+    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, hideHerdrPanels: false };
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
@@ -211,7 +212,7 @@ export default class Review extends View {
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
     this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
-    loadSettings().then((st) => { this.settings = st; });
+    loadSettings().then((st) => { this.settings = st; syncPanels(shared, setShared, st.hideHerdrPanels); });
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });
     // The pane takes the keyboard back after its popup closes.
@@ -231,7 +232,7 @@ export default class Review extends View {
             rejectComment: ["reject", () => this.rejectWithComment(cx)],
             clear: [null, () => this.clearSelection(cx)],
             // The settings popup saved a change.
-            settings: [null, async () => { this.settings = await loadSettings(); this.setKeymap(await loadKeys()); }],
+            settings: [null, async () => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); }],
             // The settings popup installed or removed the Claude hook on a machine: look again now.
             hook: [null, () => { forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }],
           }[c];
@@ -3124,7 +3125,7 @@ export default class Review extends View {
   openSettings() {
     // A space on another machine adds the "Claude hook on <machine>" section.
     const machine = this.machine();
-    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 690 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 760 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -4706,6 +4707,7 @@ export default class Review extends View {
         .child(toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)))
         .child(toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)))
         .child(toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)))
+        .child(toggle("set-hidepanels", "Hide Herdr's Files and Changes buttons", "Takes them out of the tab bar. Wingman's own Review, Edit and Changes stay. Turn off to put them back.", st.hideHerdrPanels ?? false, (cx) => this.setSetting({ hideHerdrPanels: !(st.hideHerdrPanels ?? false) }, cx)))
         .child(toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)))
         .child(v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
           .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
