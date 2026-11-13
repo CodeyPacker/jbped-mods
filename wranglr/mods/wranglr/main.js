@@ -12,7 +12,7 @@ import {
   shared, setShared, watchFolder, window, layout, home, nextCommand,
 } from "herdr";
 import { emptyState, mkey, clonedMap, arrange, act, workspaceHome } from "./model.js";
-import { parseConfig, loadConfig } from "./config.js";
+import { parseConfig, loadConfig, settingError, DEFAULT_SETTINGS } from "./config.js";
 import { makeResolver } from "./repos.js";
 import { loadState, makeSaver } from "./store.js";
 import { writeWorkspaceFile } from "./workspacefile.js";
@@ -84,6 +84,7 @@ export default class Wranglr extends View {
     const p = props() ?? {};
     this.dialog = p.overlay ? p.dialog ?? "none" : null;
     if (this.dialog === "move" || this.dialog === "input") this.initInput(cx);
+    else if (this.dialog === "settings") this.initSettings(cx);
     else if (this.dialog === "menu") { this.at = 0; this.handle = cx.focus_handle(); this.handle.focus(); }
     else if (!this.dialog) this.initOwner(cx);
   }
@@ -318,6 +319,7 @@ export default class Wranglr extends View {
     else if (c === "next" || c === "prev") this.dispatch({ type: c }, cx);
     else if (c === "fold") this.dispatch({ type: "foldFocused" }, cx);
     else if (c === "sort") this.dispatch({ type: "sort", value: null }, cx);
+    else if (c === "settings") this.openSettings();
     else if (c === "name" && focus) this.dispatch({ type: "name", space: focus }, cx);
     else if (c === "move" && focus) this.openMove(focus);
     else if (c === "new") {
@@ -330,6 +332,10 @@ export default class Wranglr extends View {
 
   openMove(space) {
     openOverlay({ mod: "wranglr", kind: "dialog", width: 420, props: { dialog: "move", space, at: this.placeOf(space) } });
+  }
+
+  openSettings() {
+    openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: { dialog: "settings", settings: this.config.settings } });
   }
 
   // "+": a new space in that Group. A worktree by default asks for its branch first.
@@ -804,7 +810,8 @@ export default class Wranglr extends View {
       .when(collapsed, (el) => el.pl(0).pr(0).justify_center())
       .when(!collapsed, (el) => el.child(div().flex_1().child("Spaces"))
         .child(this.headerButton("wranglr-sort", t, div().text_size(11).child(SORT_LABEL[sort] ?? sort), "Sort: click for the next", (_e, cx) => this.dispatch({ type: "sort", value: null }, cx)))
-        .child(this.headerButton("wranglr-group", t, svg(icon("folder-plus")).size(14), "New group", () => openInput({ title: "New group", value: "", action: { type: "addCustom" } }))))
+        .child(this.headerButton("wranglr-group", t, svg(icon("folder-plus")).size(14), "New group", () => openInput({ title: "New group", value: "", action: { type: "addCustom" } })))
+        .child(this.headerButton("wranglr-settings", t, svg(icon("settings")).size(14), "Wranglr settings", () => this.openSettings())))
       .child(this.headerButton("space-new", t, svg(icon("plus")).size(14), "New space", () => run("space.new")));
     const warning = this.errors.length && !collapsed
       ? h_flex().id("wranglr-errors").mx(8).mb(4).px(8).h(24).flex_none().gap(6).items_center().rounded(6).bg(t.raised)
@@ -931,6 +938,80 @@ export default class Wranglr extends View {
         .child(button("wi-save", "Save", true, () => this.submit())));
   }
 
+  // The settings menu: the `settings` block of wranglr.json. Save writes only what changed.
+  initSettings(cx) {
+    const s = props()?.settings ?? DEFAULT_SETTINGS;
+    this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname };
+    this.pick = { ...this.was };
+    this.wasText = { worktrees: s.worktrees ?? "", ticket: s.ticket ?? "", agent: (s.agent ?? []).join(" ") };
+    this.text = { ...this.wasText };
+    this.bad = {};
+    this.inputs = {};
+    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal" };
+    for (const key of Object.keys(this.text)) {
+      const input = InputState.new({ value: this.text[key], placeholder: hint[key] });
+      input.on("change", (_e, cx) => { this.text[key] = input.value(); delete this.bad[key]; cx.notify(); });
+      input.on("submit", (_e, cx) => { this.saveSettings(); cx?.notify?.(); });
+      this.inputs[key] = input;
+    }
+    this.handle = cx.focus_handle();
+    this.handle.focus();
+  }
+
+  saveSettings() {
+    const values = {}, bad = {};
+    for (const key of Object.keys(this.pick)) if (this.pick[key] !== this.was[key]) values[key] = this.pick[key];
+    for (const key of Object.keys(this.text)) {
+      const raw = this.text[key].trim();
+      if (raw === this.wasText[key].trim()) continue;
+      // An empty field is the default: a plain terminal for the agent.
+      const value = key === "agent" ? (raw ? raw.split(/\s+/) : null) : raw || DEFAULT_SETTINGS[key];
+      const why = settingError(key, value);
+      if (why) bad[key] = why;
+      else values[key] = value;
+    }
+    this.bad = bad;
+    if (Object.keys(bad).length) return;
+    if (Object.keys(values).length) send({ type: "settings", values });
+    closeOverlay(props()?.overlay);
+  }
+
+  renderSettings() {
+    const t = theme();
+    const p = props() ?? {};
+    const field = (label, control, key, about) => v_flex().gap(6)
+      .child(div().text_size(11.5).text_color(t.dim).child(label))
+      .child(control)
+      .when(Boolean(this.bad[key] || about), (el) => el.child(div().text_size(11).text_color(this.bad[key] ? t.blocked : t.dim).child(this.bad[key] ? `This ${this.bad[key]}.` : about)));
+    const pick = (key, options) => h_flex().gap(5).children(options.map(([value, label]) => {
+      const on = this.pick[key] === value;
+      return h_flex().id(`ws-${key}-${value}`).h(28).px(11).items_center().rounded(7).border_1().cursor_pointer()
+        .border_color(on ? t.accent : t.input).bg(on ? t.selected : t.raised).text_size(12).text_color(on ? t.foreground : t.muted)
+        .hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { this.pick[key] = value; cx.notify(); })
+        .child(label);
+    }));
+    const text = (key) => Input.new(this.inputs[key]).h(32).px(10).rounded(8).border_1().border_color(this.bad[key] ? t.blocked : t.input).bg(t.background).text_size(12.5).text_color(t.foreground);
+    const button = (id, label, primary, action) => h_flex().id(id).h(32).px(14).items_center().rounded(8)
+      .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
+      .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium().cursor_pointer()
+      .hover((s) => s.opacity(0.88)).on_click(action).child(label);
+    return v_flex().id("wranglr-settings").track_focus(this.handle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
+      .w_full().min_h(0).p(18).gap(14).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child("Wranglr settings"))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(field("Sort", pick("sort", Object.entries(SORT_LABEL)), "sort"))
+      .child(field("+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."))
+      .child(field("Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"))
+      .child(field("Worktree location", text("worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern in wranglr.json wins."))
+      .child(field("Ticket pattern", text("ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."))
+      .child(field("New spaces run", text("agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."))
+      .child(h_flex().pt(4).gap(8).justify_end()
+        .child(button("ws-cancel", "Cancel", false, () => closeOverlay(p.overlay)))
+        .child(button("ws-save", "Save", true, (_e, cx) => { this.saveSettings(); cx.notify(); })));
+  }
+
   choose(item) {
     closeOverlay(props()?.overlay);
     if (!item) return;
@@ -976,6 +1057,7 @@ export default class Wranglr extends View {
     if (this.dialog === "move") return this.renderMove();
     if (this.dialog === "input") return this.renderInput();
     if (this.dialog === "menu") return this.renderMenu();
+    if (this.dialog === "settings") return this.renderSettings();
     if (this.dialog) return div();
     return this.renderOwner(cx);
   }

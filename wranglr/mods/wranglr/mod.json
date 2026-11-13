@@ -8,6 +8,7 @@
     { "title": "Wranglr: New space in this group", "command": "wranglr.new", "about": "Start a space in the focused space's Group, as its + does" },
     { "title": "Wranglr: Name space again", "command": "wranglr.name", "about": "Redo the automatic name of the focused space" },
     { "title": "Wranglr: Fold group", "command": "wranglr.fold", "about": "Fold or unfold the focused space's Group" },
-    { "title": "Wranglr: Next sort", "command": "wranglr.sort", "about": "Recent, Kind, A-Z, Manual" }
+    { "title": "Wranglr: Next sort", "command": "wranglr.sort", "about": "Recent, Kind, A-Z, Manual" },
+    { "title": "Wranglr: Settings", "command": "wranglr.settings", "about": "Sort, the + action, worktree location, naming and what new spaces run" }
   ]
 }

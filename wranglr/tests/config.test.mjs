@@ -2,7 +2,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync, rmSync } from "node:fs";
 import { fake, reset } from "herdr";
-import { parseConfig, loadConfig, saveSetting, configPath, DEFAULT_SETTINGS } from "../mods/wranglr/config.js";
+import { parseConfig, loadConfig, saveSetting, settingError, configPath, DEFAULT_SETTINGS } from "../mods/wranglr/config.js";
 
 beforeEach(() => { reset(); rmSync(configPath(), { force: true }); });
 
@@ -104,4 +104,14 @@ test("a worktrees pattern must start with {clone} or be absolute", () => {
     assert.equal(r.config.settings.worktrees, DEFAULT_SETTINGS.worktrees);
   }
   assert.equal(DEFAULT_SETTINGS.worktrees, "{clone}/.worktrees/{branch}");
+});
+
+test("settingError names what is wrong with one setting, or gives null", () => {
+  assert.equal(settingError("sort", "az"), null);
+  assert.equal(settingError("agent", null), null);
+  assert.equal(settingError("agent", ["claude", "--model", "opus"]), null);
+  assert.equal(settingError("worktrees", "{clone}/../wt/{branch}"), null);
+  assert.equal(settingError("worktrees", ".worktrees/{branch}"), "must start with {clone} or be an absolute path");
+  assert.equal(settingError("ticket", "(unclosed"), "is not a valid regular expression");
+  assert.equal(settingError("plus", "clone"), "must be one of open, worktree");
 });

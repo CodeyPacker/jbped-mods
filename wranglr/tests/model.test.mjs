@@ -633,6 +633,16 @@ test("sort cycles recent, kind, az, manual and writes the setting", () => {
   assert.deepEqual(run({ type: "sort", value: "recent" }, w, config()).effects, [{ type: "setting", key: "sort", value: "recent" }]);
 });
 
+test("settings writes each given setting and ignores unknown keys", () => {
+  const w = world([]);
+  assert.deepEqual(run({ type: "settings", values: { plus: "worktree", autoname: true, agent: null, nope: 1 } }, w, config()).effects, [
+    { type: "setting", key: "plus", value: "worktree" },
+    { type: "setting", key: "autoname", value: true },
+    { type: "setting", key: "agent", value: null },
+  ]);
+  assert.deepEqual(run({ type: "settings" }, w, config()).effects, []);
+});
+
 test("Custom groups get readable ids, and removing one frees its spaces", () => {
   const c = config();
   const w = world([space("s1")], { repos: { s1: repo(FRONT, "/f") } });

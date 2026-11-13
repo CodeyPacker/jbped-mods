@@ -28,7 +28,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
 - Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups) or Dismiss (an empty Repo group). Right-click a Subgroup for Rename and Remove.
 - "+" on a Group starts a space there: in the Repo's main checkout, in the Workspace home, or in your home folder for a Custom group. Right-click "+" for Open here, New worktree (Repo groups) and Open on a given Machine.
-- In the header: the sort button cycles Recent, Kind, A-Z and Manual. The folder button adds a Custom group. "+" is Herdr's own new space.
+- In the header: the sort button cycles Recent, Kind, A-Z and Manual. The folder button adds a Custom group. The gear opens the settings menu, which edits the `settings` block of the config file. "+" is Herdr's own new space.
 
 ## Keys and commands
 
@@ -42,6 +42,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 | | `wranglr.name` | Name the focused space again |
 | | `wranglr.fold` | Fold the focused space's Group |
 | | `wranglr.sort` | Next sort |
+| | `wranglr.settings` | Open the settings menu |
 
 Every command is also in the palette (the `palette` mod).
 

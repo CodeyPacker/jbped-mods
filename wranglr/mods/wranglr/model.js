@@ -583,6 +583,12 @@ function doSort(a, c) {
   if (SORTS.includes(value)) c.effects.push({ type: "setting", key: "sort", value });
 }
 
+// The settings menu's Save: one setting effect per changed setting.
+const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent"];
+function doSettings(a, c) {
+  for (const key of SETTINGS) if (a.values && key in a.values) c.effects.push({ type: "setting", key, value: a.values[key] });
+}
+
 function slugId(name, taken) {
   const base = name.toLowerCase().replace(/[^a-z0-9]/g, "-");
   let id = base;
@@ -758,7 +764,7 @@ function doPlus(a, c) {
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
   select: doSelect, next: doStep, prev: doStep, plus: doPlus,
-  fold: doFold, foldFocused: doFoldFocused, sort: doSort,
+  fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings,
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,
   dismiss: doDismiss, name: doName, named: doNamed,

@@ -32,6 +32,13 @@ function parseSettings(raw, errors) {
   return s;
 }
 
+/** Why this value cannot be that setting, or null when it can. */
+export function settingError(key, value) {
+  const errors = [];
+  parseSettings({ [key]: value }, errors);
+  return errors.length ? errors[0].replace(/^settings\.\w+: /, "") : null;
+}
+
 // on: { [mkey]: object }, keeping only object entries.
 const parseOn = (on) => (isObj(on) ? Object.fromEntries(Object.entries(on).filter(([, v]) => isObj(v))) : {});
 
