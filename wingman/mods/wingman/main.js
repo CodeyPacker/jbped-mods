@@ -48,7 +48,7 @@ import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup
 import { capSteps } from "./undocap.js";
 import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighbours, toUnload, sizeError, binaryError, CHANGES_CHARS } from "./changelist.js";
 import { toLighten, HEAVY_VIEWS } from "./retain.js";
-import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, spaceOfAgent } from "./captureloop.js";
+import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, CONTROLLER, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 
 const ROW = 20, GUTTER = 58, BTN_W = 110, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment)
@@ -199,6 +199,7 @@ export default class Review extends View {
   init(_props, cx) {
     // Opened as a popup (reason or follow-up prompt): a small form, none of the pane's work.
     if (props()?.form) return this.initForm(cx);
+    if (props()?.role === CONTROLLER) return this.initController(cx);
     this.id = Math.random().toString(36).slice(2);
     this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
     this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false };
@@ -272,10 +273,7 @@ export default class Review extends View {
       }
     });
     if (this.view === "changes") this.initChanges(cx);
-    cx.timer.every(500, (cx) => this.loop.lead(cx));
-    // Renewed while a long capture pass runs too; so are the failing repos shared with the other copies.
-    cx.timer.every(1000, () => { if (this.loop.isLeader) { this.loop.lease(); this.loop.publishCaptureErrors(); } });
-    cx.timer.every(3000, (cx) => this.loop.collectAll(cx));
+    this.captureTimers(cx);
     cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(1000, (cx) => this.anchorComments(cx));
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
@@ -443,7 +441,31 @@ export default class Review extends View {
 
   // ---- capture (leader only): captureloop.js, this.loop
 
+  /** The capture loop's timers: every copy runs them, only the lease's holder does the work. */
+  captureTimers(cx) {
+    cx.timer.every(500, (cx) => this.loop.lead(cx));
+    // Renewed while a long capture pass runs too; so are the failing repos shared with the other copies.
+    cx.timer.every(1000, () => { if (this.loop.isLeader) { this.loop.lease(); this.loop.publishCaptureErrors(); } });
+    // A pass every 3 s, or every 10 s while file watches wake passes (captureloop.js collectTick).
+    cx.timer.every(500, (cx) => this.loop.collectTick(cx));
+  }
+
+  /**
+   * A capture controller (props.role "capture"): a zero-size block in the layout's `floating` list,
+   * always rendered, never hidden. It shows nothing and only runs the capture loop, which it leads
+   * over every panel copy (captureloop.js CONTROLLER).
+   */
+  initController(cx) {
+    this.role = CONTROLLER;
+    this.id = Math.random().toString(36).slice(2);
+    this.dropSleeper = addSleeper((ms) => cx.sleep(ms));
+    this.loop = new CaptureLoop({ id: this.id, log, controller: true });
+    this.captureTimers(cx);
+    log(`capture controller ${this.id} started`);
+  }
+
   close() {
+    this.loop?.close();
     this.dropSleeper?.();
     this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); this.chgScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
     // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
@@ -4821,6 +4843,7 @@ export default class Review extends View {
   }
 
   render() {
+    if (this.role === CONTROLLER) return div();
     if (this.form?.form === "menu") return this.renderMenu();
     if (this.form?.form === "settings") return this.renderSettings();
     if (this.form?.form === "keys") return this.renderKeys();

@@ -125,6 +125,18 @@ Or put Wingman in the side panel beside Files and Changes, as two panel tabs, Re
 
 A third block, `{"id": "wingman-changes", "type": "block", "content": {"mod": "wingman", "props": {"view": "changes"}}}`, adds the **Changes** tab (palette: **Wingman: Changes**, command `tabs-plus.wingmanChanges`).
 
+### The capture controller
+
+Capture (the snapshot when an agent starts a turn, and the passes that adopt changed files) runs in one Wingman copy at a time, chosen by the lease file `data/wingman-leader.json`. Add a capture controller to the layout so that copy is always on screen: an empty block in the layout root's `floating` list. It draws nothing and only runs capture. The installer adds it; by hand, add this to the root's `"floating"` list (create the list if the layout has none):
+
+```json
+{ "id": "wingman-capture", "content": { "mod": "wingman", "props": { "role": "capture" } } }
+```
+
+The lease: `{ "id", "at" }` from a panel or pane copy, `{ "id", "at", "role": "capture" }` from a controller, renewed every second and held for 5 s. A controller always leads. Panel copies never take a controller's lease while it is renewed. A controller that finds a panel copy leading adds `"ask": <its id>`, unless an ask is there already. That copy then starts no new pass, keeps the ask in its renewals, and hands the lease over (`{ "id": <ask>, "at", "role": "capture" }`) as soon as none of its passes runs: within one pass, about 0.5 s in testing. When the controller goes (a layout without it), a panel copy takes the lease once it has expired, as before. With two controllers (two windows), the one holding the lease keeps it and the other waits until it expires.
+
+The leader watches each captured repo on this computer (`watchFolder`) and runs a pass about 0.1 s after a change, at most one pass per 0.5 s. A change that only touches the git folder (objects, the index, Wingman's own review store) starts no pass; `HEAD` and branch refs do. The timer stays as a fallback: a pass every 10 s while every captured repo has a watch that has delivered events, else every 3 s. A repo whose watch fails, a repo on another machine, and a repo in WSL's own files seen from Windows (`\\wsl.localhost\…`, `\\wsl$\…`) keep the 3 s timer: on Windows, a watch there was accepted but never fired. Hook events and collect passes take turns, since both write the review index.
+
 ### Changes
 
 Every uncommitted change in the space's repos, against `HEAD`: your edits, other tools', and the agent's from before Wingman started capturing. The list on the left shows each file's status (A added or untracked, M modified, D deleted, ! conflict), its added and deleted line counts (`+12 −3`, none for binary files), and what Review says about it ("2 to review", "reviewed"). The list header shows the totals. The diff is read-only; a double-click opens the line in Edit.
@@ -289,5 +301,5 @@ Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 | `<git-dir>/wingman/` | `index.json`, `baselines/`, `capture.json`, `sums.json` (what each reviewed file had while it differed from `HEAD`), `snap.<pid>.index` while a snapshot runs (per repo) |
 | `~/.config/herdr-app/data/wingman/` | `events/` (from the hook, removed once read), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
 | the space's folder | `<folder>.code-workspace`, when you add a second repo and the folder isn't inside a repo |
-| `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which pane copy runs capture, and its log |
+| `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which copy runs capture (see The capture controller), and its log |
 | another machine's `~/.config/herdr-app/data/wingman/` | with the Claude hook installed there: `wingman-hook.sh`, `wingman-install.json`, `events/` (removed once read), `feedback/` |

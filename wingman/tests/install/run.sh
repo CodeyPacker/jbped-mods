@@ -126,8 +126,9 @@ assert [c["content"]["props"]["view"] for c in sb["children"][2:]]==["review","e
 t=[n for n in walk(b) if n.get("id")=="tabs"][0]; assert t["content"]["mod"]=="tabs-plus"
 assert t["size"]=={"weight":1.5} and t["window_drag"] is True
 p=[n for n in walk(b) if n.get("id")=="panel"][0]; assert p["max"]==2400 and p["min"]==280 and p["hidden"] is True
+assert b["floating"]==[{"id":"wingman-capture","content":{"mod":"wingman","props":{"role":"capture"}}}], b.get("floating")
 # remove our changes and compare with the original
-sb["children"]=sb["children"][:2]; t["content"]["mod"]="tabs"; p["max"]=900; del b["cloned_from"]
+sb["children"]=sb["children"][:2]; t["content"]["mod"]="tabs"; p["max"]=900; del b["cloned_from"]; del b["floating"]
 assert a==b, "other content changed"
 ' "$H/layouts/fakeship.json" "$H/layouts/fakeship-wingman.json"
   check "clone keeps the 2-space style and final newline" sh -c "sed -n 2p '$H/layouts/fakeship-wingman.json' | grep -q '^  \"id\"' && [ \"\$(tail -c1 '$H/layouts/fakeship-wingman.json' | od -An -c | tr -d ' ')\" = '\\n' ]"
@@ -172,7 +173,8 @@ sb=[n for n in walk(b) if n.get("id")=="panel-body"][0]
 assert [c["id"] for c in sb["children"]]==["files","changes","wayfinder","mine","wingman-review","wingman-edit","wingman-changes"]
 assert [n for n in walk(b) if n.get("id")=="panel"][0]["max"]==3000
 assert [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]["mod"]=="tabs-plus"
-sb["children"]=sb["children"][:4]; [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]["mod"]="tabs"
+assert [f["id"] for f in b["floating"]]==["board","wingman-capture"] and b["floating"][1]["content"]=={"mod":"wingman","props":{"role":"capture"}}
+sb["children"]=sb["children"][:4]; [n for n in walk(b) if n.get("id")=="tabs"][0]["content"]["mod"]="tabs"; b["floating"]=b["floating"][:1]
 assert a==b
 ' "$base/mine.orig" "$H/layouts/mine.json"
   check "own layout: keeps the 4-space indent" line2_is "$H/layouts/mine.json" '    '
@@ -182,6 +184,11 @@ assert a==b
   nb=$(ls "$H/layouts" | grep -c 'mine.json.bak-')
   s1=$(sha "$H/layouts/mine.json"); run_inst install $NOHOOK >/dev/null
   [ "$s1" = "$(sha "$H/layouts/mine.json")" ] && [ "$nb" = "$(ls "$H/layouts" | grep -c 'mine.json.bak-')" ] && ok "own layout: second install is byte-identical, no new backup" || bad "own layout: second install is byte-identical, no new backup"
+  # A layout patched before the capture controller existed gets it on the next install.
+  python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p,encoding="utf-8")); d["floating"]=d["floating"][:1]; json.dump(d,open(p,"w",encoding="utf-8"),indent=4)' "$H/layouts/mine.json"
+  out=$(run_inst install $NOHOOK)
+  check "own layout: an older patch gets the capture controller" pyj 'b=ld(sys.argv[1]); assert [f["id"] for f in b["floating"]]==["board","wingman-capture"]' "$H/layouts/mine.json"
+  case "$out" in *"add floating block wingman-capture"*) ok "own layout: says it added the controller" ;; *) bad "own layout: says it added the controller" "$out" ;; esac
 
   # --- status
   out=$(run_inst status)
@@ -231,7 +238,7 @@ assert a==b' "$base/fakeship.orig" "$H/layouts/fakeship-wingman.json"
   out=$(run_inst install $NOHOOK)
   check "no stack: layout byte-identical" cmp "$base/nostack.orig" "$H/layouts/nostack.json"
   check "no stack: no backup or clone created" sh -c "[ \"\$(ls '$H/layouts' | grep -c -e bak -e wingman)\" = 0 ]"
-  case "$out" in *"no side panel stack"*"wingman-review"*) ok "no stack: prints what to add by hand" ;; *) bad "no stack: prints what to add by hand" "$out" ;; esac
+  case "$out" in *"no side panel stack"*"wingman-review"*"wingman-capture"*) ok "no stack: prints what to add by hand" ;; *) bad "no stack: prints what to add by hand" "$out" ;; esac
   check "no stack: mods still installed" test -d "$H/mods/wingman"
 
   # --- flags
