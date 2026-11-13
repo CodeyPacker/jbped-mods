@@ -24,7 +24,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 ## Using it
 
 - Click a row to go to the space. Right-click it for the shipped space menu.
-- A space's agents are listed under its row, with their sub-agents under them, each with its state. Click one to go to its pane. The arrow at the end of the space's row hides them, and then shows how many there are and the most urgent one's state.
+- A space's row ends with marks for what its agents are doing: `!` for agents that need you, a spinner for working ones and a dot for done ones, each with a count above one. Idle agents show nothing. Hover for the list. Click the marks to go to the most urgent agent's pane.
 - Drag a row onto another row (it lands above, or below when you release on the row's lower half), onto a Group or Subgroup header (it goes to the end), or onto the empty area under the list (it leaves every Group).
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
 - Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group) and Settings. Right-click a Subgroup for Rename and Remove.
@@ -93,7 +93,7 @@ Every command is also in the palette (the `palette` mod).
 - `ticket`: a regular expression matched against the branch. Its first group is the ticket id at the start of the name.
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.
 - `machine`: the default Machine. "+" on a Group starts there when the Group has no `machines` of its own, or when none of them is ready. `""` is this computer. Left out, a Group starts on this computer and the header "+" starts where Herdr does. A default Machine that is away or where the Group cannot start is skipped for this computer.
-- `agents`: list each space's agents under it. `false` gives the plain list of spaces.
+- `agents`: show agent status marks on each space's row. `false` leaves them out.
 - A Workspace's `repos` are Repo ids: the remote URL without scheme, user and `.git` (`github.com/Org/Repo`). `machines` lists Machine names in order of preference, `""` being this computer. `on.<machine>.home` sets the Workspace home there. Without it, the home is the folder that holds all of the Workspace's Repos, when there is one. `on.<machine>.paths` says where a Repo is checked out when Wranglr has not seen it there yet.
 - `repos` gives the same Machines and paths for a Repo on its own.
 

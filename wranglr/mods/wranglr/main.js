@@ -5,10 +5,10 @@
 // runs the effects and draws the Tree. The copy in the layout owns the state; overlay copies
 // of this mod (move dialog, menus, text input) send their action to it through shared state.
 
-import { View, div, svg, image } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import {
-  spaces, machines, panes, agents, terminals, focused, run, openOverlay, closeOverlay, props, exec, hc, theme,
+  spaces, machines, panes, agents, focused, run, openOverlay, closeOverlay, props, exec, hc, theme,
   shared, setShared, watchFolder, window, layout, home, nextCommand,
 } from "herdr";
 import { emptyState, mkey, clonedMap, arrange, act, workspaceHome } from "./model.js";
@@ -52,7 +52,7 @@ const SORT_LABEL = { recent: "Recent", kind: "Kind", az: "A-Z", manual: "Manual"
 const KIND_ICON = { workspace: "layers", repo: "git-branch", custom: "folder" };
 const icon = (name) => `mods/workspace-chrome/${name}.svg`;
 
-// Agents under their space. The label rule and the status marks are those of Herdr's `agents` mod.
+// Agent status on a space's row. The label rule and the marks are those of Herdr's `agents` mod.
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
@@ -74,12 +74,6 @@ function agentLabel(a, tab, lead) {
   const live = clean(lead?.pane === a.pane ? lead.title : a.title);
   const telling = live && live !== prog && !/^[~/]|^[A-Za-z]:\\/.test(live) && !live.includes("@") && live.toLowerCase() !== a.program?.key;
   return telling ? live : prog || a.title || "agent";
-}
-
-// An agent's icon from the app's program table: a one-color glyph or a picture.
-function programIcon(p, size, color) {
-  if (!p?.icon) return null;
-  return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
 // A space speaks up only when something in it needs you.
@@ -134,7 +128,6 @@ export default class Wranglr extends View {
     this.pressed = null; // { kind: "row" | "group" | "sub", id, group?, sub? } while the button is down
     this.over = null; // the drop target under the pointer: { kind, id, group?, sub?, below }
     this.machines = [];
-    try { this.agentFold = JSON.parse(localStorage.getItem("agents.folded") ?? "{}") ?? {}; } catch { this.agentFold = {}; }
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
 
@@ -697,12 +690,13 @@ export default class Wranglr extends View {
     const w = live.get(r.id) ?? r.space;
     const name = w?.name ?? r.name;
     const g = w ? this.git[where(w, ps)] ?? null : null;
+    const marks = r.dim || !d.agents.get(r.id)?.length ? null : this.agentMarks(r.id, d.agents.get(r.id), d);
     const content = h_flex().gap(9).items_center().pl(indent)
       .child(this.avatar(r.id, name, t))
       .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(name))
       .when(Boolean(r.machine), (el) => el.child(this.chip(r.machine, t)))
       .child(g && !r.dim ? this.gitTail(g, name, t) : div().flex_1())
-      .when(!r.dim && (d.agents.get(r.id)?.length ?? 0) > 0, (el) => el.child(this.agentFoldButton(r.id, d.agents.get(r.id), t)));
+      .when(Boolean(marks), (el) => el.child(marks));
     const el = v_flex().relative().id(`space-${r.id}`).px(8).h(30).flex_none().justify_center().rounded(8);
     if (r.dim) return el.opacity(0.5).child(content);
     const on = !!w?.active;
@@ -720,91 +714,44 @@ export default class Wranglr extends View {
   }
 
   rows(list, at, indent, d) {
-    return list.flatMap((r, i) => [
-      this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d),
-      ...(r.dim || this.agentFold[r.id] ? [] : this.agentRows(r.id, indent, d)),
-    ]);
+    return list.map((r, i) => this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d));
   }
 
-  // Agents and their sub-agents, by space. Empty when the setting is off.
+  // Each space's agents and what each row's tooltip calls them. Empty when the setting is off.
   agentData(sp, ps) {
-    const bySpace = new Map(), kids = new Map(), labels = new Map();
-    if (this.config.settings.agents === false) return { agents: bySpace, kids, labels };
-    const list = agents();
-    const listed = new Set(list.map((a) => a.address));
+    const bySpace = new Map(), labels = new Map();
+    if (this.config.settings.agents === false) return { agents: bySpace, labels };
     const leads = leadPanes(ps);
     const tabs = new Map(sp.flatMap((s) => s.tabs ?? []).map((tab) => [tab.id, tab]));
-    for (const a of list) {
+    for (const a of agents()) {
       if (!bySpace.has(a.space)) bySpace.set(a.space, []);
       bySpace.get(a.space).push(a);
       labels.set(a.address, agentLabel(a, tabs.get(a.tab), leads.get(a.tab)));
     }
-    // Sub-agents: terminals started under an agent that have no pane of their own, and the
-    // in-process ones herdr-core keeps in `records` (as the agents-plus mod reads them).
-    let all = [];
-    try { all = terminals() ?? []; } catch {}
-    const word = (s) => (s === "error" ? "blocked" : s === "done" ? "idle" : RANK[s] ? s : "working");
-    const add = (parent, kid) => { if (!kids.has(parent)) kids.set(parent, []); kids.get(parent).push(kid); };
-    for (const tm of all) {
-      if (tm?.state !== "live") continue;
-      if (tm.parent && listed.has(tm.parent) && !listed.has(tm.address))
-        add(tm.parent, { id: tm.address, name: tm.name || tm.template || tm.program?.name || tm.address, status: word(tm.status) });
-      if (listed.has(tm.address) && tm.records && typeof tm.records === "object")
-        for (const [id, r] of Object.entries(tm.records)) add(tm.address, { id: `rec:${tm.address}:${id}`, name: r?.title || id, status: word(r?.state || "working") });
-    }
-    return { agents: bySpace, kids, labels };
+    return { agents: bySpace, labels };
   }
 
-  toggleAgents(id) {
-    if (this.agentFold[id]) delete this.agentFold[id]; else this.agentFold[id] = true;
-    const live = new Set(spaces().map((s) => s.id));
-    for (const k of Object.keys(this.agentFold)) if (!live.has(k)) delete this.agentFold[k];
-    try { localStorage.setItem("agents.folded", JSON.stringify(this.agentFold)); } catch {}
-  }
-
-  // On a space's row: hides or shows its agents. Hidden, it shows how many there are and the most urgent one's state.
-  agentFoldButton(id, list, t) {
-    const folded = !!this.agentFold[id];
-    const top = list.reduce((best, a) => ((RANK[a.status] ?? 0) > (RANK[best.status] ?? 0) ? a : best), list[0]);
-    return h_flex().id(`agents-fold-${id}`).flex_none().h(20).px(3).gap(4).items_center().rounded(5).text_size(11).text_color(t.dim)
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(folded ? `Show ${list.length} agent${list.length > 1 ? "s" : ""}` : "Hide agents")
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.toggleAgents(id); cx.notify(); })
-      .when(folded, (el) => el.child(this.agentStatus(t, top.status, true)).child(String(list.length)))
-      .child(svg(icon(folded ? "chevron-right" : "chevron-down")).size(10).flex_none());
-  }
-
-  // compact: a ! for blocked, where there is no room for "Needs you".
-  agentStatus(t, status, compact = false) {
-    if (status === "working") return svg(icon("spinner")).size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
-    if (status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
-    // Idle: a ring. Done: a dot.
-    if (status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
-    return div().size(7).mx(3).flex_none().rounded(4).bg(status === "done" ? t.done ?? t.dim : t.dim + "00");
-  }
-
-  // A space's agents under its row, each with its sub-agents under it. A click goes to the agent's pane.
-  agentRows(id, indent, d) {
+  // What a space's agents are doing, at the end of its row: one mark per state that has agents
+  // (needs you, working, done), with a count above one. Idle agents show nothing.
+  // A click goes to the most urgent agent's pane.
+  agentMarks(id, list, d) {
     const { t } = d;
-    return (d.agents.get(id) ?? []).flatMap((a) => {
-      const pic = programIcon(a.program, 14, t.muted);
-      const quiet = a.status === "idle" && !a.focused;
-      const head = h_flex().id(`wa-${a.address}`).h(26).flex_none().pl(indent + 35).pr(8).gap(8).items_center().rounded(7).cursor_pointer().text_size(12)
-        .when(a.focused, (el) => el.bg(t.selected))
-        .hover((s) => s.bg(t.hover))
-        .on_click(() => run("pane.focus", { pane: a.pane }))
-        .when(Boolean(pic), (el) => el.child(pic))
-        .child(div().flex_1().min_w(0).truncate().text_color(quiet ? t.muted : t.foreground).child(d.labels.get(a.address) ?? ""))
-        .child(this.agentStatus(t, a.status));
-      const subs = (d.kids.get(a.address) ?? []).map((k) => h_flex().id(`wk-${k.id}`).h(24).flex_none().pl(indent + 57).pr(8).gap(8).items_center().rounded(7).cursor_pointer().text_size(11.5)
-        .hover((s) => s.bg(t.hover))
-        .on_click(() => run("pane.focus", { pane: a.pane }))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(k.name))
-        .child(this.agentStatus(t, k.status, true)));
-      return [head, ...subs];
-    });
+    const shown = ["blocked", "working", "done"].map((status) => [status, list.filter((a) => a.status === status).length]).filter(([, n]) => n > 0);
+    if (!shown.length) return null;
+    const top = list.reduce((best, a) => ((RANK[a.status] ?? 0) > (RANK[best.status] ?? 0) ? a : best), list[0]);
+    const word = { blocked: "needs you", working: "working", done: "done", idle: "idle" };
+    return h_flex().id(`agents-${id}`).flex_none().h(20).px(3).gap(5).items_center().rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .tooltip(list.map((a) => `${d.labels.get(a.address) ?? "agent"}: ${word[a.status] ?? a.status}`).join("\n"))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); run("pane.focus", { pane: top.pane }); })
+      .children(shown.map(([status, n]) => h_flex().gap(2).items_center().child(this.agentStatus(t, status)).when(n > 1, (el) => el.child(String(n)))));
+  }
+
+  agentStatus(t, status) {
+    if (status === "working") return svg(icon("spinner")).size(12).flex_none().text_color(t.working).spin(900);
+    if (status === "blocked") return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
+    return div().size(7).mx(2).flex_none().rounded(4).bg(t.done ?? t.dim);
   }
 
   plusButton(id, g, sub, t) {
@@ -969,7 +916,7 @@ export default class Wranglr extends View {
     this.kick(cx);
 
     const ps = panes();
-    const d = { t, live: new Map(sp.map((s) => [s.id, s])), ps, ...(collapsed ? { agents: new Map(), kids: new Map(), labels: new Map() } : this.agentData(sp, ps)) };
+    const d = { t, live: new Map(sp.map((s) => [s.id, s])), ps, ...(collapsed ? { agents: new Map(), labels: new Map() } : this.agentData(sp, ps)) };
     const sort = this.config.settings.sort;
     const header = h_flex().h(31).pl(16).pr(10).gap(2).items_center().text_size(11.5).text_color(t.dim)
       .when(collapsed, (el) => el.pl(0).pr(0).justify_center())
@@ -1212,7 +1159,7 @@ export default class Wranglr extends View {
         "Where + starts a space when the Group has no Machines of its own. Not set: this computer for a Group, Herdr's choice for the header +."),
       this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."),
       this.field(t, "Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"),
-      this.field(t, "Agents under their space", pick("agents", [[true, "On"], [false, "Off"]]), "agents", "Each space's agents and their sub-agents. The arrow on a space's row hides them."),
+      this.field(t, "Agent status on each space", pick("agents", [[true, "On"], [false, "Off"]]), "agents", "Marks on a space's row for agents that need you, are working or are done. Click them to go to the most urgent one."),
       this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern wins."),
       this.field(t, "Ticket pattern", this.textInput(t, "ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."),
       this.field(t, "New spaces run", this.textInput(t, "agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."),
