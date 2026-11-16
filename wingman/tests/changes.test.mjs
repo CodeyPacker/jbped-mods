@@ -1,4 +1,5 @@
-import { parseStatus, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, parseNumstat, countLines, STATUS, STATUS_V2, parseStatusV2, onDisk } from "../mods/wingman/changes.js";
+import { parseStatus, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, parseNumstat, countLines, STATUS, STATUS_V2, parseStatusV2, onDisk, headDiffArgs, fitHunks } from "../mods/wingman/changes.js";
+import { parseHunks, splitLines } from "../mods/wingman/model.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -83,4 +84,37 @@ assert.deepEqual(onDisk([{ xy: " M", rel: "a" }, { xy: " D", rel: "b" }, { xy: "
   assert.throws(() => inHeadOf(undefined, "ab"));
   rmSync(h, { recursive: true, force: true });
 }
+// A repo with core.autocrlf: HEAD's blob has LF, the working file CRLF (as a checkout writes it) and
+// one changed line. Comparing the two texts directly (diffHunks: git diff --no-index, which follows
+// the global config, not the repo's) showed every line as changed where nothing turns CRLF to LF;
+// the repo's own diff (headDiffArgs) shows the one line, as --numstat counts it.
+{
+  const h = mkdtempSync(tmpdir() + "/wm-crlf-"), g = (...a) => execFileSync("git", a, { cwd: h, encoding: "utf8" });
+  g("init", "-q"); g("config", "user.email", "t@t"); g("config", "user.name", "t"); g("config", "core.autocrlf", "true");
+  const lf = Array.from({ length: 20 }, (_, i) => `line ${i + 1}\n`).join("");
+  writeFileSync(`${h}/c.txt`, lf); g("add", "c.txt"); g("commit", "-qm", "base");
+  rmSync(`${h}/c.txt`); g("checkout", "-q", "--", "c.txt");
+  const disk = readFileSync(`${h}/c.txt`, "utf8");
+  assert.ok(disk.includes("\r\n"), "checked out with CRLF");
+  writeFileSync(`${h}/c.txt`, disk.replace("line 7\r\n", "line 7 changed\r\n"));
+  const C = readFileSync(`${h}/c.txt`, "utf8"), B = g("show", "HEAD:c.txt");
+  assert.ok(!B.includes("\r"));
+  const out = g(...headDiffArgs("c.txt"));
+  const hunks = fitHunks(parseHunks(out), splitLines(B).length, splitLines(C).length);
+  assert.deepEqual(hunks, [{ o: 6, oc: 1, n: 6, nc: 1 }]);
+  const ns = parseNumstat(g(...NUMSTAT)).get("c.txt");
+  assert.deepEqual([ns.add, ns.del], [hunks.reduce((n, x) => n + x.nc, 0), hunks.reduce((n, x) => n + x.oc, 0)]);
+  // the texts themselves differ on every line (the line ending), which is what a plain compare saw
+  assert.equal(splitLines(B).filter((l, i) => l !== splitLines(C)[i]).length, 20);
+  // An LF working file in the same repo (written by a tool, never checked out): still one line.
+  writeFileSync(`${h}/c.txt`, lf.replace("line 3\n", "line 3 changed\n"));
+  assert.deepEqual(fitHunks(parseHunks(g(...headDiffArgs("c.txt"))), 20, 20), [{ o: 2, oc: 1, n: 2, nc: 1 }]);
+  rmSync(h, { recursive: true, force: true });
+}
+// fitHunks: hunks that don't fit the texts are refused (the caller diffs the texts itself).
+assert.deepEqual(fitHunks([], 3, 3), []);
+assert.equal(fitHunks([], 3, 4), null); // a line more, but no hunk says where
+assert.equal(fitHunks([{ o: 2, oc: 1, n: 2, nc: 1 }], 2, 3), null); // past HEAD's end
+assert.equal(fitHunks([{ o: 1, oc: 1, n: 0, nc: 1 }], 3, 3), null); // unchanged runs disagree
+assert.deepEqual(fitHunks([{ o: 1, oc: 0, n: 1, nc: 2 }, { o: 3, oc: 1, n: 5, nc: 0 }], 4, 5), [{ o: 1, oc: 0, n: 1, nc: 2 }, { o: 3, oc: 1, n: 5, nc: 0 }]);
 console.log("changes tests pass");

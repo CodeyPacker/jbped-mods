@@ -38,12 +38,12 @@ import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
 import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
 import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS, ownerView, ownedAction, handoff, HANDOFF_MS } from "./cmdroute.js";
-import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
+import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines, headDiffArgs, fitHunks } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal, allowedIn } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
-import { splitLines } from "./model.js";
+import { splitLines, parseHunks } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome } from "./workspace.js";
 import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, rootId, idOf, mapLimit, addSleeper } from "./remote.js";
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
@@ -1646,10 +1646,18 @@ export default class Review extends View {
       if (Btext.includes("\0") || Ctext?.includes("\0")) return { ...f, inHead, error: "binary file" };
       // The diff runs here, on temp copies (merge.js), wherever the texts came from.
       crumb(`changeTexts: before diffHunks ${rel} B=${Btext.length} C=${Ctext?.length ?? 0}`, "changes");
-      const hunks = await diffHunks(Btext, Ctext ?? "");
+      // The repo's git diffs a file it has, by the repo's line-ending rules (a CRLF checkout of an LF
+      // blob is one changed line, not all of them); a new or deleted file, or hunks that don't fit, here.
+      const hunks = (inHead && typeof Ctext === "string" && await this.headHunks(st, rel, Btext, Ctext)) || await diffHunks(Btext, Ctext ?? "");
       crumb(`changeTexts: after diffHunks ${rel} hunks=${hunks.length}`, "changes");
       return { ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks, toTok: true };
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
+  }
+
+  /** A file's change against HEAD as the repo's git sees it (changes.headDiffArgs), when its hunks fit the texts; else null. */
+  async headHunks(st, rel, Btext, Ctext) {
+    const r = await this.git(st, headDiffArgs(rel)).catch(() => null);
+    return r?.code === 0 ? fitHunks(parseHunks(String(r.stdout)), splitLines(Btext).length, splitLines(Ctext).length) : null;
   }
 
   /** changeTexts' result highlighted (an error stays as it is). */

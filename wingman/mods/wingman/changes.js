@@ -101,6 +101,28 @@ export function commitCommands(paths, message, specFile) {
   return [[LITERAL, "add", "-A", ...from], [LITERAL, "commit", "-m", message.trim(), ...from]];
 }
 
+/**
+ * git arguments for one file's uncommitted change against HEAD, as the repo's git sees it: its
+ * line-ending rules (core.autocrlf, .gitattributes eol) apply, so a CRLF checkout of an LF blob shows
+ * only the lines that changed, as `git diff --numstat` counts them. -U0 hunks (model.parseHunks).
+ */
+export const headDiffArgs = (rel) => [...READ, LITERAL, "diff", "HEAD", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--diff-algorithm=minimal", "--no-renames", "--", rel];
+
+/**
+ * `hunks` (from headDiffArgs' output) when they fit texts of `nB` (HEAD) and `nC` (the working file)
+ * lines: in order, inside both, and the unchanged lines agree. null otherwise (a filter that changes
+ * line counts, such as Git LFS, or a binary file): the caller diffs the texts itself.
+ */
+export function fitHunks(hunks, nB, nC) {
+  let o = 0, n = 0, ob = 0, nb = 0;
+  for (const h of hunks) {
+    if (h.o < o || h.n < n || h.o + h.oc > nB || h.n + h.nc > nC) return null;
+    if (h.o - o !== h.n - n) return null; // the unchanged run before it has the same length on both sides
+    o = h.o + h.oc; n = h.n + h.nc; ob += h.oc; nb += h.nc;
+  }
+  return nB - ob === nC - nb ? hunks : null;
+}
+
 /** git arguments for line counts of uncommitted changes against HEAD. */
 export const NUMSTAT = [...READ, "diff", "HEAD", "--numstat", "-z", "--no-renames"];
 /** The same in a repo with no commits yet: staged, then unstaged (run both, pass both outputs to parseNumstat). */
