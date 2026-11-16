@@ -1293,6 +1293,7 @@ export default class Wayfindr extends View {
     if (action === "close" || action === "back" || action === "no") return this.closeStep(cx);
     if (action === "refresh") return layer === "pr" || layer === "review" ? this.fetchPr(cx, { force: true }) : this.reload(cx);
     if (action === "viewBoard" || action === "viewPrs") { this.showView(action === "viewBoard" ? "board" : "prs", cx); return; }
+    if (action === "settings") { this.openSettings(cx); return; }
     if (layer === "board" || layer === "ticket") {
       if (nav || ["colPrev", "colNext", "moveLeft", "moveRight"].includes(action)) { this.boardAct(action, cx); return; }
       const cc = this.cursorCard();

@@ -46,6 +46,7 @@ test("board: columns, moving a card, browser, copy, launch, views", () => {
   assert.equal(a("board", "s", { ...ALL_FACTS, canLaunch: false }), null);
   assert.equal(a("board", "b"), "viewBoard");
   assert.equal(a("board", "p"), "viewPrs");
+  assert.equal(a("board", ","), "settings");
   assert.equal(a("board", "c"), null); // the comment box is the detail panel's
   assert.equal(a("board", "j", NONE), null); // no cards
 });
@@ -84,6 +85,7 @@ test("prs: browser, copy, review, views and a letter per row", () => {
   assert.equal(a("prs", "s", { ...ALL_FACTS, canReview: false }), null);
   assert.equal(a("prs", "b"), "viewBoard");
   assert.equal(a("prs", "p"), "viewPrs");
+  assert.equal(a("prs", ","), "settings");
   assert.equal(a("prs", "a"), "letter");
   assert.equal(a("prs", "z"), "letter");
   assert.equal(a("prs", "a", { ...ALL_FACTS, hasRows: false }), null);

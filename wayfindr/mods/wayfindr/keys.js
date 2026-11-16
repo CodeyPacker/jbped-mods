@@ -84,6 +84,7 @@ export function keyAction(layer, k, facts = {}) {
     if (k === "s") return when(f.canReview, "review");
     if (k === "b") return act("viewBoard");
     if (k === "p") return act("viewPrs");
+    if (k === ",") return act("settings");
     if (k === "r") return act("refresh");
     if (k === "q" || k === "escape") return act("close");
     if (/^[a-z]$/.test(k) && !RESERVED.includes(k)) return when(f.hasRows, "letter");
@@ -100,6 +101,7 @@ export function keyAction(layer, k, facts = {}) {
     if (k === "s") return when(f.canLaunch, "launch");
     if (k === "b") return act("viewBoard");
     if (k === "p") return act("viewPrs");
+    if (k === ",") return act("settings");
     if (k === "r") return act("refresh");
     if (k === "q" || k === "escape") return act("close");
     if (layer === "ticket") {
@@ -122,15 +124,15 @@ const PLAIN_LABELS = new Set(["up/down", "left/right", "home/end", "shift-left/r
 const ALL = {
   board: [["up/down", "card"], ["left/right", "column"], ["home/end", "first / last"], ["shift-left/right", "move card"], ["esc", "close"],
     ["j/k", "card"], ["h/l", "column"], ["g/G", "first / last"], ["enter", "open"], ["H/L", "move card"],
-    ["s", "launch"], ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], ["r", "refresh"], ["q", "close"]],
+    ["s", "launch"], ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   ticket: [["up/down", "card"], ["left/right", "column"], ["home/end", "first / last"], ["shift-left/right", "move card"], ["esc", "close"],
     ["j/k", "card"], ["h/l", "column"], ["g/G", "first / last"], ["enter", "open"], ["H/L", "move card"],
     ["c", "comment"], ["e", "edit title"], ["m", "move to"], ["s", "launch"], ["o", "browser"], ["y", "copy URL"],
-    ["b", "Board"], ["p", "Pull Requests"], ["r", "refresh"], ["q", "close"]],
+    ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   move: [["up/down", "column"], ["esc", "close"], ["j/k", "column"], ["g/G", "first / last"], ["enter", "move here"], ["q", "close"]],
   launch: [["enter", "launch"], ["esc", "close"], ["q", "close"]],
   prs: [["up/down", "move"], ["home/end", "first / last"], ["esc", "close"], ["j/k", "move"], ["a letter", "open that row"], ["g/G", "first / last"], ["enter", "open"], ["s", "review"],
-    ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], ["r", "refresh"], ["q", "close"]],
+    ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   pr: [["up/down", "file"], ["home/end", "Overview / last file"], ["esc", "close"], ["j/k", "file"], ["g/G", "Overview / last file"], ["v", "viewed"], ["c", "checks"], ["p", "post review"],
     ["s", "review"], ["f", "fullscreen"], ["o", "browser"], ["y", "copy URL"], ["r", "refetch"], ["q", "close"]],
   review: [["up/down", "file"], ["esc", "back"], ["p", "post"], ["enter", "post"], ["j/k", "file"], ["r", "refetch"], ["q", "back"]],

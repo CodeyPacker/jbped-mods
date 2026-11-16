@@ -39,6 +39,7 @@ The keys follow CodeyPacker's mods (`run`, `jump`, `branch`) and Dockr, so they 
 | `esc` | as `q`, and leaves a text box |
 | `?` | every key that works now |
 | `b` / `p` | Board / Pull Requests view |
+| `,` | Settings (`q` or `esc` returns to the view) |
 | `o` / `y` | open the selected card or Pull Request in the browser / copy its URL |
 
 - **Board:** `h` / `l` (and `left` / `right`) previous and next Column with cards, `j` / `k` the card in the Column, `H` / `L` (and `shift-left` / `shift-right`) move the card one Column, `s` Launch, `enter` opens the detail panel, which then follows the cursor.
