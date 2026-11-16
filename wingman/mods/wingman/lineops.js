@@ -2,6 +2,7 @@
 // { from, to, text } (positions in the file's lines, text with "\n"), and where the
 // selection goes afterwards, { anchor, cur } (null anchor: no selection).
 import { body } from "./edit.js";
+import { shebangOf } from "./highlight.js";
 
 const end = (lines, l) => ({ line: l, col: body(lines[l]).length });
 const block = (lines, l1, l2) => lines.slice(l1, l2 + 1).map(body).join("\n");
@@ -51,8 +52,8 @@ export function joinLines(lines, l1, l2) {
 }
 
 // Line comment tokens by file extension; [open, close] for languages with only block comments.
-const SLASH = "js jsx mjs cjs ts tsx mts cts c h cc cpp hpp cxx cs csx java kt kts go rs swift scala dart php jsonc json5 scss less groovy gradle proto fs";
-const HASH = "py sh bash zsh fish ps1 psm1 rb pl r yml yaml toml ini cfg conf env properties tf hcl mk makefile dockerfile containerfile cmake nix gitignore dockerignore editorconfig";
+const SLASH = "js jsx mjs cjs ts tsx mts cts c h cc cpp hpp cxx hxx cs csx java kt kts go rs swift scala dart php jsonc json5 code-workspace scss less groovy gradle proto fs";
+const HASH = "py sh bash zsh fish ps1 psm1 psd1 rb pl r yml yaml toml ini cfg conf env properties tf hcl mk makefile dockerfile containerfile cmake nix gitignore dockerignore editorconfig gitconfig";
 const DASH = "sql lua hs elm ada";
 const TOKENS = {};
 for (const e of SLASH.split(" ")) TOKENS[e] = "//";
@@ -65,9 +66,12 @@ TOKENS.vim = '"';
 TOKENS.ini = ";";
 
 /** The comment syntax for a path: a line token, [open, close], or null when unknown. */
-export function commentFor(path) {
+export function commentFor(path, first) {
   const name = path.split("/").pop().toLowerCase();
   if (/^(dockerfile|containerfile|makefile)$/.test(name) || /^\.env(\..+)?$/.test(name)) return "#";
+  if (/^\.?(bashrc|bash_profile|bash_aliases|bash_logout|zshrc|zprofile|zshenv|zlogin|zlogout|profile)$/.test(name)) return "#";
+  if (/^(tsconfig|jsconfig)[^/]*\.json$/.test(name)) return "//";
+  if (!name.includes(".")) return shebangOf(first) ? "#" : null; // an extension-less script
   return TOKENS[name.split(".").pop()] ?? null;
 }
 

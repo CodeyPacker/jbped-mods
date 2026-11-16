@@ -714,9 +714,9 @@ export default class Review extends View {
   // copy of a whole text, so the cache is capped by text size too (TOK_CHARS), not only by count:
   // Herdr's one memory limit is shared by every copy of every mod.
   async tok(text, rel, cx) {
-    const key = `${languageOf(rel)}\0${text}`;
+    const lang = languageOf(rel, text.slice(0, 200)), key = `${lang}\0${text}`;
     if (!this.tokens.has(key)) {
-      const lines = await highlight(text, languageOf(rel), cx);
+      const lines = await highlight(text, lang, cx);
       if (this.tokens.has(key)) return this.tokens.get(key); // another call made it meanwhile
       this.tokens.set(key, lines);
       this.tokChars = (this.tokChars ?? 0) + key.length;
@@ -3346,7 +3346,7 @@ export default class Review extends View {
     if (!this.editable(f) || !this.cur) return;
     if (this.view === "review" || this.mode === "changes") return this.readOnly(cx);
     const sel = this.hasTextSel(), a = from ?? (sel ? this.anchor : this.cur), b = to ?? this.cur;
-    const lang = languageOf(f.rel);
+    const lang = languageOf(f.rel, body(linesOf(f)[0] ?? ""));
     const { state, cursor } = edit(f, a, b, text, (ls) => highlightLines(ls, lang));
     const last = this.history[this.history.length - 1], now = Date.now();
     if (group && last?.edit && last.group && last.key === f.key && now - last.at < 1000) last.at = now;
@@ -3477,9 +3477,9 @@ export default class Review extends View {
       copyDown: () => copyLines(lines, l1, l2, 1, anchor, cur),
       delete: () => deleteLines(lines, l1, l2, cur),
       join: () => joinLines(lines, l1, l2),
-      comment: () => toggleComment(lines, l1, l2, commentFor(f.rel), anchor, cur),
+      comment: () => toggleComment(lines, l1, l2, commentFor(f.rel, body(lines[0] ?? "")), anchor, cur),
     }[name]?.();
-    if (!op) { if (name === "comment" && !commentFor(f.rel)) { this.error = `No comment syntax known for ${base(f.rel)}`; this.paint(cx); } return; }
+    if (!op) { if (name === "comment" && !commentFor(f.rel, body(lines[0] ?? ""))) { this.error = `No comment syntax known for ${base(f.rel)}`; this.paint(cx); } return; }
     this.type(op.text, cx, { from: op.from, to: op.to });
     const g = this.file();
     this.anchor = op.anchor && this.clampPos(g, op.anchor); this.cur = this.clampPos(g, op.cur);

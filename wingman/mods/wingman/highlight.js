@@ -14,17 +14,30 @@ const LANGS = {
   cs: "csharp", csx: "csharp",
   json: "json", jsonc: "json", json5: "json", webmanifest: "json",
   md: "markdown", markdown: "markdown", mdx: "markdown",
+  sh: "bash", bash: "bash", zsh: "bash", ps1: "powershell", psm1: "powershell", psd1: "powershell",
+  py: "python", sql: "sql", go: "go", rs: "rust", toml: "toml",
+  c: "c", h: "c", cpp: "cpp", hpp: "cpp", cc: "cpp", cxx: "cpp", hxx: "cpp", java: "java", lua: "lua",
+  ini: "ini", cfg: "ini", editorconfig: "ini", gitconfig: "ini", diff: "diff", patch: "diff",
+  "code-workspace": "json",
 };
 
 // Files known by name rather than extension.
 const NAMES = [
   [/^(dockerfile|containerfile)(\..+)?$|\.dockerfile$/, "docker"],
   [/^\.env(\..+)?$|\.env$/, "properties"], // KEY=value lines and # comments
+  [/^\.?(bashrc|bash_profile|bash_aliases|bash_logout|zshrc|zprofile|zshenv|zlogin|zlogout|profile)$/, "bash"],
+  [/^(tsconfig|jsconfig)[^/]*\.json$/, "json"], // comments and trailing commas are fine for the JSON grammar
 ];
 
-export const languageOf = (path) => {
+// Files without a known name or extension: a "#!" first line names the language.
+const SHEBANGS = [[/^#!.*\b(?:ba|z|k|da|a)?sh\b/, "bash"], [/^#!.*\bpython[\d.]*\b/, "python"]];
+export const shebangOf = (first) => (typeof first === "string" && first.startsWith("#!") && SHEBANGS.find(([re]) => re.test(first))?.[1]) || null;
+
+/** The language of a file by name, else (extension-less files only) by a "#!" first line passed as `first`. */
+export const languageOf = (path, first) => {
   const name = path.split("/").pop().toLowerCase();
-  return NAMES.find(([re]) => re.test(name))?.[1] ?? LANGS[name.split(".").pop()] ?? null;
+  const byName = NAMES.find(([re]) => re.test(name))?.[1] ?? (name.includes(".") ? LANGS[name.split(".").pop()] : null);
+  return byName ?? (name.includes(".") ? null : shebangOf(first));
 };
 
 // Prism token tree -> one array of {text, type} spans per line (packed by the callers: spans.js).
@@ -37,8 +50,9 @@ function tokenLines(code, grammar) {
           if (i > 0) lines.push([]);
           if (part) lines[lines.length - 1].push({ text: part, type });
         });
-      // A token's "content" part (Markdown bold, italic, links) takes its parent's color.
-      } else walk(Array.isArray(t.content) ? t.content : [t.content], t.type === "content" ? type : t.type);
+      // A token's "content" part (Markdown bold, italic, links) takes its parent's color, and so do
+      // a diff line's "prefix" and "line" parts (inside a deleted-sign, inserted-sign, ... token).
+      } else walk(Array.isArray(t.content) ? t.content : [t.content], t.type === "content" || ((t.type === "prefix" || t.type === "line") && type) ? type : t.type);
     }
   };
   walk(Prism.tokenize(code, grammar), null);
@@ -150,6 +164,17 @@ export function color(type, t) {
     case "url": case "link": return t.ansi4;
     case "list": return t.ansi5;
     case "blockquote": case "hr": return t.dim;
+    // Bash, PowerShell, Python, SQL, Go, Rust, TOML, C and C++, Java, Lua, INI, diff
+    case "shebang": return t.dim;
+    case "parameter": return t.ansi6;
+    case "assign-left": case "environment": case "function-name": case "file-descriptor": return t.ansi6;
+    case "triple-quoted-string": case "char": case "raw-string": case "heredoc-string": case "string-interpolation": return t.ansi2;
+    case "decorator": case "annotation": case "lifetime-annotation": case "type-definition": case "directive-hash": case "label": return t.ansi3;
+    case "function-definition": case "macro": return t.ansi4;
+    case "table": case "section-name": case "section": return t.ansi5;
+    case "deleted-sign": case "deleted-arrow": case "deleted": return t.ansi1;
+    case "inserted-sign": case "inserted-arrow": case "inserted": return t.ansi2;
+    case "coord": return t.ansi6;
     default: return t.foreground;
   }
 }
