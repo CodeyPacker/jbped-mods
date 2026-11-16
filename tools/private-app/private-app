@@ -293,6 +293,17 @@ app_status_ok() { plat exec "$PA_APP_EXE" status >/dev/null 2>&1; }
 
 # ---- start -----------------------------------------------------------------------------
 
+# Starts take turns (cmd_start): one lock per Linux user, held from the snapshot of herdr-app.exe
+# processes until the new one is found. In /tmp, not the Windows drive, where flock isn't reliable.
+# A start that dies holding it releases it (the descriptor closes). An app that appears meanwhile
+# from anything else (an older copy of this script, the person opening Herdr) still makes start fail.
+PA_START_LOCK=${PA_START_LOCK:-/tmp/herdr-private-start-$(id -u).lock}
+start_lock() {
+  exec 8>>"$PA_START_LOCK" || die "cannot open the start lock $PA_START_LOCK"
+  flock -w 300 8 || die "another start held $PA_START_LOCK for 5 minutes"
+}
+start_unlock() { flock -u 8 2>/dev/null || true; exec 8>&-; }
+
 cmd_start() {
   local name="" mods=() layout="" keep=false
   while [ $# -gt 0 ]; do
@@ -353,6 +364,9 @@ open(sys.argv[1],"w").write(json.dumps(d)+"\n")' "$I_HOME/shared.json" "${layout
   [ -z "$layout" ] || cp "$layout" "$I_HOME/layouts/"
 
   # What existed before: the app pid is later found as a herdr-app.exe that is not one of these.
+  # Starts take turns from this snapshot until their app is found, so two starts at once never see
+  # each other's app as new (start_lock).
+  start_lock
   record started_at "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
   I_STARTED_TICKS=$(plat now_ticks)
   [[ $I_STARTED_TICKS =~ ^[0-9]+$ ]] || die "could not read the time"
@@ -372,6 +386,7 @@ open(sys.argv[1],"w").write(json.dumps(d)+"\n")' "$I_HOME/shared.json" "${layout
   read -r I_APP_PID I_APP_TICKS <<<"$app"
   [[ $I_APP_PID =~ ^[0-9]+$ && $I_APP_TICKS =~ ^[0-9]+$ ]] || die "app did not launch: $app"
   record app_pid "$I_APP_PID"; record app_ticks "$I_APP_TICKS"
+  start_unlock
   poll 60 app_status_ok || die "the private app did not answer status within 60 s (log: $I_ROOT/app.log); stop with: private-app stop $name"
 
   if [ -n "$layout" ]; then

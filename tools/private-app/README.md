@@ -54,6 +54,7 @@ $P stop "$n" [--keep-home]   |   $P stop --all
 ## How it works
 
 - **Launch.** The app is launched detached from WSL (`setsid env ... herdr-app.exe > app.log`). Its Windows pid is the one `herdr-app.exe` of that exe path that did not exist before the start (the pre-start list is recorded) and was created after it. Two or more candidates make `start` fail rather than guess.
+  - Starts take turns: a lock (`flock` on `/tmp/herdr-private-start-<uid>.lock`, overridable with `PA_START_LOCK`) is held from the pre-start list until the new app is found, so two starts at the same moment never take each other's app. Without it, two concurrent starts were seen to record the same app pid, and the other app was left running. The app has no argument or answer that names its home, so the lock is what tells them apart. A `herdr-app.exe` started meanwhile by anything else (a copy of this script without the lock, the person opening Herdr) still makes `start` fail.
   - A `Start-Process` launch from PowerShell does not work here. It does not return while the app runs, because the app inherits the WSL interop's stdio handles. This happens even with PowerShell's output sent to /dev/null (checked with `ping -n 6`).
 - **Mods are copied before the first start.**
   - Tested by experiment on 0.1.15: a mod copied before the first start and one copied while the app ran were both listed in `seen.json`, left byte-identical, passed `check`, and rendered as panes.
@@ -72,9 +73,10 @@ $P stop "$n" [--keep-home]   |   $P stop --all
 
 `tools/private-app/selftest.sh [--ref REV]` does the following:
 
-- Records your `herdr-app.exe` and `herdr-core.exe` processes.
+- Records your `herdr-app.exe` and `herdr-core.exe` processes (not one-shot `herdr-core.exe exec` calls, which your mods start and end all the time).
 - Runs an instance with no mod: start, status without errors, screenshot, stop, nothing left.
 - Runs an instance with Wingman from `git archive REV` (default `HEAD`, never the working tree): start, status without errors, `check` passes, opens Wingman in a tab, status without errors, screenshot, no crash events, stop, nothing left.
+- Starts two instances at the same moment: each records its own app (different pids), both answer without errors, both stop with nothing left.
 - After each instance, checks that your recorded processes are all still alive. It reports a missing one and never restarts anything.
 - Stops its instances on failure (trap).
 
