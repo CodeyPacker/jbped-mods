@@ -65,7 +65,7 @@ import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab,
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
 import { isClaude } from "./sessionlog.js";
 import { GitActions, GIT_COMMANDS } from "./gitview.js"; // G6 in Changes: sync, branches, Discard change, Generate message
-import { noteAfterUndo } from "./hunkdiscard.js";
+import { noteAfterUndo, fileDiscardWrite } from "./hunkdiscard.js";
 import { layoutOf, WANT } from "./columns.js"; // the left column of Changes and Edit at any width
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
@@ -1918,6 +1918,10 @@ export default class Review extends View {
           const r = await this.git(f.store, args);
           if (r.code !== 0) throw new Error(`git ${args[1]}: ${(r.stderr || r.stdout).trim()}`);
         }
+        // A file under review: what the discard put back is the user's own edit, so the baseline takes it
+        // and Review shows nothing for the file (not the lines put back as the agent's changes).
+        const e = (await f.store.index())[f.rel];
+        if (e) { const rf = await f.store.load(f.rel, e), w = fileDiscardWrite(rf); if (w) await f.store.apply(rf, w); }
         s().error = null; s().commitNote = `Discarded ${f.rel}`;
       } catch (e) { s().error = String(e.message ?? e); }
       await this.loadChanges(cx);
