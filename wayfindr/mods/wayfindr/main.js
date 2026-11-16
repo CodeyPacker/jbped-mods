@@ -640,7 +640,7 @@ export default class Wayfindr extends View {
       let names = [];
       try { names = (await fs.readdir(dir)).map((e) => (typeof e === "string" ? e : e?.name)); } catch { continue; } // no folder yet
       for (const name of prunePrKeys(names, summaries)) {
-        try { await fs.rm(`${dir}/${name}`, { force: true }); } catch { /* next list fetch */ }
+        try { await fs.unlink(`${dir}/${name}`); } catch { /* next list fetch */ } // Herdr's fs has unlink, not rm
       }
     }
     const listed = new Set(summaries.map((s) => s.key)), open = this.selectedPr?.pr.key;
