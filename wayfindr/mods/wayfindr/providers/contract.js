@@ -58,8 +58,10 @@
 // PullRequests  pullRequests()'s answer (D6): { me, mine: PrSummary[], needsReview: PrSummary[], more: { mine, needsReview } }
 //   mine       open and draft PRs the Account authored; needsReview: open PRs that ask it for a review
 //   more       how many more matched than were fetched
-// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt?, checks }
+// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt?, head, checks }
 //   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
+//   head       the PR's head commit (GitHub headRefOid, Azure lastMergeSourceCommit.commitId), or null (#31):
+//              a head that differs from the cached detail's refetches the detail (prcache.js detailStale)
 //   checks     the head commit's checks on the whole (#26): "pass" | "fail" | "pending" | "none", or null when
 //              the Provider didn't fetch them (Azure: one call per PR is too many for the list)
 // PrDetail     pullRequest()'s answer (#1): one Pull Request with its description, comments and files

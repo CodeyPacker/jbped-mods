@@ -172,7 +172,7 @@ export function mapTicket(data, ref) {
 
 // Both PR sections in one request: search allows 30 requests a minute.
 // The list takes only the rollup's state (#26): the checks themselves come with the detail.
-const PR_LIST_FIELDS = `... on PullRequest { id number title url isDraft updatedAt author { login ... on User { name } } repository { nameWithOwner }
+const PR_LIST_FIELDS = `... on PullRequest { id number title url isDraft updatedAt headRefOid author { login ... on User { name } } repository { nameWithOwner }
     commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`;
 export const PRS_QUERY = `query($mine: String!, $review: String!) {
   viewer { login }
@@ -191,6 +191,7 @@ export function mapPrs(nodes) {
     repo: n.repository.nameWithOwner, draft: Boolean(n.isDraft),
     author: { id: n.author?.login ?? "ghost", name: n.author?.name || n.author?.login || "ghost" },
     updatedAt: n.updatedAt ?? null,
+    head: typeof n.headRefOid === "string" && n.headRefOid ? n.headRefOid : null,
     checks: ROLLUP_STATE[rollupOf(n)?.state] ?? "none",
   }));
 }

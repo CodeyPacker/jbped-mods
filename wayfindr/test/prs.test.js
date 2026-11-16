@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { github, mapPrs, prSearches } from "../mods/wayfindr/providers/github.js";
+import { github, mapPrs, prSearches, PRS_QUERY } from "../mods/wayfindr/providers/github.js";
 import { byRepo } from "../mods/wayfindr/providers/contract.js";
 import { loadPullRequests } from "../mods/wayfindr/flow.js";
 import { parseCache, serializeCache, cachedPrs, withPrs, withBoard, prsKey } from "../mods/wayfindr/cache.js";
@@ -13,9 +13,16 @@ const pr = (n, repo, extra = {}) => ({
 test("PRs map to summaries, drafts marked, odd nodes skipped", () => {
   const [a, b] = mapPrs([pr(1, "o/web", { isDraft: true }), {}, pr(2, "o/api", { author: null })]);
   assert.deepEqual(a, { key: "pr-1", id: "web#1", title: "T1", url: "https://github.com/o/web/pull/1", repo: "o/web", draft: true,
-    author: { id: "ann", name: "Ann Lee" }, updatedAt: "2026-11-01T00:00:00Z", checks: "none" });
+    author: { id: "ann", name: "Ann Lee" }, updatedAt: "2026-11-01T00:00:00Z", head: null, checks: "none" });
   assert.equal(b.draft, false);
   assert.deepEqual(b.author, { id: "ghost", name: "ghost" });
+});
+
+test("a GitHub PR row carries its head commit, from headRefOid in the list query (#31)", () => {
+  const sha = "a".repeat(40);
+  assert.equal(mapPrs([pr(1, "o/web", { headRefOid: sha })])[0].head, sha);
+  assert.equal(mapPrs([pr(1, "o/web", { headRefOid: null })])[0].head, null);
+  assert.match(PRS_QUERY, /headRefOid/);
 });
 
 test("a GitHub PR row's checks come from its head commit's rollup state (#26)", () => {
@@ -86,10 +93,17 @@ const azPr = (id, project, repo, extra = {}) => ({
 test("Azure PR list entries map to summaries dated by creation", () => {
   assert.deepEqual(mapPrSummary(azPr(4, "My Proj", "web", { isDraft: true }), ORG), {
     key: "r-web!4", id: "web!4", title: "A4", url: `${ORG}/My%20Proj/_git/web/pullrequest/4`, repo: "My Proj/web", draft: true,
-    author: { id: "u-ann", name: "Ann Lee" }, updatedAt: null, createdAt: "2026-11-04T00:00:00Z", checks: null,
+    author: { id: "u-ann", name: "Ann Lee" }, updatedAt: null, createdAt: "2026-11-04T00:00:00Z", head: null, checks: null,
   });
   const g = byRepo([mapPrSummary(azPr(1, "P", "web"), ORG), mapPrSummary(azPr(3, "P", "web"), ORG)]);
   assert.deepEqual(g[0].prs.map((p) => p.id), ["web!3", "web!1"]);
+});
+
+test("an Azure PR row carries lastMergeSourceCommit as its head, 40 hex chars only (#31)", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  assert.equal(mapPrSummary(azPr(1, "P", "web", { lastMergeSourceCommit: { commitId: sha } }), ORG).head, sha);
+  assert.equal(mapPrSummary(azPr(1, "P", "web", { lastMergeSourceCommit: { commitId: "abc" } }), ORG).head, null);
+  assert.equal(mapPrSummary(azPr(1, "P", "web"), ORG).head, null);
 });
 
 test("Azure lists every project (or the selected repos' projects) with the creator and reviewer filters for the signed-in user", async () => {

@@ -247,6 +247,7 @@ export function mapPrSummary(pr, org) {
     repo: `${project}/${repo.name ?? ""}`, draft: Boolean(pr.isDraft),
     author: { id: c.id ?? "", name: c.displayName ?? c.uniqueName ?? "" },
     updatedAt: null, createdAt: pr.creationDate ?? null,
+    head: /^[0-9a-f]{40}$/i.test(String(pr.lastMergeSourceCommit?.commitId ?? "")) ? pr.lastMergeSourceCommit.commitId : null,
     checks: null, // one call per PR is too many for the list (#26)
   };
 }
