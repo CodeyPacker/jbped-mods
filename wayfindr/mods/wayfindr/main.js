@@ -5,6 +5,7 @@
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
+import * as fs from "fs/promises";
 import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
@@ -15,6 +16,7 @@ import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPromp
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
 import { diffRows, longestLine } from "./prdiff.js";
+import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads } from "./prfiles.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -26,6 +28,11 @@ const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for th
 const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
 // The Pull Request overlay's width as a fraction of Wayfindr's: 60% to start, dragged by its left edge.
 const PR_W_KEY = "wayfindr.prWidth", PR_W_DEFAULT = 0.6, PR_W_MIN = 0.3, PR_W_MAX = 0.95;
+// The overlay's file rail (#24): 210 px to start, dragged by its right edge.
+const PR_RAIL_KEY = "wayfindr.prRail", PR_RAIL_DEFAULT = 210, PR_RAIL_MIN = 140, PR_RAIL_MAX = 560;
+// Viewed marks, one file per Pull Request: { head, files: { [path]: true } }, under Herdr's home.
+const VIEWED_DIR = "data/wayfindr/viewed";
+const viewedDir = () => `${appHome()}/${VIEWED_DIR}`.replace(/\\/g, "/");
 const DIFF_LINES = 500; // a patch's rows shown before "Show N more lines"
 const DIFF_CHAR_W = 7, DIFF_GUTTER = 80; // about one terminal-font character at 11.5 px; number, mark and gaps
 const PR_SITE = { github: "GitHub", azure: "Azure DevOps" }; // where API diffs come from
@@ -247,7 +254,12 @@ export default class Wayfindr extends View {
     this.cloneFind = {}; // settings: "<account id>:<repo>" -> { status: "loading" | "none" | "choose" | "error", hits, error }
     this.selectedPr = null; // { account, pr }: the Pull Request in the detail panel
     this.prDetails = {}; // pr key -> { status, data, error }
-    this.prFolds = {}; // pr key -> { file path -> "open" | "folded" | "all" }
+    this.prAll = {}; // pr key -> { file path -> true }: every diff row shows, not only the first DIFF_LINES
+    this.prShown = {}; // pr key -> the shown file's path, or null for the Overview (#24)
+    this.prLast = null; // the last opened Pull Request's key: opening another shows its Overview
+    this.prViewed = {}; // pr key -> { head, files: { path -> true }, file, text, saving }: the viewed marks (D8)
+    this.prThreadsOpen = {}; // pr key -> Set of resolved thread ids drawn open (#25)
+    this.railDrag = null; // the rail's edge drag: { x, from, w }
     this.editing = null; // the title being edited: { key, input, status, error }
     this.commentBox = TextareaState.new({ placeholder: "Write a comment (markdown)", rows: 3 });
     this.commentBox.set_auto_grow(3, 10);
@@ -457,7 +469,7 @@ export default class Wayfindr extends View {
       const now = parsed.profile?.name ?? null;
       if (now !== before) {
         this.selected = null; this.fetchTicketLater = false; this.moveOpen = null;
-        this.selectedPr = null; this.fetchPrLater = false; this.prFolds = {};
+        this.selectedPr = null; this.fetchPrLater = false; this.prAll = {}; this.prShown = {}; this.prLast = null; this.prViewed = {}; this.prThreadsOpen = {};
         this.launch = null; this.reviews = {}; this.editing = null; this.typing = false;
         this.commenting = null; this.moving = null; this.cursor = null;
       }
@@ -648,6 +660,7 @@ export default class Wayfindr extends View {
 
   // Opens the Pull Request panel, or switches it to another.
   openPr(accountId, pr, cx) {
+    if (this.prLast !== pr.key) { this.prShown[pr.key] = null; this.prLast = pr.key; }
     this.selectedPr = { account: accountId, pr };
     this.handle.focus(); // the row's click stops the root's, which would focus: Esc needs it
     if (this.prDetails[pr.key]?.status !== "ok") this.fetchPr(cx);
@@ -693,8 +706,77 @@ export default class Wayfindr extends View {
       }
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.prDetails[key] = next;
+      if (next.status === "ok") this.loadViewed(key, next.data, cx);
       cx.notify();
     });
+  }
+
+  // The viewed marks for the detail's head (D8): read from the PR's file, kept only when saved on the same head.
+  // Without a head they live in memory only. Marks made while the file is read are kept.
+  loadViewed(key, d, cx) {
+    const head = d?.head ?? null, cur = this.prViewed[key];
+    if (!head) {
+      if (!cur || cur.head) this.prViewed[key] = { head: null, files: {}, file: null, text: null };
+      return;
+    }
+    if (cur?.head === head) return;
+    const entry = { head, files: {}, file: `${viewedDir()}/${viewedKey(d)}.json`, text: null };
+    this.prViewed[key] = entry;
+    cx.spawn(async (cx) => {
+      let text = null, saved = null;
+      try { text = await readTextFile(entry.file); } catch { /* none yet */ }
+      try { saved = JSON.parse(text ?? "null"); } catch { /* unreadable: start over */ }
+      entry.text = text;
+      entry.files = { ...applyViewed(saved, head), ...entry.files };
+      cx.notify();
+    });
+  }
+
+  // Marks or unmarks one file, and saves at once when there is a head. Saves run one after another.
+  toggleViewed(key, path, cx) {
+    const v = (this.prViewed[key] ??= { head: null, files: {}, file: null, text: null });
+    if (v.files[path]) delete v.files[path]; else v.files[path] = true;
+    cx.notify();
+    if (!v.file) return;
+    const before = v.saving ?? Promise.resolve();
+    let done;
+    v.saving = new Promise((r) => { done = r; });
+    cx.spawn(async () => {
+      await before;
+      try { await this.saveViewed(v); } catch { /* the marks stay in memory */ }
+      done();
+    });
+  }
+
+  // Compare-and-swap on the text read before; on a conflict, read again and write once more.
+  async saveViewed(v) {
+    const text = JSON.stringify({ head: v.head, files: v.files }, null, 2);
+    await fs.mkdir(viewedDir(), { recursive: true });
+    try { await writeTextFile(v.file, text, v.text); } catch {
+      const cur = await readTextFile(v.file);
+      await writeTextFile(v.file, text, cur ?? null);
+    }
+    v.text = text;
+  }
+
+  // The rail's files in order: code, then tests, docs and generated files.
+  railOrder(d) {
+    const g = groupFiles(d?.files);
+    return [...g.code, ...g.side];
+  }
+
+  // Keys while the Pull Request overlay is open (D5): down and up through the Overview and the rail's files,
+  // home to the Overview, v marks the shown file viewed. True when the key was used.
+  prKey(key, cx, mods = {}) {
+    const sel = this.selectedPr;
+    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v"].includes(key)) return false;
+    const k = sel.pr.key, d = this.prDetails[k]?.data;
+    const order = this.railOrder(d).map((f) => f.path), cur = this.prShown[k] ?? null, i = cur == null ? -1 : order.indexOf(cur);
+    if (key === "home") this.prShown[k] = null;
+    else if (key === "down") { if (i + 1 < order.length) this.prShown[k] = order[i + 1]; }
+    else if (key === "up") this.prShown[k] = i <= 0 ? null : order[i - 1];
+    else if (cur != null) this.toggleViewed(k, cur, cx);
+    return true;
   }
 
   // A Ticket's images, saved under Herdr's home so image() can show them. Each shows as it arrives.
@@ -1848,7 +1930,7 @@ export default class Wayfindr extends View {
   // on it closes the overlay. The overlay stops its own clicks so they don't count as one.
   prScrim(t) {
     return div().id("wf-pr-scrim").absolute().top(0).bottom(0).left(0).right(0).bg(t.background).opacity(0.6)
-      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.handle.focus(); this.prDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.handle.focus(); this.prDrag = null; this.railDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
       .on_mouse_down("right", stop)
       .on_mouse_up("left", (_e, cx) => { cx.stop_propagation(); this.prDragEnd(cx); })
       .on_mouse_move((e, cx) => { cx.stop_propagation(); this.prDragMove(e, cx); })
@@ -1863,46 +1945,79 @@ export default class Wayfindr extends View {
     return Number.isFinite(v) && v >= PR_W_MIN && v <= PR_W_MAX ? v : PR_W_DEFAULT;
   }
 
+  // The rail's width in px: the live drag value, else the remembered one, else 210.
+  get prRailW() {
+    if (this.railDrag) return this.railDrag.w;
+    const v = Number(load(PR_RAIL_KEY, PR_RAIL_DEFAULT));
+    return Number.isFinite(v) && v >= PR_RAIL_MIN && v <= PR_RAIL_MAX ? v : PR_RAIL_DEFAULT;
+  }
+
   // The left-edge drag: the press records where it started and the width then; each move turns the
   // distance into a fraction of the handling element's width (the scrim's, which is the list's; the
   // root's once the pointer leaves the list); the release keeps it. A release outside Wayfindr isn't
-  // reported, so the next press clears a stale drag.
+  // reported, so the next press clears a stale drag. The rail's right-edge drag (#24) goes through here too:
+  // its width in px follows the pointer.
   prDragMove(e, cx) {
+    if (this.railDrag) {
+      const w = Math.round(Math.min(PR_RAIL_MAX, Math.max(PR_RAIL_MIN, this.railDrag.from + e.position.x - this.railDrag.x)));
+      if (w !== this.railDrag.w) { this.railDrag.w = w; cx.notify(); }
+      return;
+    }
     if (!this.prDrag || !e.bounds?.width) return;
     const frac = Math.min(PR_W_MAX, Math.max(PR_W_MIN, this.prDrag.from + (this.prDrag.x - e.position.x) / e.bounds.width));
     if (frac !== this.prDrag.frac) { this.prDrag.frac = frac; cx.notify(); }
   }
 
   prDragEnd(cx) {
+    if (this.railDrag) { save(PR_RAIL_KEY, this.railDrag.w); this.railDrag = null; cx.notify(); return; }
     if (!this.prDrag) return;
     save(PR_W_KEY, Math.round(this.prDrag.frac * 1000) / 1000);
     this.prDrag = null;
     cx.notify();
   }
 
-  // One changed file: a header that folds its diff. The first DIFF_LINES rows show, then a row for the rest.
-  // Rows (#23): hunk headers, then a line number, a +/− mark and the text; long lines scroll sideways.
-  prFile(t, k, f, i, defaultOpen) {
-    const st = this.prFolds[k]?.[f.path] ?? (defaultOpen ? "open" : "folded");
-    const setFold = (v) => { (this.prFolds[k] ??= {})[f.path] = v; };
-    const head = h_flex().id(`wf-pr-file-${k}-${i}`).h(28).px(8).gap(8).items_center().cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click((_e, cx) => { setFold(st === "folded" ? "open" : "folded"); cx.notify(); })
-      .child(div().w(12).flex_none().text_size(11).text_color(t.dim).child(FILE_STATUS[f.status] ?? "?"))
-      .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground)
-        .child(f.status === "renamed" && f.oldPath ? `${f.oldPath} → ${f.path}` : f.path))
-      .child(h_flex().flex_none().gap(6).text_size(11)
-        .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
-        .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)));
-    const block = v_flex().rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(head);
-    if (st === "folded") return block;
-    const note = (text) => div().px(8).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).child(text);
-    if (f.binary) return block.child(note("Binary file"));
-    if (f.patch == null) return block.child(note("Diff not shown"));
+  // A file's diff rows, parsed once per file object.
+  rowsOf(f) {
     let parsed = diffRowsOf.get(f);
     if (!parsed) { const rows = diffRows(f.patch); parsed = { rows, longest: longestLine(rows) }; diffRowsOf.set(f, parsed); }
-    const { rows, longest } = parsed;
-    const shown = st === "all" ? rows : rows.slice(0, DIFF_LINES);
+    return parsed;
+  }
+
+  // One review thread under its line (#25): the first comment, then the replies indented. A resolved thread
+  // folds to one dim line until clicked; open, it says so and has a Fold word.
+  prThread(t, k, th, site) {
+    const id = String(th.id), open = Boolean(this.prThreadsOpen[k]?.has(id)), first = th.comments[0];
+    const flip = (cx) => {
+      const s = (this.prThreadsOpen[k] ??= new Set());
+      if (s.has(id)) s.delete(id); else s.add(id);
+      cx.notify();
+    };
+    const box = v_flex().id(`wf-pr-th-${k}-${id}`).ml(56).mr(10).my(3).max_w(640).px(10).py(6).gap(6).rounded(7)
+      .border_1().border_color(t.border).bg(t.raised).text_size(12);
+    if (th.resolved && !open) {
+      return box.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => flip(cx))
+        .child(div().truncate().text_size(11.5).text_color(t.dim)
+          .child(`Resolved · ${first.author}: ${String(first.body ?? "").split("\n")[0]}`));
+    }
+    return box
+      .when(Boolean(th.resolved), (el) => el.child(h_flex().gap(8).items_center().text_size(11).text_color(t.dim)
+        .child(div().flex_1().min_w(0).truncate().child(`Resolved · on ${site}`))
+        .child(div().id(`wf-pr-th-fold-${k}-${id}`).flex_none().text_color(t.accent).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click((_e, cx) => flip(cx)).child("Fold"))))
+      .children(th.comments.map((c, i) => v_flex().gap(1).when(i > 0, (el) => el.pl(10).border_l_2().border_color(t.border))
+        .child(div().text_size(11).font_semibold().text_color(t.muted).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
+        .child(div().text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-th-${k}-${id}-${i}`, c.body ?? "").selectable(true)))));
+  }
+
+  // One file's diff rows (#23) with its review threads under their lines (#25). The first DIFF_LINES rows show,
+  // then a row for the rest. Rows keep the longest line's width and scroll sideways; threads keep the visible width.
+  prDiff(t, k, f, threads, site) {
+    const note = (text) => div().px(8).py(6).text_size(11).text_color(t.dim).child(text);
+    if (f.binary) return note("Binary file");
+    if (f.patch == null) return note("Diff not shown");
+    const { rows, longest } = this.rowsOf(f);
+    const shown = this.prAll[k]?.[f.path] ? rows : rows.slice(0, DIFF_LINES);
+    const width = DIFF_GUTTER + longest * DIFF_CHAR_W, mono = settings().font_family ?? settings().font ?? "monospace";
     const row = (r) => {
       if (r.kind === "@") return div().w_full().h(20).flex_none().px(12).whitespace_nowrap().bg(t.raised).text_color(t.dim).child(r.text);
       return h_flex().w_full().h(20).flex_none().gap(10).items_center()
@@ -1911,17 +2026,67 @@ export default class Wayfindr extends View {
         .child(div().w(10).flex_none().text_color(r.kind === "+" ? t.done : t.blocked).child(r.kind === "+" ? "+" : r.kind === "-" ? "−" : ""))
         .child(div().flex_none().pr(12).whitespace_nowrap().text_color(r.kind === "" ? t.dim : t.foreground).child(r.text.replace(/\t/g, "    ")));
     };
-    return block
-      .child(div().id(`wf-pr-diff-${k}-${i}`).w_full().border_t(1).border_color(t.border).overflow_x_scrollbar()
-        .child(v_flex().w_full().min_w(DIFF_GUTTER + longest * DIFF_CHAR_W).py(4)
-          .font_family(settings().font_family ?? settings().font ?? "monospace").text_size(11.5).children(shown.map(row))))
+    const items = [];
+    for (const r of shown) {
+      items.push(div().min_w(width).flex_none().font_family(mono).text_size(11.5).child(row(r)));
+      for (const th of threadsOn(threads, f.path, r)) items.push(this.prThread(t, k, th, site));
+    }
+    const i = (this.prDetails[k]?.data?.files ?? []).indexOf(f);
+    return v_flex().w_full()
+      .child(v_flex().id(`wf-pr-diff-${k}-${i}`).w_full().py(4).overflow_x_scrollbar().children(items))
       .when(shown.length < rows.length, (el) => el.child(h_flex().id(`wf-pr-more-${k}-${i}`).h(26).px(8).items_center().border_t(1).border_color(t.border)
         .cursor_pointer().text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_mouse_down("left", stop).on_click((_e, cx) => { setFold("all"); cx.notify(); })
+        .on_mouse_down("left", stop).on_click((_e, cx) => { (this.prAll[k] ??= {})[f.path] = true; cx.notify(); })
         .child(`Show ${rows.length - shown.length} more lines`)));
   }
 
-  // The Pull Request panel: the row's summary shows at once, the rest when the detail arrives.
+  // The file rail (#24): how many files are viewed, the Overview, then code files and the tests, docs and
+  // generated ones. A row shows its file; its first cell marks it viewed. The strip on its right edge resizes it.
+  prRail(t, k, d, threads) {
+    const files = d?.files ?? [], g = groupFiles(files), shown = this.prShown[k] ?? null;
+    const marks = this.prViewed[k]?.files ?? {}, viewed = files.filter((f) => marks[f.path]).length;
+    const bare = (p) => String(p ?? "").replace(/^\/+/, "");
+    const counts = new Map();
+    for (const th of threads) counts.set(bare(th.path), (counts.get(bare(th.path)) ?? 0) + 1);
+    const label = (text) => div().pt(8).pb(2).px(8).text_size(11).text_color(t.dim).child(text);
+    const fileRow = (f) => {
+      const i = files.indexOf(f), on = shown === f.path, seen = Boolean(marks[f.path]), n = counts.get(bare(f.path)) ?? 0;
+      const slash = f.path.lastIndexOf("/"), folder = f.path.slice(0, slash + 1), name = f.path.slice(slash + 1);
+      return h_flex().id(`wf-pr-rail-${k}-${i}`).h(26).flex_none().px(6).gap(6).items_center().rounded(5).cursor_pointer()
+        .when(on, (el) => el.bg(t.selected)).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.prShown[k] = f.path; cx.notify(); })
+        .child(h_flex().id(`wf-pr-rail-v-${k}-${i}`).w(14).h(20).flex_none().justify_center().items_center().rounded(3)
+          .text_size(11).text_color(seen ? t.done : t.dim).hover((s) => s.bg(t.raised))
+          .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.toggleViewed(k, f.path, cx); })
+          .child(seen ? "✓" : FILE_STATUS[f.status] ?? "?"))
+        .child(h_flex().flex_1().min_w(0).overflow_hidden().text_size(12)
+          .child(div().min_w(0).truncate().text_color(t.dim).child(folder))
+          .child(div().flex_none().text_color(seen ? t.dim : t.foreground).child(name)))
+        .child(h_flex().flex_none().gap(4).text_size(11)
+          .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
+          .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)))
+        .when(n > 0, (el) => el.child(h_flex().h(16).min_w(16).px(4).flex_none().justify_center().items_center().rounded(8)
+          .bg(t.accent).text_size(10).text_color(t.background).child(String(n))));
+    };
+    const top = d ? (viewed === files.length && files.length ? `All ${files.length} viewed` : `${viewed} of ${files.length} viewed`) : "";
+    const overview = h_flex().id(`wf-pr-rail-o-${k}`).h(26).flex_none().px(8).items_center().rounded(5).cursor_pointer()
+      .text_size(12).text_color(t.foreground).when(shown == null, (el) => el.bg(t.selected)).when(shown != null, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_mouse_down("left", stop).on_click((_e, cx) => { this.prShown[k] = null; cx.notify(); })
+      .child("Overview");
+    const strip = div().id("wf-pr-rail-grip").absolute().top(0).bottom(0).right(0).w(6).cursor_col_resize()
+      .hover((s) => s.bg(t.accent)).when(Boolean(this.railDrag), (el) => el.bg(t.accent))
+      .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.railDrag = { x: e.position.x, from: this.prRailW, w: this.prRailW }; cx.notify(); });
+    return div().id(`wf-pr-rail-${k}`).relative().flex_none().w(this.prRailW).h_full().border_r(1).border_color(t.border)
+      .child(v_flex().id(`wf-pr-rail-list-${k}`).size_full().p(6).gap(1).overflow_y_scrollbar()
+        .child(div().px(8).pb(4).text_size(11).text_color(t.dim).child(top))
+        .child(overview)
+        .when(g.code.length > 0, (el) => el.child(label("Code")).children(g.code.map(fileRow)))
+        .when(g.side.length > 0, (el) => el.child(label("Tests, docs and generated")).children(g.side.map(fileRow))))
+      .child(strip);
+  }
+
+  // The Pull Request overlay: a header, then the file rail and the content column (#24). The content is the
+  // Overview (the summary, description, files line and comments) or one file's diff with its threads.
   prPanel(t) {
     const sel = this.selectedPr, pr = sel.pr, k = pr.key;
     const entry = this.prDetails[k] ?? { status: "loading" };
@@ -1934,6 +2099,7 @@ export default class Wayfindr extends View {
       .child(div().flex_1().min_w(0).text_color(t.foreground).child(value || "—"));
     const date = (s) => String(s ?? "").slice(0, 10);
     const review = this.reviewActions(sel.account, pr), rv = review.state;
+    const site = PR_SITE[this.profile?.accounts.find((a) => a.id === sel.account)?.provider] ?? "the API";
 
     const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
       .child(div().min_w(0).text_size(12).text_color(t.muted).truncate().child([cur.id, cur.repo, cur.state].filter(Boolean).join(" · ")))
@@ -1944,18 +2110,38 @@ export default class Wayfindr extends View {
         (cx) => review.start(cx), { on: rv?.status === "busy" }))
       .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
 
-    const body = v_flex().id(`wf-pr-body-${k}`).flex_1().min_h(0).p(14).gap(10).overflow_y_scrollbar()
-      .child(div().text_size(16).font_semibold().text_color(t.foreground).child(cur.title))
-      .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
-      .when(rv?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(rv.error)))
-      .when(!d && entry.status === "loading", (el) => el.child(skeletonPr(t)));
-    if (d) {
-      const files = d.files ?? [], comments = d.comments ?? [];
-      const adds = files.reduce((n, f) => n + (f.additions ?? 0), 0), dels = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
+    const files = d?.files ?? [], threads = d?.threads ?? [];
+    const shownPath = this.prShown[k] ?? null, f = shownPath == null ? null : files.find((x) => x.path === shownPath) ?? null;
+    const body = v_flex().id(`wf-pr-body-${k}-${f ? files.indexOf(f) : "o"}`).flex_1().min_w(0).min_h(0).p(14).gap(10).overflow_y_scrollbar();
+    if (f) {
+      const seen = Boolean(this.prViewed[k]?.files[f.path]);
+      body
+        .child(h_flex().gap(8).items_center()
+          .child(div().w(12).flex_none().text_size(11).text_color(t.dim).child(FILE_STATUS[f.status] ?? "?"))
+          .child(div().flex_1().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground)
+            .child(f.status === "renamed" && f.oldPath ? `${f.oldPath} → ${f.path}` : f.path))
+          .child(h_flex().flex_none().gap(6).text_size(11)
+            .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
+            .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)))
+          .child(button("wf-pr-viewed", seen ? "Viewed" : "Unviewed", t, (cx) => this.toggleViewed(k, f.path, cx), { on: seen })))
+        .child(v_flex().rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(this.prDiff(t, k, f, threads, site)));
+    } else {
+      body
+        .child(div().text_size(16).font_semibold().text_color(t.foreground).child(cur.title))
+        .when(entry.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(entry.error)))
+        .when(rv?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(rv.error)))
+        .when(!d && entry.status === "loading", (el) => el.child(skeletonPr(t)));
+    }
+    if (d && !f) {
+      const general = (d.comments ?? []).filter((c) => !c.path);
+      const unplaced = unplacedThreads(threads, files, (x) => (x.binary || x.patch == null ? [] : this.rowsOf(x).rows));
+      const adds = files.reduce((n, x) => n + (x.additions ?? 0), 0), dels = files.reduce((n, x) => n + (x.deletions ?? 0), 0);
       const summary = [`${files.length} ${files.length === 1 ? "file" : "files"} · +${adds} −${dels}`,
         ...(d.moreFiles ? [`${d.moreFiles} more not shown`] : []), ...(d.truncated ? ["Some diffs were cut"] : []),
         ...(d.source?.kind === "clone" ? [`diffs from ${d.source.path}`] : [])].join(" · ");
-      const site = PR_SITE[this.profile?.accounts.find((a) => a.id === sel.account)?.provider] ?? "the API";
+      const card = (id, c, where) => v_flex().id(id).gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+        .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${date(c.createdAt)}${where ? ` · ${where}` : ""}`))
+        .child(div().text_size(13).text_color(t.foreground).child(TextView.markdown(`${id}-md`, c.body ?? "").selectable(true)));
       body
         .child(v_flex().gap(6)
           .child(row("Author", d.author?.name))
@@ -1969,11 +2155,10 @@ export default class Wayfindr extends View {
         .child(section("Files"))
         .child(note(summary))
         .when(Boolean(d.gitError), (el) => el.child(note(`Diffs from ${site}: ${String(d.gitError).split("\n")[0]}`)))
-        .children(files.map((f, i) => this.prFile(t, k, f, i, files.length <= 5)))
-        .child(section(`Comments (${comments.length + (d.moreComments ?? 0)})`))
-        .children(comments.map((c, i) => v_flex().id(`wf-pr-c-${k}-${i}`).gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
-          .child(div().text_size(11).text_color(t.dim).child(`${c.author} · ${date(c.createdAt)}${c.path ? ` · ${c.path}${c.line != null ? `:${c.line}` : ""}` : ""}`))
-          .child(md(`c${i}`, c.body ?? ""))));
+        .child(section(`Comments (${general.length + (d.moreComments ?? 0)})`))
+        .children(general.map((c, i) => card(`wf-pr-c-${k}-${i}`, c, null)))
+        // Threads no diff row takes: on no line, outdated, or on a file or line the diff doesn't show.
+        .children(unplaced.flatMap((th) => th.comments.map((c, i) => card(`wf-pr-u-${k}-${th.id}-${i}`, c, `${th.path}${th.line != null ? `:${th.line}` : ""}`))));
     }
     // Over the list, against the right edge, 60% wide to start; the strip on its left edge resizes it.
     const grip = div().id("wf-pr-grip").absolute().top(0).bottom(0).left(0).w(6).cursor_col_resize()
@@ -1986,7 +2171,10 @@ export default class Wayfindr extends View {
       .child(head)
       .when(rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
         .child(cloneChooser("wf-pr-panel-choose", review, t))))
-      .child(body).child(grip);
+      .child(h_flex().id(`wf-pr-main-${k}`).flex_1().min_h(0).items_stretch()
+        .child(this.prRail(t, k, d, threads))
+        .child(body))
+      .child(grip);
   }
 
   render(cx) {
@@ -1995,7 +2183,7 @@ export default class Wayfindr extends View {
     return v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
       // A press anywhere in Wayfindr closes the Move dropdown; its trigger and list stop their own.
-      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.prDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.prDrag = null; this.railDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
       // The Pull Request overlay's edge drag: moves over Wayfindr resize it, the release keeps it.
       .on_mouse_move((e, cx) => this.prDragMove(e, cx))
       .on_mouse_up("left", (_e, cx) => this.prDragEnd(cx))
@@ -2012,6 +2200,7 @@ export default class Wayfindr extends View {
           cx.notify(); return;
         }
         if (this.typing) return; // keys in a text box are for the text
+        if (this.view === "prs" && this.selectedPr && this.prKey(e.key, cx, e.modifiers ?? {})) { cx.stop_propagation(); cx.notify(); return; }
         if (this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
       })
       .child(this.header(t))
