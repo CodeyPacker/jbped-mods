@@ -232,10 +232,10 @@ export default class Wranglr extends View {
     for (const s of sp) {
       const dir = place(s, ps);
       if (!dir) { repos[s.id] = null; continue; }
-      const repo = this.resolver.get(dir, s.machine);
+      let repo = this.repoAt(dir, s.machine, cx);
+      // A pane can report a folder git cannot run in. The space's own folder is asked next.
+      if (repo === null && s.folder && s.folder !== dir) repo = this.repoAt(s.folder, s.machine, cx);
       repos[s.id] = repo;
-      // Not in a repo is asked again after a minute: git may have failed, or the folder became a repo.
-      if (cx && (repo === undefined || (repo === null && this.retryDue(dir, s.machine)))) this.resolve(dir, s.machine, cx);
     }
     const titles = {};
     for (const a of agents()) if (a.title && !(a.space in titles)) titles[a.space] = a.title;
@@ -247,6 +247,14 @@ export default class Wranglr extends View {
       local: { home: home(), windows: window().platform === "windows" },
       cloned: clonedMap(this.config, this.state),
     };
+  }
+
+  // The Repo a folder is in: undefined while git is asked, null when it is in none.
+  repoAt(dir, machine, cx) {
+    const repo = this.resolver.get(dir, machine);
+    // Not in a repo is asked again after a minute: git may have failed, or the folder became a repo.
+    if (cx && (repo === undefined || (repo === null && this.retryDue(dir, machine)))) this.resolve(dir, machine, cx);
+    return repo;
   }
 
   retryDue(dir, machine) {
@@ -815,7 +823,9 @@ export default class Wranglr extends View {
         if (!s.folded) out.push(...this.rows(s.rows, { group: g.id, sub: s.id }, 16, d));
       }
     });
-    if (this.tree.loose.length) out.push(div().h(8).flex_none());
+    // A line between the Groups and the spaces in no Group.
+    if (this.tree.loose.length && groups.length) out.push(div().h(1).mx(8).my(6).flex_none().bg(d.t.border));
+    else if (this.tree.loose.length) out.push(div().h(8).flex_none());
     out.push(...this.rows(this.tree.loose, { group: "", sub: null }, 0, d));
     const { t } = d;
     const over = this.pressed?.kind === "row" && this.over?.kind === "end";
