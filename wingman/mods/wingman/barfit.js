@@ -74,7 +74,8 @@ export const SETTINGS_H = 620;
  */
 export const settingsHeight = (paneH) => (paneH > 0 ? Math.max(360, Math.min(SETTINGS_H, Math.round(paneH + 40))) : SETTINGS_H);
 
-const FIND_PAD = 16, FIND_GAP = 6, FIND_INPUT_MIN = 100, FIND_INPUT_MAX = 240;
+// FIND_PAD: the bar's 16 px of padding plus 10 px for glyphs wider than textW thinks (seen on screen).
+const FIND_PAD = 26, FIND_GAP = 6, FIND_INPUT_MIN = 100, FIND_INPUT_MAX = 240;
 
 /**
  * One row of the find bar (a text box then buttons, a spacer, and more buttons) in a bar `width`
@@ -97,13 +98,13 @@ export function fitFindRow(width, items) {
 export function findRowItems(counts, replaceLabels) {
   return [
     { id: "count", labels: counts, drop: 1, pad: Math.max(0, 70 - textW(counts[0])) },
-    { id: "find-regex", labels: [".*"], drop: 2, pad: 12 },
-    { id: "find-word", labels: ["W"], drop: 3, pad: 12 },
-    { id: "find-cased", labels: ["Aa"], drop: 4, pad: 12 },
-    { id: "find-mode", labels: replaceLabels, drop: 5 },
-    { id: "find-prev", labels: ["↑"], drop: Infinity },
-    { id: "find-next", labels: ["↓"], drop: Infinity },
-    { id: "find-close", labels: ["×"], drop: Infinity },
+    { id: "find-regex", labels: [".*"], drop: 2, pad: 16 },
+    { id: "find-word", labels: ["W"], drop: 3, pad: 16 },
+    { id: "find-cased", labels: ["Aa"], drop: 4, pad: 16 },
+    { id: "find-mode", labels: replaceLabels, drop: 5, pad: 26 },
+    { id: "find-prev", labels: ["↑"], drop: Infinity, pad: 26 },
+    { id: "find-next", labels: ["↓"], drop: Infinity, pad: 26 },
+    { id: "find-close", labels: ["×"], drop: Infinity, pad: 26 },
   ];
 }
 
