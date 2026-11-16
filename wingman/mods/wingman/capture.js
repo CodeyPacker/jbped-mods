@@ -10,6 +10,7 @@ import { writeText, execOn } from "./fsx.js";
 import { mapLimit, REMOTE } from "./remote.js";
 import { crumb, ALIVE_MS } from "./crumbs.js";
 import { byteLength } from "./sha256.js";
+import { Checkpoints, promptFor } from "./checkpoints.js";
 
 const isWindows = (p) => /^[A-Za-z]:/.test(p);
 
@@ -65,14 +66,38 @@ export class Capture {
     return tree;
   }
 
-  /** Paths that differ between two trees, with git's status letter (A, M, D, T). */
+  /** Paths that differ between two trees, with git's status letter (A, M, D, T). The last answer is
+   *  kept, so a pass's checkpoint files (turnFiles) cost no second diff. */
   async changed(from, to) {
     if (from === to) return [];
+    if (this.lastDiff?.from === from && this.lastDiff.to === to) return this.lastDiff.out;
     const r = await this.store.git(["diff-tree", "-r", "--no-renames", "--name-status", "-z", from, to]);
     if (r.code !== 0) throw new Error(r.stderr.trim());
     const parts = r.stdout.split("\0").filter(Boolean), out = [];
     for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i][0], path: parts[i + 1] });
+    this.lastDiff = { from, to, out };
     return out;
+  }
+
+  /**
+   * G4: keeps snapshot `tree` as a checkpoint (checkpoints.js) for the turn of record `c` ({ by, who,
+   * space, turn }). Returns its id, or null when it couldn't be kept (logged: the capture goes on).
+   */
+  async checkpoint(tree, branch, c = {}, at = Date.now()) {
+    const agent = c.who ?? c.by ?? null;
+    try {
+      const e = await (this.cps ??= new Checkpoints(this.store)).record({ tree, branch, agent, space: c.space ?? null, turn: c.turn ?? null, prompt: promptFor(agent, at), at });
+      return e.id;
+    } catch (e) { this.log(`${this.store.root}: checkpoint not kept: ${tailText(e?.message ?? e)}`); return null; }
+  }
+
+  /** Notes the files the turn of checkpoint `id` changed so far (from its tree `base` to `now`), and its prompt once the hook saw it. */
+  async turnFiles(id, base, now, c = {}, since = 0) {
+    if (!id) return;
+    try {
+      const files = (await this.changed(base, now)).map((x) => x.path).filter((p) => !isWriteTemp(p));
+      await (this.cps ??= new Checkpoints(this.store)).note(id, files, promptFor(c.who ?? c.by ?? null, since));
+    } catch (e) { this.log(`${this.store.root}: checkpoint files not noted: ${tailText(e?.message ?? e)}`); }
   }
 
   /** Saved capture state: the snapshot tree of the current working period, if any. On another

@@ -5,7 +5,8 @@
 #
 #   post   (PostToolUse on Edit|Write|MultiEdit|NotebookEdit): saves the hook input as
 #          one event file for the mod: {"terminal": "<HC_TERMINAL_ID>", "event": <input>}.
-#   prompt (UserPromptSubmit): reads nothing new.
+#   prompt (UserPromptSubmit): saves the input the same way when it has a prompt (at most 64 KB),
+#          for the title of the turn's checkpoint.
 #
 # Both pass pending review feedback for this terminal (rejected hunks) to Claude as
 # additionalContext. The mod writes it as a ready JSON string in feedback/<terminal>.ctx.
@@ -32,6 +33,15 @@ if [ "$event" = post ]; then
   # JSON has no raw newlines inside strings, so dropping them keeps it valid on one line.
   { printf '{"terminal":"%s","event":' "$HC_TERMINAL_ID"; tr -d '\r\n'; printf '}\n'; } >"$f.tmp" \
     && mv "$f.tmp" "$f.json"
+elif [ "$event" = prompt ]; then
+  # The prompt, saved the same way for the mod, which keeps only its first line (at most 80
+  # characters) as the title of the turn's checkpoint and removes the file. Only an input that has
+  # a prompt and is at most 64 KB is kept.
+  mkdir -p "$dir/events"
+  ts="$(date +%s%N)"; case "$ts" in *N) ts="$(date +%s)000000000" ;; esac
+  f="$dir/events/$ts-$HC_TERMINAL_ID-$$"
+  { printf '{"terminal":"%s","event":' "$HC_TERMINAL_ID"; tr -d '\r\n'; printf '}\n'; } >"$f.tmp"
+  if [ "$(wc -c <"$f.tmp")" -le 65536 ] && grep -q '"prompt"' "$f.tmp"; then mv "$f.tmp" "$f.json"; else rm -f "$f.tmp"; fi
 else
   cat >/dev/null
 fi

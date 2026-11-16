@@ -89,11 +89,14 @@ function guard(r) {
   return (edited, { head = true, idx = true } = {}) => {
     const after = state(r);
     if (idx) assert.equal(after.index, before.index, `${r.dir}: the real index changed`);
-    assert.equal(after.refs, before.refs, `${r.dir}: refs changed`);
+    // G4: checkpoints add tree refs under refs/wingman/checkpoints/ and nothing else.
+    const own = (l) => /^[0-9a-f]{40,64} tree\trefs\/wingman\/checkpoints\/[0-9a-z]+-[0-9a-z]+$/.test(l);
+    const user = (refs) => refs.split("\n").filter((l) => !own(l)).join("\n");
+    assert.equal(user(after.refs), user(before.refs), `${r.dir}: refs changed`);
     if (head) assert.equal(after.head, before.head, `${r.dir}: HEAD changed`);
     const paths = after.status.split("\0").filter(Boolean).map((l) => l.slice(3)).sort();
     assert.deepEqual(paths, [...edited].sort(), `${r.dir}: status`);
-    const left = readdirSync(join(gitDir, "wingman")).filter((n) => !["index.json", "capture.json", "sums.json", "baselines"].includes(n));
+    const left = readdirSync(join(gitDir, "wingman")).filter((n) => !["index.json", "capture.json", "sums.json", "baselines", "checkpoints.json"].includes(n));
     assert.deepEqual(left, [], `${r.dir}: unexpected files in the review store`);
   };
 }
