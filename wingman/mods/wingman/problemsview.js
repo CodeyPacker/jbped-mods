@@ -138,7 +138,7 @@ export class Problems {
     let specs;
     try { specs = await this.detectFor(store, rel); R.note = null; }
     catch (e) { R.note = String(e?.message ?? e); this.host.paint(cx); return; }
-    for (const s of specs) if (s.scope === "project") R.known.set(s.unit, s);
+    for (const s of specs) if (s.scope === "project" && s.id !== "custom") R.known.set(s.unit, s);
     for (const s of specs) if (s.scope === "file") this.request(store, s, cx);
   }
 
@@ -161,9 +161,19 @@ export class Problems {
           specs = [...await this.detectFor(st, null), ...(f && f.store === st ? await this.detectFor(st, f.rel) : [])];
           R.note = null;
         } catch (e) { R.note = String(e?.message ?? e); continue; }
-        for (const sp of specs) if (sp.scope === "project") R.known.set(sp.unit, sp);
-        const run = new Map([...R.known].filter(([, sp]) => sp.scope === "project"));
+        // Built-in project checkers are remembered (a sub-project's tsc found from a file opened
+        // there); the repo's own project command, read fresh each time, takes their place.
+        for (const sp of specs) if (sp.scope === "project" && sp.id !== "custom") R.known.set(sp.unit, sp);
+        const own = specs.find((sp) => sp.scope === "project" && sp.id === "custom");
+        const run = new Map(own ? [[own.unit, own]] : [...R.known]);
         for (const sp of specs) if (sp.scope === "file") run.set(sp.unit, sp);
+        // A project checker that no longer applies takes its list and its failure line with it.
+        let gone = false;
+        for (const u of [...R.units.keys(), ...R.failures.keys()]) {
+          const scope = R.units.get(u)?.spec.scope ?? (u.startsWith("eslint|") || /^custom\|./.test(u) ? "file" : "project");
+          if (scope === "project" && !run.has(u)) { R.units.delete(u); R.failures.delete(u); gone = true; }
+        }
+        if (gone) this.rebuild(R);
         if (!run.size) { R.note = `No checker found in ${this.host.repoName(st)}: eslint, tsc or dotnet with its config, or a Problems command in Settings`; continue; }
         for (const sp of run.values()) this.request(st, sp, cx);
       }
@@ -312,8 +322,9 @@ export class Problems {
 
   rows() {
     const u = this.uiOf();
-    if (u._rows && u._rowsVer === u.ver && u._rowsN === this.host.files) return u._rows;
-    u._rows = problemRows(this.files(), u.collapsed); u._rowsVer = u.ver; u._rowsN = this.host.files;
+    const text = this.host.file()?.Ctext; // the shown file being edited moves its problems (forFile)
+    if (u._rows && u._rowsVer === u.ver && u._rowsN === this.host.files && u._rowsText === text) return u._rows;
+    u._rows = problemRows(this.files(), u.collapsed); u._rowsVer = u.ver; u._rowsN = this.host.files; u._rowsText = text;
     return u._rows;
   }
 
@@ -502,10 +513,10 @@ export class Problems {
     const items = [
       { id: "check", labels: [withKey("Check", h.kl("checkProblems")), "Check"], drop: Infinity, size: 11, pad: 20 },
       { id: "send", labels: ["Send to agent", "Send"], drop: 2, size: 11, pad: 20 },
-      ...(sel ? [{ id: "send-file", labels: ["Send file", "File"], drop: 1, size: 11, pad: 20 }] : []),
+      ...(sel ? [{ id: "send-file", labels: ["Send file"], drop: 1, size: 11, pad: 20 }] : []),
       { id: "copy", labels: ["Copy"], drop: 3, size: 11, pad: 20 },
     ];
-    const fit = fitBar(h.px(h.leftW ?? 300) - 12, items, 0, 4);
+    const fit = fitBar((h.leftW ?? 300) - 12, items, 0, 4); // leftW: element px already
     const btn = (id, bg, fn) => fit.has(id) ? [h.button(`problems-${id}`, fit.get(id), bg, fn).flex_none().whitespace_nowrap()] : [];
     const head = !this.enabled() ? "Problems are off in Settings"
       : running.length ? `Checking: ${[...new Set(running)].join(", ")}…` : `${countText(all, more)}${h.stores.length && !repos.length ? " · plain folders aren't checked" : ""}`;
@@ -516,7 +527,7 @@ export class Problems {
         .children(btn("send-file", t.raised, (cx) => this.send(cx, sel)))
         .children(btn("copy", t.raised, (cx) => this.copy(cx))))
       .child(div().flex_none().px(8).pb(4).text_size(11).text_color(t.muted).child(head))
-      .children([...failures, ...notes].map((l, i) => div().id(`problems-fail-${i}`).flex_none().px(8).pb(4).text_size(11).text_color(t.ansi1).truncate().child(l)))
+      .children([...new Set([...failures, ...notes])].map((l, i) => div().id(`problems-fail-${i}`).flex_none().px(8).pb(4).text_size(11).text_color(t.ansi1).child(l))) // wraps: the end of the line says why
       .when(!!u.busy || !!u.note, (e) => e.child(div().flex_none().px(8).pb(4).text_size(11).text_color(t.dim).child(u.busy ?? u.note)))
       .when(!!u.pick, (e) => e.child(v_flex().flex_none().mx(6).mb(4).p(6).gap(4).rounded(6).bg(t.raised).text_size(11)
         .child(div().text_color(t.muted).child("Send to which agent?"))
@@ -556,7 +567,9 @@ export class Problems {
     return h_flex().w_full().h(PROW).pl(20).pr(6).gap(5).items_center().overflow_hidden().whitespace_nowrap().text_size(12).cursor_pointer()
       .when(on, (e) => e.bg(selBg)).when(!!d.stale, (e) => e.opacity(0.55))
       .child(div().w(10).flex_none().text_size(10).text_color(sevColor(d.severity)).child(d.severity === "error" ? "●" : "▲"))
-      .child(div().flex_1().min_w(0).truncate().child(d.message))
-      .child(div().flex_none().text_size(10).text_color(t.dim).child(`${d.source}${d.code ? ` ${d.code}` : ""} ${d.line}:${d.col}`));
+      .child(div().flex_1().min_w(40).truncate().child(d.message))
+      // A long rule name (@typescript-eslint/…) is cut before the message is.
+      .child(div().flex_shrink(1).min_w(0).max_w(110).truncate().text_size(10).text_color(t.dim).child(`${d.source}${d.code ? ` ${d.code}` : ""}`))
+      .child(div().flex_none().text_size(10).text_color(t.dim).child(`${d.line}:${d.col}`));
   }
 }

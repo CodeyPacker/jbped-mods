@@ -301,9 +301,26 @@ export function detect(rel, { exists = () => false, listing = () => [], custom =
     if (found) out.push({ id: "dotnet", name: "dotnet", scope: "project", cwd: found.d, parser: "msbuild", timeout: PROJECT_MS, unit: `dotnet|${join(found.d, found.proj)}`,
       argv: ["dotnet", "build", arg(found.proj), "--no-restore", "-nologo", "-v:q", "-tl:off", "-clp:NoSummary"] });
   }
-  const c = customChecker(custom, rel);
-  if (c) out.push(c);
-  return out;
+  // The repo's own command takes the place of the built-in checkers of its scope (it's set because
+  // they don't fit the repo): with {file}, of eslint; without, of tsc and dotnet.
+  const ws = words(custom?.command ?? "");
+  if (!ws.length) return out;
+  const scope = ws.some((w) => w.includes("{file}")) ? "file" : "project", c = customChecker(custom, rel);
+  return [...out.filter((s) => s.scope !== scope), ...(c ? [c] : [])];
+}
+
+// Runners whose first argument names the tool: "node node_modules/typescript/bin/tsc" is tsc.
+const RUNNERS = /^(node|nodejs|npx|pnpx|bunx|bun|deno|python3?|py|uv|uvx|pipx|dotnet|npm|pnpm|yarn)(\.exe|\.cmd)?$/i;
+
+/** A short name for a command: its program, or for a runner (node, npx, python…) the tool it runs. */
+export function toolName(ws) {
+  const base = (w) => String(w ?? "").split(/[\\/]/).pop().replace(/\.(exe|cmd|js|mjs|cjs)$/i, "");
+  let name = base(ws[0]);
+  if (RUNNERS.test(ws[0].split(/[\\/]/).pop())) {
+    const next = ws.slice(1).find((w) => !w.startsWith("-") && !/^(run|exec|x|-m)$/.test(w));
+    if (next) name = base(next);
+  }
+  return cleanMessage(name, 40) || "check";
 }
 
 /**
@@ -318,7 +335,7 @@ export function customChecker(custom, rel) {
   if (perFile && rel == null) return null;
   const parser = PARSER_IDS.includes(custom.parser) ? custom.parser : "generic";
   const argv = ws.map((w) => w.replace(/\{file\}/g, () => arg(rel)));
-  const name = cleanMessage(ws[0].split(/[\\/]/).pop(), 40) || "check";
+  const name = toolName(ws);
   return { id: "custom", name, scope: perFile ? "file" : "project", cwd: "", parser, timeout: perFile ? FILE_MS : PROJECT_MS, unit: perFile ? `custom|${rel}` : "custom|", argv };
 }
 
@@ -367,7 +384,12 @@ export function failureLine(name, r, { elapsed = 0, timeout = PROJECT_MS, parsed
   if (r.code !== 0 && elapsed >= timeout - 500) return `${name}: timed out after ${secs}`;
   if (parsed > 0) return null;
   if (notes.length) return `${name}: ${notes[0]}`;
-  if (r.code === 127 || /: not found$|No such file or directory$|is not recognized as/m.test(String(r.stderr ?? ""))) return `${name}: not found where the repo's tools run (${lastLine(r.stderr || r.stdout) || `exit ${r.code}`})`;
+  if (r.code === 127 || /: not found$|No such file or directory$|is not recognized as/m.test(str(r.stderr))) {
+    // sh's "exec: node: not found", env's "'node': No such file or directory": name the program.
+    const prog = /exec: ([^:\s]+): not found/.exec(str(r.stderr))?.[1] ?? /env: '?([^':\s]+)'?: No such file/.exec(str(r.stderr))?.[1];
+    if (prog) return `${name}: ${cleanMessage(prog, 60)} isn't on the PATH where the repo's tools run (a login shell's PATH; WSL for a WSL repo)`;
+    return `${name}: not found where the repo's tools run (${lastLine(r.stderr || r.stdout) || `exit ${r.code}`})`;
+  }
   if (r.code !== 0) return `${name}: exited with ${r.code}${lastLine(r.stderr || r.stdout) ? `: ${lastLine(r.stderr || r.stdout)}` : ""}`;
   if (unparsed) return `${name}: its output couldn't be read`;
   return null;

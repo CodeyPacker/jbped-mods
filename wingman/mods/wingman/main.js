@@ -937,10 +937,11 @@ export default class Review extends View {
       if (this.spaceId !== space || this.files.some((x) => x.key === key)) return;
       this.files.push(f);
     }
-    if (!this.opened.includes(key)) this.opened.push(key);
+    const fresh = !this.opened.includes(key); // a tab opened now (not one shown again): its file-scope checkers run
+    if (fresh) this.opened.push(key);
     this.pick(key, cx);
     const f = this.file();
-    if (f?.key === key) this.problems.opened(f.store, f.rel, cx);
+    if (fresh && f?.key === key) this.problems.opened(f.store, f.rel, cx);
     if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); this.paint(cx); }
     if (f && this.nvim()) this.toNvim(f, at?.line ?? f.hunks[0]?.n ?? 0, cx);
   }
@@ -5546,6 +5547,7 @@ export default class Review extends View {
     this.cmtSpans = f && ncomments ? spansOn(this.comments(), f.key) : []; // read by row()
     this.pb = f && this.mode !== "changes" ? this.problems.forFile(f) : null; // read by row()
     const strip = this.pb && this.mode === "edit" && this.cur ? this.problems.strip(f, this.cur.line) : null;
+    const stripStale = !!(strip && strip.stale), stripErr = !!(strip && strip.severity === "error");
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
     // An inline edit of this space; its target lines show selected while the box is open (ij.t, current lines).
@@ -5650,10 +5652,10 @@ export default class Review extends View {
         .when(!!sel, (e) => e.child(this.selectionBar(f, sel, t)))))
       // The cursor line's problems, one line (no hover API: this is where their messages show).
       .when(!!strip, (e) => e.child(h_flex().id("problem-strip").h(22).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border).bg(t.raised).text_size(11.5)
-        .when(!!strip?.stale, (e) => e.opacity(0.6))
-        .child(div().flex_none().text_color(strip?.severity === "error" ? t.ansi1 : t.ansi3).child(strip?.severity === "error" ? "●" : "▲"))
-        .child(div().flex_1().min_w(0).truncate().child(strip?.text ?? ""))
-        .when(!!strip?.stale, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("edited since the check")))))))))
+        .when(stripStale, (e) => e.opacity(0.6))
+        .child(div().flex_none().text_color(stripErr ? t.ansi1 : t.ansi3).child(stripErr ? "●" : "▲"))
+        .child(div().flex_1().min_w(0).truncate().child(strip ? strip.text : ""))
+        .when(stripStale, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("edited since the check"))))))))
       // Quick Open floats over everything, so it's the root's last child.
       .when(!!this.qo, (e) => e.child(this.quickOpen(t)));
   }

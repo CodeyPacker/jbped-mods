@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import { PROBE_SH, parseProbe, dot, parseTsc, parseEslintJson, parseMsbuild, parseGeneric, parse, relOf, normRel, cleanMessage, capOutput, capDiags, detect, probes, ancestors, relFrom, customChecker,
+import { PROBE_SH, parseProbe, dot, toolName, parseTsc, parseEslintJson, parseMsbuild, parseGeneric, parse, relOf, normRel, cleanMessage, capOutput, capDiags, detect, probes, ancestors, relFrom, customChecker,
   RunQueue, failureLine, shiftDiags, byLine, worst, problemRows, stepProblem, countText, stripText, buildProblemsPrompt,
   MAX_DIAGS, MAX_MESSAGE, MAX_OUTPUT, BINS, FILE_MS, PROJECT_MS } from "../mods/wingman/problems.js";
 import { MAX_PROMPT } from "../mods/wingman/commentprompt.js";
@@ -198,10 +198,18 @@ assert.equal(parseTsc("../../../etc/shadow(1,1): error TS1: x\n", { root: "/r", 
   assert.deepEqual([c1.scope, c1.unit, c1.argv], ["file", "custom|src/x {file}.py", ["ruff", "check", "--output-format", "concise", "./src/x {file}.py"]]);
   assert.equal(customChecker({ command: "ruff {file}" }, null), null);
   const c2 = customChecker({ command: "npx vue-tsc --noEmit", parser: "eval" }, "a.ts");
-  assert.deepEqual([c2.scope, c2.parser, c2.timeout, c2.name], ["project", "generic", PROJECT_MS, "npx"]);
+  assert.deepEqual([c2.scope, c2.parser, c2.timeout, c2.name], ["project", "generic", PROJECT_MS, "vue-tsc"]);
   assert.equal(customChecker({ command: "   " }, "a.ts"), null);
   assert.equal(customChecker(null, "a.ts"), null);
   assert.deepEqual(detect("a.ts", { custom: { command: "make check", parser: "tsc" } }).map((c) => [c.id, c.parser]), [["custom", "tsc"]]);
+  // The repo's command replaces the built-in checkers of its scope, and only those.
+  const all = { exists: has("eslint.config.mjs", "tsconfig.json", BINS.eslint, BINS.tsc) };
+  assert.deepEqual(detect("a.ts", { ...all, custom: { command: "make check" } }).map((c) => c.id), ["eslint", "custom"]);
+  assert.deepEqual(detect("a.ts", { ...all, custom: { command: "ruff {file}" } }).map((c) => c.id), ["tsc", "custom"]);
+  assert.deepEqual(detect(null, { ...all, custom: { command: "ruff {file}" } }).map((c) => c.id), ["tsc"]);
+  assert.deepEqual(detect(null, { ...all, custom: { command: "make check" } }).map((c) => c.id), ["custom"]);
+  assert.deepEqual([["/home/u/.nvm/bin/node", "node_modules/typescript/bin/tsc"], ["npx", "--yes", "vue-tsc"], ["python3", "-m", "mypy"], ["C:\\bin\\ruff.exe", "check"], ["uv", "run", "pyright"]].map(toolName),
+    ["tsc", "vue-tsc", "mypy", "ruff", "pyright"]);
 }
 
 // ---- the run queue: never two runs of one key, one rerun with the newest request ----
@@ -247,7 +255,8 @@ assert.equal(parseTsc("../../../etc/shadow(1,1): error TS1: x\n", { root: "/r", 
   assert.equal(failureLine("tsc", t, { timeout: PROJECT_MS }), "tsc: timed out after 180 s");
   assert.equal(failureLine("eslint", { code: 1, stdout: "", stderr: "" }, { elapsed: 20000, timeout: FILE_MS }), "eslint: timed out after 20 s");
   assert.match(failureLine("tsc", new Error("cannot start node: program not found"), {}), /^tsc: couldn't start/);
-  assert.match(failureLine("tsc", { code: 127, stdout: "", stderr: "sh: 1: exec: node: not found\n" }, {}), /^tsc: not found where the repo's tools run \(sh: 1: exec: node: not found\)$/);
+  assert.equal(failureLine("tsc", { code: 127, stdout: "", stderr: "wingman: 1: exec: node: not found\n" }, {}), "tsc: node isn't on the PATH where the repo's tools run (a login shell's PATH; WSL for a WSL repo)");
+  assert.match(failureLine("tsc", { code: 127, stdout: "", stderr: "weird\n" }, {}), /^tsc: not found where the repo's tools run \(weird\)$/);
   assert.equal(failureLine("eslint", { code: 2, stdout: "", stderr: "\nOops! Something went wrong! :(\n\nESLint: 9.39.5\n\nError: Cannot find module 'typescript-eslint'\n" }, {}), "eslint: exited with 2: Error: Cannot find module 'typescript-eslint'");
   assert.equal(failureLine("tsc", { code: 2, stdout: "x", stderr: "" }, { parsed: 3 }), null); // errors found: exit 2 is normal
   assert.equal(failureLine("tsc", { code: 0, stdout: "", stderr: "" }, {}), null); // clean
