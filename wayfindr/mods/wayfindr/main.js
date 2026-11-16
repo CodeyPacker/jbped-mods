@@ -30,6 +30,8 @@ const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
 // The Pull Request overlay's width as a fraction of Wayfindr's: 60% to start, dragged by its left edge.
 const PR_W_KEY = "wayfindr.prWidth", PR_W_DEFAULT = 0.6, PR_W_MIN = 0.3, PR_W_MAX = 0.95;
 // The overlay's file rail (#24): 210 px to start, dragged by its right edge.
+// The overlay fullscreen (#29): "1" or "0" in this copy's localStorage, off by default.
+const PR_FULL_KEY = "wayfindr.prFull";
 const PR_RAIL_KEY = "wayfindr.prRail", PR_RAIL_DEFAULT = 210, PR_RAIL_MIN = 140, PR_RAIL_MAX = 560;
 // Viewed marks, one file per Pull Request: { head, files: { [path]: true } }, under Herdr's home.
 const VIEWED_DIR = "data/wayfindr/viewed";
@@ -278,6 +280,7 @@ export default class Wayfindr extends View {
     this.prViewed = {}; // pr key -> { head, files: { path -> true }, file, text, saving }: the viewed marks (D8)
     this.prThreadsOpen = {}; // pr key -> Set of resolved thread ids drawn open (#25)
     this.railDrag = null; // the rail's edge drag: { x, from, w }
+    this.prFull = (() => { try { return localStorage.getItem(PR_FULL_KEY) === "1"; } catch { return false; } })(); // the overlay fullscreen (#29)
     // Writing a review (#27).
     this.prComments = {}; // pr key -> { list, file, text, saving }: the line comments saved on this computer
     this.prOpen = {}; // pr key -> the comment box: { path, line, side, startLine?, startSide?, editId? } or { reply: thread id }, or null
@@ -710,6 +713,12 @@ export default class Wayfindr extends View {
 
   closePr() { this.selectedPr = null; }
 
+  // The overlay's fullscreen (#29): the choice stays for the next Pull Request.
+  toggleFull() {
+    this.prFull = !this.prFull;
+    try { localStorage.setItem(PR_FULL_KEY, this.prFull ? "1" : "0"); } catch { /* kept for this session only */ }
+  }
+
   // A Pull Request's clone (D1): the Profile Repo for its repo, else the one clone of it the index found, else
   // null. Never asks and never scans: without a clone the diffs come from the API.
   cloneForPr(pr) {
@@ -956,12 +965,13 @@ export default class Wayfindr extends View {
   }
 
   // Keys while the Pull Request overlay is open (D5): down and up through the Overview and the rail's files,
-  // home to the Overview, v marks the shown file viewed, p opens Post review (#27). True when the key was used.
+  // home to the Overview, v marks the shown file viewed, p opens Post review (#27), f toggles fullscreen (#29). True when the key was used.
   // The Post review screen isn't in the rail's order: down from it goes to the first file, up to the Overview.
   prKey(key, cx, mods = {}) {
     const sel = this.selectedPr;
-    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v", "p"].includes(key)) return false;
+    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v", "p", "f"].includes(key)) return false;
     const k = sel.pr.key, d = this.prDetails[k]?.data;
+    if (key === "f") { this.toggleFull(); return true; }
     if (key === "p") {
       if (!this.canWritePr(sel.account, "postReview")) return false;
       this.prShown[k] = REVIEW_SCREEN;
@@ -2117,7 +2127,9 @@ export default class Wayfindr extends View {
     ];
     const body = entry.data ? [section("Mine", "mine"), section("Needs my review", "needsReview")] : (entry.status === "loading" ? [] : [note("No Pull Requests yet.")]);
     // The list fills the view; with a Pull Request open, the scrim covers the list and the overlay
-    // covers the scrim's right part. A click on the scrim closes the overlay.
+    // covers the scrim's right part. A click on the scrim closes the overlay. Fullscreen (#29): the overlay
+    // alone, with no list or scrim under it.
+    if (this.selectedPr && this.prFull) return div().id("wf-prs-wrap").relative().size_full().child(this.prPanel(t));
     return div().id("wf-prs-wrap").relative().size_full()
       .child(v_flex().id("wf-prs-area").size_full().min_h(0)
         .child(bar)
@@ -2436,6 +2448,7 @@ export default class Wayfindr extends View {
         (cx) => { this.prShown[k] = REVIEW_SCREEN; cx.notify(); }, { on: this.prShown[k] === REVIEW_SCREEN })))
       .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
         (cx) => review.start(cx), { on: rv?.status === "busy" }))
+      .child(iconButton("wf-pr-full", this.prFull ? "exit-fullscreen" : "fullscreen", t, (cx) => { this.toggleFull(); cx.notify(); }))
       .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
 
     const files = d?.files ?? [], threads = d?.threads ?? [];
@@ -2508,15 +2521,17 @@ export default class Wayfindr extends View {
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.prDrag = { x: e.position.x, from: this.prFrac, frac: this.prFrac }; cx.notify(); });
     // Wheel events end here: the body has had them, the list under the overlay must not. Clicks end
     // here too: the scrim under the overlay closes it on a click of its own.
-    return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0).w(`${Math.round(this.prFrac * 1000) / 10}%`)
-      .bg(t.chrome).border_l(1).border_color(t.border).shadow_lg().on_scroll_wheel(stop).on_click(stop)
+    // Fullscreen (#29): the whole width, no edge and no grip.
+    return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0)
+      .when(this.prFull, (el) => el.w_full()).when(!this.prFull, (el) => el.w(`${Math.round(this.prFrac * 1000) / 10}%`).border_l(1).border_color(t.border))
+      .bg(t.chrome).shadow_lg().on_scroll_wheel(stop).on_click(stop)
       .child(head)
       .when(rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
         .child(cloneChooser("wf-pr-panel-choose", review, t))))
       .child(h_flex().id(`wf-pr-main-${k}`).flex_1().min_h(0).items_stretch()
         .child(this.prRail(t, k, d, threads))
         .child(body))
-      .child(grip);
+      .when(!this.prFull, (el) => el.child(grip));
   }
 
   render(cx) {
