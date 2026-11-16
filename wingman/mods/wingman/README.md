@@ -280,7 +280,7 @@ The diff is also an editor. Click in the text to place the cursor and type. Your
 | Delete lines | `ctrl-shift-k` (Herdr's picker key by default, see below) |
 | Join lines | `ctrl-j` (with the next line, or all selected lines) |
 | Toggle comment | `ctrl-/` (line comments by file type; block comments for HTML, XML, Vue, Markdown and CSS) |
-| Find | `ctrl-f` (a one-line selection becomes the query). Enter / Shift+Enter or `f3` / `shift-f3` for the next and previous match. `alt-c` case, `alt-w` whole word, `alt-r` regular expression. Esc closes. |
+| Find | `ctrl-f` (a one-line selection becomes the query). Enter / Shift+Enter or `f3` / `shift-f3` for the next and previous match. `alt-c` case, `alt-w` whole word, `alt-r` regular expression. Esc closes. The bar fits the editor's width down to 300 px: the box shrinks from 240 to 100 px, then the match count, `.*`, `W`, `Aa` and the Replace toggle go in that order, the arrows and × stay (their keys keep working); the replace row drops its group hint first and shortens **All**. |
 | Replace | `ctrl-h`. Enter replaces the current match and moves on; `ctrl-enter` in the replace box, `ctrl-alt-enter` or All replaces every match as one undo step. With regular expressions, `$1` and the like insert groups. |
 | Go to line | `ctrl-g`, then a line or `line:column` |
 | Bracket matching | with the cursor next to `(` `)` `[` `]` `{` `}`, both brackets of the pair get a box. Brackets in strings and comments don't count. None while text is selected. |

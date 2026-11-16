@@ -59,7 +59,7 @@ import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, CONTROLLER, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
-import { fitBar, fitHeader, hunkButtons, withKey, LAST_DROP, settingsTabs, settingsHeight } from "./barfit.js";
+import { fitBar, fitHeader, fitFindRow, findRowItems, replaceRowItems, hunkButtons, withKey, LAST_DROP, settingsTabs, settingsHeight } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
 import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
@@ -4054,23 +4054,29 @@ export default class Review extends View {
       .child(div().flex_1()).child(this.button("find-close", "×", t.raised, (cx) => this.closeFind(cx)));
     const { ms, error } = this.matches(f), i = this.onMatch(ms), q = this.findInput.value();
     const count = error ? "Bad pattern" : this.bar.note ?? (!q ? "" : !ms.length ? "No results" : i >= 0 ? `${i + 1} of ${ms.length}` : `${ms.length} result${ms.length === 1 ? "" : "s"}`);
+    // Fitted to the bar's width (barfit.fitFindRow): the count, then the option toggles, then the
+    // Replace toggle go as the bar narrows, the box shrinks, and nothing runs past the edge.
+    const w = this.barW == null ? 0 : this.px(this.barW), short = error ? "!" : this.bar.note ? this.bar.note : !q ? "" : !ms.length ? "0" : i >= 0 ? `${i + 1}/${ms.length}` : `${ms.length}`;
+    const row1 = fitFindRow(w, findRowItems([count, short], mode === "replace" ? ["Hide replace", "Hide"] : [`Replace  ${this.kl("replace")}`, "Replace", "⇄"]));
+    const L = row1.labels, shows = (id) => L.has(id);
+    const row2 = mode === "replace" ? fitFindRow(w, replaceRowItems([`All  ${this.kl("replaceAll")}`, "All"], this.findOpts.regex ? "$1, $2… insert groups" : null)) : null;
     return v_flex().px(8).py(4).gap(4).border_b(1).border_color(t.border).text_size(12)
       .child(h_flex().gap(6).items_center()
-        .child(box(this.findInput, 240))
-        .child(chip("find-cased", "Aa", this.findOpts.cased, (cx) => this.findFlag("cased", cx)))
-        .child(chip("find-word", "W", this.findOpts.word, (cx) => this.findFlag("word", cx)))
-        .child(chip("find-regex", ".*", this.findOpts.regex, (cx) => this.findFlag("regex", cx)))
-        .child(div().min_w(70).text_size(11).text_color(error || (q && !ms.length) ? t.ansi1 : t.muted).child(count))
-        .child(this.button("find-prev", "↑", t.raised, (cx) => this.findStep(-1, cx)))
-        .child(this.button("find-next", "↓", t.raised, (cx) => this.findStep(1, cx)))
-        .child(div().flex_1())
-        .child(this.button("find-mode", mode === "replace" ? "Hide replace" : `Replace  ${this.kl("replace")}`, t.raised, (cx) => { this.bar = { mode: mode === "replace" ? "find" : "replace" }; this.paint(cx); }))
-        .child(this.button("find-close", "×", t.raised, (cx) => this.closeFind(cx))))
+        .child(box(this.findInput, row1.inputW))
+        .when(shows("find-cased"), (e) => e.child(chip("find-cased", "Aa", this.findOpts.cased, (cx) => this.findFlag("cased", cx))))
+        .when(shows("find-word"), (e) => e.child(chip("find-word", "W", this.findOpts.word, (cx) => this.findFlag("word", cx))))
+        .when(shows("find-regex"), (e) => e.child(chip("find-regex", ".*", this.findOpts.regex, (cx) => this.findFlag("regex", cx))))
+        .when(shows("count"), (e) => e.child(div().min_w(L.get("count") === count ? 70 : 0).flex_none().whitespace_nowrap().text_size(11).text_color(error || (q && !ms.length) ? t.ansi1 : t.muted).child(L.get("count"))))
+        .child(this.button("find-prev", L.get("find-prev"), t.raised, (cx) => this.findStep(-1, cx)).flex_none())
+        .child(this.button("find-next", L.get("find-next"), t.raised, (cx) => this.findStep(1, cx)).flex_none())
+        .child(div().flex_1().min_w(0))
+        .when(shows("find-mode"), (e) => e.child(this.button("find-mode", L.get("find-mode"), t.raised, (cx) => { this.bar = { mode: mode === "replace" ? "find" : "replace" }; this.paint(cx); }).flex_none().whitespace_nowrap()))
+        .child(this.button("find-close", "×", t.raised, (cx) => this.closeFind(cx)).flex_none()))
       .when(mode === "replace", (e) => e.child(h_flex().gap(6).items_center()
-        .child(box(this.replaceInput, 240))
-        .child(this.button("replace-one", "Replace", t.raised, (cx) => this.replaceOne(cx)))
-        .child(this.button("replace-all", `All  ${this.kl("replaceAll")}`, t.raised, (cx) => this.replaceAll(cx)))
-        .when(this.findOpts.regex, (e) => e.child(div().text_size(11).text_color(t.dim).child("$1, $2… insert groups")))));
+        .child(box(this.replaceInput, row2.inputW))
+        .child(this.button("replace-one", "Replace", t.raised, (cx) => this.replaceOne(cx)).flex_none().whitespace_nowrap())
+        .child(this.button("replace-all", row2.labels.get("replace-all"), t.raised, (cx) => this.replaceAll(cx)).flex_none().whitespace_nowrap())
+        .when(row2.labels.has("hint"), (e) => e.child(div().text_size(11).text_color(t.dim).whitespace_nowrap().child("$1, $2… insert groups")))));
   }
 
   // ---- Search view (ctrl-shift-f) ----------------------------------------------
