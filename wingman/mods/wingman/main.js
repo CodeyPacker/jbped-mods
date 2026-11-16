@@ -37,7 +37,7 @@ import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buil
 import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
 import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
-import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS } from "./cmdroute.js";
+import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS, ownerView, ownedAction, handoff, HANDOFF_MS } from "./cmdroute.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -139,6 +139,9 @@ const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
 // so one acts (claim); module scope is shared by every copy of this build.
 const SETTINGS_REV = "wingman.settingsRev", HOOK_REV = "wingman.hookRev";
 const CMD_INBOX = [];
+// A git command won by a copy that isn't the shown Changes copy: GIT_REQ ({ space, cmd, stamp }) hands it
+// over; GIT_TAKEN (stamp -> when) is where the Changes copy that took it says so, so exactly one acts.
+const GIT_REQ = "wingman.gitReq", GIT_TAKEN = new Map();
 
 // Review comments (comments.js): one file per space under data/wingman/comments, written compare-and-swap.
 // COMMENTS ({ "<space>": stamp }) tells every copy, the dialogs too, that a space's file changed;
@@ -233,7 +236,7 @@ export default class Review extends View {
     // that view as a pane copy (panelview.copyView), so dialogs' jumps reach it.
     const cv = copyView(props()?.view, layout());
     this.view = cv.view; this.startMode = cv.mode;
-    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
+    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now(); this.gitReqSeen = Date.now();
     // Review comments per space (comments.js), loaded from their file when COMMENTS says it changed.
     this.cmts = new Map(); this.cmtSeen = new Map(); this.jumpSeen = Date.now(); this.anchorSeen = new Map();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
@@ -249,10 +252,11 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wingman\./, ""), name = cmdName(c), kind = kindOf(name);
-        if (GIT_COMMANDS.test(c)) { this.gitx?.command(c, cx); continue; } // G6: the shown Changes copy acts (gitview.command)
         if (kind === "all") { setShared(name === "hook" ? HOOK_REV : SETTINGS_REV, { stamp: Date.now() }); continue; } // tick() reloads
         if (kind === "one" && !(await this.claim(name, cx))) continue;
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
+        // G6: Changes' git commands run in the shown Changes copy; another copy shows Changes and hands them over (GIT_REQ).
+        else if (GIT_COMMANDS.test(c)) this.gitCommand(c, cx);
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
         // Problems' commands run in the copy that owns Problems (the Edit panel's, else a pane copy with
         // no Edit panel); another copy hands them over (PROBLEMS_REQ) and shows the Edit panel.
@@ -298,7 +302,7 @@ export default class Review extends View {
     cx.timer.every(1000, () => crumb(`alive ${this.view ?? this.mode} leader=${!!this.loop.isLeader}`, null, ALIVE_MS)); // crash breadcrumbs: every copy, first 10 s after Changes shows
     cx.timer.every(250, (cx) => {
       if (this.paintAsk) { this.paintAsk = false; cx.notify(); } // paint(): a redraw asked from a task, from this callback's own cx
-      crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
+      crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx); this.takeGit(cx);
       this.syncComments(cx); this.reloadShared(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
@@ -351,11 +355,31 @@ export default class Review extends View {
    */
   async claim(name, cx) {
     const now = Date.now();
+    const owner = ownerView(name) ? this.view === ownerView(name) : (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner();
     const me = { id: this.id, c: name, at: now, rank: cmdRank({ menu: now - (this.menuAt ?? 0) < 60000, focused: !!this.handle?.is_focused?.() || !!this.inBar,
-      owner: (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner(), panel: !!this.view }) };
+      owner, panel: !!this.view }) };
     cmdPrune(CMD_INBOX, now).push(me);
     await cx.sleep(SETTLE_MS);
     return cmdWinner(CMD_INBOX, me) === this.id;
+  }
+
+  /** A git command this copy won (claim): the shown Changes copy runs it; any other shows Changes and hands it over (GIT_REQ). */
+  gitCommand(c, cx) {
+    if (ownedAction(this.view, this.mode === "changes" && this.changesShown(), "changes") === "act") return this.gitx?.command(c, cx);
+    if (!showView("changes")) { this.error = "This layout has no Wingman Changes panel"; return; }
+    const now = Date.now();
+    for (const [k, at] of GIT_TAKEN) if (now - at > 2 * HANDOFF_MS) GIT_TAKEN.delete(k);
+    setShared(GIT_REQ, { space: this.spaceId, cmd: c, stamp: now });
+  }
+
+  /** The Changes copy, every tick: a git command handed over by another copy, once this copy is shown (exactly one copy takes it). */
+  takeGit(cx) {
+    if (this.view !== "changes" || !this.gitx) return;
+    const req = shared(GIT_REQ), now = Date.now();
+    const what = handoff(req, { seen: this.gitReqSeen, taken: GIT_TAKEN, space: this.spaceId, shown: this.mode === "changes" && this.changesShown(), now });
+    if (what === "wait") return;
+    if (req) this.gitReqSeen = Math.max(this.gitReqSeen ?? 0, req.stamp);
+    if (what === "take") { GIT_TAKEN.set(req.stamp, now); this.gitx.command(req.cmd, cx); this.paint(cx); }
   }
 
   /** Settings or the Claude hook changed (a shared stamp any copy sets): read them again, in every copy. */

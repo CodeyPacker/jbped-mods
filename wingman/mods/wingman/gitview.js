@@ -24,8 +24,8 @@ import { toWsl } from "./git.js";
 import { fitBar } from "./barfit.js";
 import { capSteps } from "./undocap.js";
 
-/** Commands of this module (wingman.<name>[:arg]); main.js hands them to the Changes copy. */
-export const GIT_COMMANDS = /^(fetch|pull|push|publish|syncConfirm|syncCancel|branches|branchSwitch|branchNew|branchClose|discardChange|discardChangeConfirm|discardChangeCancel|genMessage|genReplace|genKeep|genCancel)(:|$)/;
+/** Commands of this module (wingman.<name>[:arg]): cmdroute.js routes them to one Changes copy. */
+export { GIT_COMMANDS } from "./cmdroute.js";
 /** How often the ↑/↓ counts are reread from local refs while Changes is shown (ms). */
 export const INFO_MS = 30000;
 /** The "Discard change" button on a change's header row in Changes: its width, and the narrow one's. */
