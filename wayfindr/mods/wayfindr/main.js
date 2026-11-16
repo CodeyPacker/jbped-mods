@@ -6,13 +6,13 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup, Scrollbar } from "gpui-base";
 import * as fs from "fs/promises";
-import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
+import { run, layout, props, panes, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
 import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, loadLocalPrDiff, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, postPrReview, replyToPrThread, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
-import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceTarget, launchSpaceName, reviewSpaceName } from "./launch.js";
+import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceTarget, launchSpaceName, reviewSpaceName, reviewPaneSpot } from "./launch.js";
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
 import { diffRows, longestLine } from "./prdiff.js";
@@ -256,6 +256,10 @@ function skeletonPr(t) {
 export default class Wayfindr extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
+    // A pane copy (#30): Review's pane beside the agent, opened with pane.split props { pr: { account, pr } }.
+    // It shows only that Pull Request: no views, no list, no Boards, no toasts.
+    const pp = props()?.pr;
+    this.paneFor = pp && typeof pp === "object" && typeof pp.account === "string" && pp.pr && typeof pp.pr.key === "string" ? { account: pp.account, pr: pp.pr } : null;
     this.view = ["prs", "settings"].includes(load(VIEW_KEY, "board")) ? load(VIEW_KEY, "board") : "board";
     this.state = { status: "loading" };
     this.checks = null;
@@ -324,6 +328,7 @@ export default class Wayfindr extends View {
     this.signInToasted = new Set(); // account ids already toasted for sign-in this session
     this.lastBackground = null;
     this.pendingView = null; // { view, boardId, until }: where the last toast's click lands
+    if (this.paneFor) return this.initPane(cx);
     this.reload(cx);
     // Reads the layout only (due() gates requests), often enough that a show from anywhere is noticed.
     // Redraws on a show, and once a minute while shown (the "Updated" age).
@@ -345,6 +350,22 @@ export default class Wayfindr extends View {
     cx.timer.every(60_000, (cx) => this.backgroundTick(cx));
   }
 
+  // The pane copy (#30): the config (runner, templates), then the Pull Request. refresh reloads the PR; focus
+  // focuses; close and profile do nothing here (Herdr's pane header closes the pane).
+  initPane(cx) {
+    this.hidden = false;
+    this.selectedPr = this.paneFor; this.prLast = this.paneFor.pr.key; this.prShown[this.paneFor.pr.key] = null;
+    this.reload(cx);
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = String(await nextCommand()).replace(/^wayfindr\./, "");
+        if (c === "focus") this.handle.focus();
+        else if (c === "refresh" && this.profile) this.fetchPr(cx);
+        cx.notify();
+      }
+    });
+  }
+
   // The exception to "never while hidden": every notifications.minutes, shown or hidden, the Pull Requests
   // and every followed Board refresh so their diffs can toast. Skipped when a foreground refresh ran
   // within the window, so a shown Wayfindr doesn't fetch twice.
@@ -361,6 +382,7 @@ export default class Wayfindr extends View {
 
   // Toasts unless Wayfindr is shown on the toast's own view. A click shows Wayfindr and lands on pendingView.
   announce(toasts, cx) {
+    if (this.paneFor) return;
     const shown = toasts.length ? this.shownNow() : false;
     for (const x of toasts) {
       if (shown && ((x.view === "prs" && this.view === "prs") || (x.view === "board" && this.view === "board" && this.board?.id === x.boardId))) continue;
@@ -370,9 +392,9 @@ export default class Wayfindr extends View {
   }
 
   // Hidden from now: the next show is noticed at once (it refreshes).
-  close_() { run("layout.hide", { id: "wayfindr" }); this.hidden = true; }
+  close_() { if (this.paneFor) return; run("layout.hide", { id: "wayfindr" }); this.hidden = true; }
 
-  shownNow() { return isShown(layout(), (n) => n.content?.mod === "wayfindr"); }
+  shownNow() { return Boolean(this.paneFor) || isShown(layout(), (n) => n.content?.mod === "wayfindr"); }
 
   // Refreshes on show and every POLL_MS while shown. Never while hidden (D25), except backgroundTick. True when shown.
   watch(cx) {
@@ -512,8 +534,16 @@ export default class Wayfindr extends View {
         this.prBox.set_value(""); this.prSummary.set_value("");
         this.launch = null; this.reviews = {}; this.editing = null; this.typing = false;
         this.commenting = null; this.moving = null; this.cursor = null;
+        if (this.paneFor) { this.selectedPr = this.paneFor; this.prLast = this.paneFor.pr.key; this.prShown[this.paneFor.pr.key] = null; }
       }
       this.lastProfile = now;
+      // The pane copy (#30) fetches only its Pull Request: no cache, no Boards, no list.
+      if (this.paneFor) {
+        this.fetchPrLater = false;
+        if (this.state.status === "ok") this.fetchPr(cx);
+        cx.notify();
+        return;
+      }
       if (this.state.status === "ok") {
         let cached = null;
         try { cached = await readTextFile(cacheFile(appHome(), parsed.profile.name)); } catch { /* no cache */ }
@@ -711,7 +741,7 @@ export default class Wayfindr extends View {
     cx.notify();
   }
 
-  closePr() { this.selectedPr = null; }
+  closePr() { if (!this.paneFor) this.selectedPr = null; } // the pane copy keeps its PR (#30)
 
   // The overlay's fullscreen (#29): the choice stays for the next Pull Request.
   toggleFull() {
@@ -971,7 +1001,7 @@ export default class Wayfindr extends View {
     const sel = this.selectedPr;
     if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v", "p", "f"].includes(key)) return false;
     const k = sel.pr.key, d = this.prDetails[k]?.data;
-    if (key === "f") { this.toggleFull(); return true; }
+    if (key === "f") { if (this.paneFor) return false; this.toggleFull(); return true; }
     if (key === "p") {
       if (!this.canWritePr(sel.account, "postReview")) return false;
       this.prShown[k] = REVIEW_SCREEN;
@@ -1918,7 +1948,13 @@ export default class Wayfindr extends View {
     if (this.reviews[pr.key]?.status === "busy") return;
     const name = reviewSpaceName(pr);
     const open = spaces().find((x) => x.name === name);
-    if (open) { run("space.select", { id: open.id }); this.close_(); return; }
+    if (open) {
+      run("space.select", { id: open.id });
+      // The pane too, unless the space has a Wayfindr pane already (#30).
+      const repo = this.profile?.repos.find((r) => r.prRepo && sameRepo(r.prRepo, pr.repo));
+      if (resolveTemplate(DEFAULT_REVIEW, this.state.templates?.review, repo?.review).pane !== false) this.openReviewPane(name, accountId, pr, cx);
+      this.close_(); return;
+    }
     // The Profile as the Review started: a reload during an await must not mix in another's.
     const p = this.profile;
     if (!p) return;
@@ -1962,6 +1998,7 @@ export default class Wayfindr extends View {
         const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree", wr);
         const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, agentArgv(tpl));
         run("space.new", { name, ...target, task: reviewPrompt(pr, info, made.path, tpl) });
+        if (tpl.pane !== false) this.openReviewPane(name, accountId, pr, cx);
         this.close_();
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
@@ -1970,6 +2007,22 @@ export default class Wayfindr extends View {
         this.reviews[pr.key] = { status: "error", error: `Review failed: ${e.message ?? e}` };
       }
       cx.notify();
+    });
+  }
+
+  // Review's Pull Request pane (#30): a Wayfindr copy showing the PR, split right of the space's first terminal
+  // pane. Waits up to 15 s for the space and its terminal; then quietly gives up (the user can split by hand).
+  // One Wayfindr pane per space: none is added when one is there.
+  openReviewPane(name, accountId, pr, cx) {
+    cx.spawn(async (cx) => {
+      for (const end = Date.now() + 15_000; Date.now() < end; await cx.sleep(250)) {
+        const spot = reviewPaneSpot(spaces(), panes(), name);
+        if (spot?.wayfindr) return;
+        if (spot?.terminal) {
+          run("pane.split", { pane: spot.terminal, direction: "right", mod: "wayfindr", props: { pr: { account: accountId, pr } } });
+          return;
+        }
+      }
     });
   }
 
@@ -2417,8 +2470,10 @@ export default class Wayfindr extends View {
 
   // The Pull Request overlay: a header, then the file rail and the content column (#24). The content is the
   // Overview (the summary, description, files line and comments) or one file's diff with its threads.
-  prPanel(t) {
-    const sel = this.selectedPr, pr = sel.pr, k = pr.key;
+  // The Pull Request's header, rail and content column (#30): inside the overlay, or the whole of a pane copy.
+  // A pane has no Review, Close or fullscreen: the space is the Review and Herdr's pane header closes it.
+  prContent(t) {
+    const sel = this.selectedPr, pr = sel.pr, k = pr.key, pane = Boolean(this.paneFor);
     const entry = this.prDetails[k] ?? { status: "loading" };
     const d = entry.data, cur = d ?? pr;
     const md = (id, text) => div().text_size(13).text_color(t.foreground).child(TextView.markdown(`wf-pr-${id}-${k}`, text).selectable(true));
@@ -2446,10 +2501,11 @@ export default class Wayfindr extends View {
       // Post review (#27): the saved comments, a verdict and a summary, posted as one review.
       .when(writable, (el) => el.child(button("wf-pr-post-review", `Post review (${saved.length})`, t,
         (cx) => { this.prShown[k] = REVIEW_SCREEN; cx.notify(); }, { on: this.prShown[k] === REVIEW_SCREEN })))
-      .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
-        (cx) => review.start(cx), { on: rv?.status === "busy" }))
-      .child(iconButton("wf-pr-full", this.prFull ? "exit-fullscreen" : "fullscreen", t, (cx) => { this.toggleFull(); cx.notify(); }))
-      .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
+      .when(!pane, (el) => el
+        .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
+          (cx) => review.start(cx), { on: rv?.status === "busy" }))
+        .child(iconButton("wf-pr-full", this.prFull ? "exit-fullscreen" : "fullscreen", t, (cx) => { this.toggleFull(); cx.notify(); }))
+        .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); })));
 
     const files = d?.files ?? [], threads = d?.threads ?? [];
     const shownPath = this.prShown[k] ?? null, f = shownPath == null ? null : files.find((x) => x.path === shownPath) ?? null;
@@ -2515,7 +2571,18 @@ export default class Wayfindr extends View {
         // Threads no diff row takes: on no line, outdated, or on a file or line the diff doesn't show.
         .children(unplaced.flatMap((th) => th.comments.map((c, i) => card(`wf-pr-u-${k}-${th.id}-${i}`, c, `${th.path}${th.line != null ? `:${th.line}` : ""}`))));
     }
-    // Over the list, against the right edge, 60% wide to start; the strip on its left edge resizes it.
+    return v_flex().id("wf-pr-content").size_full().min_h(0).bg(t.chrome)
+      .child(head)
+      .when(!pane && rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
+        .child(cloneChooser("wf-pr-panel-choose", review, t))))
+      .child(h_flex().id(`wf-pr-main-${k}`).flex_1().min_h(0).items_stretch()
+        .child(this.prRail(t, k, d, threads))
+        .child(body));
+  }
+
+  // The overlay: prContent over the list, against the right edge, 60% wide to start; the strip on its left
+  // edge resizes it.
+  prPanel(t) {
     const grip = div().id("wf-pr-grip").absolute().top(0).bottom(0).left(0).w(6).cursor_col_resize()
       .hover((s) => s.bg(t.accent)).when(Boolean(this.prDrag), (el) => el.bg(t.accent))
       .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.prDrag = { x: e.position.x, from: this.prFrac, frac: this.prFrac }; cx.notify(); });
@@ -2525,19 +2592,15 @@ export default class Wayfindr extends View {
     return v_flex().id("wf-pr-panel").absolute().top(0).bottom(0).right(0)
       .when(this.prFull, (el) => el.w_full()).when(!this.prFull, (el) => el.w(`${Math.round(this.prFrac * 1000) / 10}%`).border_l(1).border_color(t.border))
       .bg(t.chrome).shadow_lg().on_scroll_wheel(stop).on_click(stop)
-      .child(head)
-      .when(rv?.status === "choose", (el) => el.child(div().px(14).py(8).flex_none().border_b(1).border_color(t.border)
-        .child(cloneChooser("wf-pr-panel-choose", review, t))))
-      .child(h_flex().id(`wf-pr-main-${k}`).flex_1().min_h(0).items_stretch()
-        .child(this.prRail(t, k, d, threads))
-        .child(body))
+      .child(this.prContent(t))
       .when(!this.prFull, (el) => el.child(grip));
   }
 
   render(cx) {
-    if (this.hidden) this.watch(cx); // just shown: refresh in the background
+    if (this.hidden && !this.paneFor) this.watch(cx); // just shown: refresh in the background
     const t = theme();
-    return v_flex().id("wf-root").size_full().bg(t.background)
+    const pane = Boolean(this.paneFor), prOn = pane || this.view === "prs";
+    const root = v_flex().id("wf-root").size_full().bg(t.background)
       .track_focus(this.handle)
       // A press anywhere in Wayfindr closes the Move dropdown; its trigger and list stop their own.
       .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.prDrag = null; this.railDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
@@ -2548,7 +2611,7 @@ export default class Wayfindr extends View {
         if (e.key === "escape") {
           // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
           const pk = this.selectedPr?.pr.key;
-          if (this.typing === "pr" || (this.view === "prs" && pk && this.prOpen[pk])) {
+          if (this.typing === "pr" || (prOn && pk && this.prOpen[pk])) {
             if (pk) this.closePrBox(pk); // the comment box: cancelled, before anything else (D5)
             this.typing = false; this.handle.focus();
           } else if (this.typing) {
@@ -2556,16 +2619,25 @@ export default class Wayfindr extends View {
             this.typing = false;
             this.handle.focus();
           } else if (this.moveOpen) this.moveOpen = null;
-          else if (this.view === "prs" && pk && this.prConfirm === pk) this.prConfirm = null;
-          else if (this.view === "prs" && pk && this.prShown[pk] === REVIEW_SCREEN) this.prShown[pk] = null; // back to the Overview (D7)
+          else if (prOn && pk && this.prConfirm === pk) this.prConfirm = null;
+          else if (prOn && pk && this.prShown[pk] === REVIEW_SCREEN) this.prShown[pk] = null; // back to the Overview (D7)
+          else if (pane) { /* the pane copy (#30): nothing after its detail steps */ }
           else if (this.view === "prs" && this.selectedPr) this.closePr();
           else if (this.selected) this.closeTicket(); else this.close_();
           cx.notify(); return;
         }
         if (this.typing) return; // keys in a text box are for the text
-        if (this.view === "prs" && this.selectedPr && this.prKey(e.key, cx, e.modifiers ?? {})) { cx.stop_propagation(); cx.notify(); return; }
-        if (this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
-      })
+        if (prOn && this.selectedPr && this.prKey(e.key, cx, e.modifiers ?? {})) { cx.stop_propagation(); cx.notify(); return; }
+        if (!pane && this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
+      });
+    // The pane copy (#30): only the Pull Request, at full size. A config that won't load says so instead.
+    if (pane) {
+      const s = this.state;
+      if (s.status === "missing") return root.child(this.message(t, "No configuration yet", [`Open Wayfindr's Settings to add a profile (${s.path}).`]));
+      if (s.status === "invalid") return root.child(this.message(t, "The configuration has problems", [s.path, ...s.errors]));
+      return root.child(this.prContent(t));
+    }
+    return root
       .child(this.header(t))
       .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));
   }
