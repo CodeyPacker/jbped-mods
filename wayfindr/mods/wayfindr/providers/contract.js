@@ -62,6 +62,12 @@
 //   description  markdown, safeMarkdown applied; "" when none
 //   reviewers  [{ name, state }]  state: "approved" | "changes" | "commented" | "pending" | "rejected" | "waiting"
 //   comments   [{ author, createdAt, body, path, line }], oldest first; path and line null unless on a file
+//   threads    [{ id, path, line, side, resolved, comments: [{ author, createdAt, body }] }]  review threads on a file (#25),
+//              oldest first by their first comment; also flattened into comments. path without a leading "/";
+//              line null when the thread is on no line or is outdated; side "new" | "old" (the side line counts on);
+//              resolved boolean, or null when the Provider doesn't say
+//   head       the PR's head commit (GitHub headRefOid, Azure lastMergeSourceCommit; the clone's
+//              refs/wayfindr/pr-<n> replaces it), or null. Viewed marks are kept per head
 //   moreComments  how many comments weren't fetched
 //   files      [{ path, oldPath, status, additions, deletions, patch, binary }]
 //              status: "added" | "modified" | "deleted" | "renamed"; oldPath set for renames, else null

@@ -263,3 +263,61 @@ test("loadPullRequestDetail hands opts to the Provider", async () => {
   await loadPullRequestDetail({ accounts: [{ id: "gh", provider: "github" }] }, "gh", { key: "K" }, {}, { patches: false }, registry);
   assert.deepEqual(got, { patches: false });
 });
+
+// ---- Threads and head (#24, #25) ----
+
+test("GitHub mapPrDetail: head from headRefOid, review threads with side, resolved and outdated", async () => {
+  assert.match(PR_DETAIL_QUERY, /headRefOid/);
+  assert.match(PR_DETAIL_QUERY, /nodes \{ id path line isResolved isOutdated diffSide comments/);
+  const c = (author, at, body) => ({ author: { login: author }, body, createdAt: at });
+  const node = ghNode({
+    headRefOid: "f".repeat(40),
+    reviewThreads: { totalCount: 4, nodes: [
+      { id: "T2", path: "src/a.js", line: 9, isResolved: true, isOutdated: false, diffSide: "RIGHT",
+        comments: { totalCount: 2, nodes: [c("cy", "2026-11-01T05:00:00Z", "why"), c("ann", "2026-11-01T06:00:00Z", "[x](javascript:y) because")] } },
+      { id: "T1", path: "src/b.js", line: 3, isResolved: false, isOutdated: false, diffSide: "LEFT",
+        comments: { totalCount: 1, nodes: [c("dee", "2026-11-01T04:00:00Z", "old line")] } },
+      { id: "T3", path: "src/c.js", line: 4, isResolved: false, isOutdated: true, diffSide: "RIGHT",
+        comments: { totalCount: 1, nodes: [c("eve", "2026-11-01T07:00:00Z", "stale")] } },
+      { id: "T4", path: "src/d.js", line: 1, isResolved: false, isOutdated: false, diffSide: "RIGHT", comments: { totalCount: 0, nodes: [] } },
+    ] },
+  });
+  const d = await github.pullRequest({ login: "me" }, { key: "PR_node", repo: "o/web" }, ghIo(node, []), { patches: false });
+  assert.equal(d.head, "f".repeat(40));
+  assert.deepEqual(d.threads, [
+    { id: "T1", path: "src/b.js", line: 3, side: "old", resolved: false, comments: [{ author: "dee", createdAt: "2026-11-01T04:00:00Z", body: "old line" }] },
+    { id: "T2", path: "src/a.js", line: 9, side: "new", resolved: true, comments: [
+      { author: "cy", createdAt: "2026-11-01T05:00:00Z", body: "why" }, { author: "ann", createdAt: "2026-11-01T06:00:00Z", body: "x because" }] },
+    { id: "T3", path: "src/c.js", line: null, side: "new", resolved: false, comments: [{ author: "eve", createdAt: "2026-11-01T07:00:00Z", body: "stale" }] },
+  ]);
+  assert.equal(d.comments.filter((x) => x.path).length, 4); // the flat list is unchanged
+  assert.equal((await github.pullRequest({ login: "me" }, { key: "K", repo: "o/web" }, ghIo(ghNode(), []), { patches: false })).head, null);
+});
+
+test("Azure mapPrDetail: head from lastMergeSourceCommit, file threads with side and resolved, path without the slash", async () => {
+  const text = (author, at, content) => ({ author: { displayName: author }, content, publishedDate: at, commentType: "text" });
+  const value = [
+    { id: 10, status: "fixed", threadContext: { filePath: "/src/a.js", rightFileStart: { line: 3 } },
+      comments: [text("Cy", "2026-11-01T02:00:00Z", "why"), text("Ann", "2026-11-01T03:00:00Z", "because")] },
+    { id: 11, status: "active", threadContext: { filePath: "/src/b.js", leftFileStart: { line: 7 } }, comments: [text("Bob", "2026-11-01T01:00:00Z", "gone line")] },
+    { id: 12, threadContext: { filePath: "/src/c.js" }, comments: [text("Dee", "2026-11-01T04:00:00Z", "on the file")] },
+    { id: 13, status: "wontFix", threadContext: { filePath: "/src/d.js", rightFileStart: { line: 1 } }, comments: [text("Eve", "2026-11-01T05:00:00Z", "no")] },
+    { id: 14, status: "pending", threadContext: { filePath: "/src/e.js", rightFileStart: { line: 2 } }, comments: [text("Fay", "2026-11-01T06:00:00Z", "hm")] },
+    { id: 15, status: "active", comments: [text("Gus", "2026-11-01T00:00:00Z", "general")] },
+    { id: 16, status: "active", threadContext: { filePath: "/src/f.js" }, comments: [{ ...text("S", "2026-11-01T00:00:00Z", "x"), commentType: "system" }] },
+  ];
+  const io = azIo([change("/src/a.js", "edit")], {});
+  const fetch = io.fetch;
+  io.fetch = async (url, opts) => (new URL(url).pathname.endsWith("/threads") ? json({ value }) : fetch(url, opts));
+  const d = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, io, { patches: false });
+  assert.equal(d.head, SRC);
+  assert.deepEqual(d.threads.map((t) => [t.id, t.path, t.line, t.side, t.resolved, t.comments.map((c) => c.author).join(",")]), [
+    [11, "src/b.js", 7, "old", false, "Bob"],
+    [10, "src/a.js", 3, "new", true, "Cy,Ann"],
+    [12, "src/c.js", null, "new", null, "Dee"],
+    [13, "src/d.js", 1, "new", true, "Eve"],
+    [14, "src/e.js", 2, "new", false, "Fay"],
+  ]);
+  assert.deepEqual(d.threads[1].comments[1], { author: "Ann", createdAt: "2026-11-01T03:00:00Z", body: "because" });
+  assert.equal(d.comments.length, 7); // the flat list keeps the general thread too
+});

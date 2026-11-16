@@ -226,12 +226,12 @@ const REST = "https://api.github.com";
 export const PR_DETAIL_QUERY = `query($id: ID!) {
   node(id: $id) { ... on PullRequest {
     number title url repository { nameWithOwner }
-    body state isDraft mergedAt createdAt updatedAt headRefName baseRefName changedFiles
+    body state isDraft mergedAt createdAt updatedAt headRefName headRefOid baseRefName changedFiles
     author { login ... on User { name } }
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login name } ... on Team { name } } } }
     latestReviews(first: 30) { nodes { author { login } state } }
     comments(first: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } body createdAt } }
-    reviewThreads(first: ${THREADS}) { totalCount nodes { path line comments(first: ${THREAD_COMMENTS}) { totalCount nodes { author { login } body createdAt } } } }
+    reviewThreads(first: ${THREADS}) { totalCount nodes { id path line isResolved isOutdated diffSide comments(first: ${THREAD_COMMENTS}) { totalCount nodes { author { login } body createdAt } } } }
   } }
 }`;
 
@@ -267,15 +267,23 @@ export function mapPrDetail(node, files, pr) {
   const moreComments = Math.max(0, (node.comments?.totalCount ?? 0) - issue.length)
     + threads.reduce((n, t) => n + Math.max(0, (t.comments?.totalCount ?? 0) - (t.comments?.nodes ?? []).length), 0)
     + Math.max(0, (node.reviewThreads?.totalCount ?? 0) - threads.length); // unfetched threads count as one comment each
+  // Review threads as threads (#25): oldest first by their first comment; an outdated thread is on no line.
+  const reviewThreads = threads.map((t) => ({
+    id: t.id ?? null, path: String(t.path ?? "").replace(/^\/+/, ""), line: t.isOutdated ? null : (t.line ?? null),
+    side: t.diffSide === "LEFT" ? "old" : "new", resolved: typeof t.isResolved === "boolean" ? t.isResolved : null,
+    comments: (t.comments?.nodes ?? []).filter(Boolean).map((c) => ({ author: login(c.author), createdAt: c.createdAt ?? null, body: safeMarkdown(c.body ?? "") })),
+  })).filter((t) => t.comments.length)
+    .sort((a, b) => String(a.comments[0].createdAt).localeCompare(String(b.comments[0].createdAt)));
   return {
     key: pr.key, id: `${repo.split("/")[1]}#${node.number}`, title: node.title ?? "", url: node.url ?? null, repo,
     state: String(node.state).toLowerCase() === "merged" ? "merged" : String(node.state).toLowerCase() === "closed" ? "closed" : "open",
     draft: Boolean(node.isDraft),
     author: { id: login(node.author), name: node.author?.name || login(node.author) },
     branch: node.headRefName, target: node.baseRefName ?? null,
+    head: node.headRefOid ?? null,
     createdAt: node.createdAt ?? null, updatedAt: node.updatedAt ?? null, mergedAt: node.mergedAt ?? null,
     description: safeMarkdown(node.body ?? ""),
-    reviewers, comments, moreComments,
+    reviewers, comments, moreComments, threads: reviewThreads,
     files: files.map(mapPrFile),
     moreFiles: Math.max(0, (node.changedFiles ?? files.length) - files.length),
     truncated: false, // GitHub doesn't say when it left a patch out for size

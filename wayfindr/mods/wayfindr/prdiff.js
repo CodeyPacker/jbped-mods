@@ -18,11 +18,11 @@ export function unquotePath(s) {
   try { return decodeURIComponent(hex); } catch { return body; }
 }
 
-// The script's stdout: sections opened by "--wayfindr status", "--wayfindr numstat" and "--wayfindr patch".
+// The script's stdout: sections opened by "--wayfindr status", "--wayfindr numstat", "--wayfindr patch" and "--wayfindr head".
 function sections(stdout) {
   const text = String(stdout ?? "").replace(/\r\n/g, "\n");
-  const out = { status: "", numstat: "", patch: "" };
-  const marks = [...text.matchAll(/^--wayfindr (status|numstat|patch)$/gm)];
+  const out = { status: "", numstat: "", patch: "", head: "" };
+  const marks = [...text.matchAll(/^--wayfindr (status|numstat|patch|head)$/gm)];
   marks.forEach((m, i) => {
     const from = m.index + m[0].length + 1, to = i + 1 < marks.length ? marks[i + 1].index : text.length;
     out[m[1]] = text.slice(from, to);
@@ -32,8 +32,9 @@ function sections(stdout) {
 
 const lines = (s) => s.split("\n").filter((l) => l !== "");
 
-// PRDIFF_SH's stdout into { files, truncated }, files in the PrDetail contract's shape. The three sections list
-// the same files in the same order (one git diff each), so they are paired by position.
+// PRDIFF_SH's stdout into { files, truncated, head }, files in the PrDetail contract's shape. The first three sections
+// list the same files in the same order (one git diff each), so they are paired by position. head: the PR branch's
+// commit, or null when the output has none.
 export function parsePrDiff(stdout) {
   const s = sections(stdout);
   const status = lines(s.status).map((l) => { const tab = l.indexOf("\t"); return { letter: l.slice(0, tab)[0], path: unquotePath(l.slice(tab + 1)) }; });
@@ -59,7 +60,8 @@ export function parsePrDiff(stdout) {
       additions: binary ? 0 : Number(n.a) || 0, deletions: binary ? 0 : Number(n.d) || 0, patch, binary,
     };
   });
-  return { files, truncated };
+  const head = /^[0-9a-f]{40}([0-9a-f]{24})?$/i.exec(s.head.trim())?.[0] ?? null;
+  return { files, truncated, head };
 }
 
 // One row per patch line from the first hunk header: kind "@" a hunk header, "+" added, "-" removed, " "

@@ -221,8 +221,8 @@ echo "url $(git -C "$d" config --get remote.origin.url)"`;
 
 // A Pull Request's diff from its local clone (#22). argv: host clone path, branch, target branch, PR number.
 // Fetches the branch into refs/wayfindr/pr-<number> (left in the clone) and the target into origin's, then
-// prints three sections, each opened by a "--wayfindr <name>" line: status (name-status), numstat and patch,
-// all from the merge base to the PR's branch. Renames show as a delete and an add. Nothing is checked out.
+// prints four sections, each opened by a "--wayfindr <name>" line: status (name-status), numstat and patch,
+// all from the merge base to the PR's branch, then head (the fetched branch's commit). Renames show as a delete and an add. Nothing is checked out.
 export const PRDIFF_SH = `${TO_LOCAL}
 repo=$(loc "$1") || exit 1; [ -n "$repo" ] || { printf "can't convert %s\\n" "$1" >&2; exit 1; }
 case "$4" in ''|*[!0-9]*) printf "not a pull request number: %s\\n" "$4" >&2; exit 1;; esac
@@ -230,7 +230,8 @@ git -C "$repo" fetch --quiet origin "+refs/heads/$2:refs/wayfindr/pr-$4" "+refs/
 mb=$(git -C "$repo" merge-base "refs/remotes/origin/$3" "refs/wayfindr/pr-$4") || { printf "no merge base of %s and %s in %s\\n" "$2" "$3" "$repo" >&2; exit 1; }
 printf '%s\\n' '--wayfindr status'; git -C "$repo" diff --no-renames --name-status "$mb" "refs/wayfindr/pr-$4" || exit 1
 printf '%s\\n' '--wayfindr numstat'; git -C "$repo" diff --no-renames --numstat "$mb" "refs/wayfindr/pr-$4" || exit 1
-printf '%s\\n' '--wayfindr patch'; git -C "$repo" diff --no-color --no-renames --unified=3 "$mb" "refs/wayfindr/pr-$4" || exit 1`;
+printf '%s\\n' '--wayfindr patch'; git -C "$repo" diff --no-color --no-renames --unified=3 "$mb" "refs/wayfindr/pr-$4" || exit 1
+printf '%s\\n' '--wayfindr head'; git -C "$repo" rev-parse "refs/wayfindr/pr-$4" || exit 1`;
 
 // The space's agent: started by the runner in the folder, through a login shell so the user's PATH
 // applies. The folder and agent args are argv, never shell text.

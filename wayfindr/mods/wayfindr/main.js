@@ -681,7 +681,7 @@ export default class Wayfindr extends View {
           try {
             const number = String(data.id ?? sel.pr.id ?? "").split(/[#!]/).pop();
             const local = await loadLocalPrDiff(clone, data.branch, data.target, number, io);
-            data = { ...data, files: local.files, moreFiles: 0, truncated: local.truncated, source: { kind: "clone", path: clone } };
+            data = { ...data, files: local.files, moreFiles: 0, truncated: local.truncated, head: local.head, source: { kind: "clone", path: clone } };
           } catch (e) {
             const api = await loadPullRequestDetail(p, sel.account, sel.pr, io);
             data = { ...api, source: { kind: "api" }, gitError: String(e.message ?? e) };

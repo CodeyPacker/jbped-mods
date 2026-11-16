@@ -310,6 +310,9 @@ export function fileStatus(changeType) {
   return "modified";
 }
 
+// A thread's status: fixed, closed, by design and won't fix are resolved; active and pending are not.
+const RESOLVED = { fixed: true, closed: true, byDesign: true, wontFix: true, active: false, pending: false };
+
 // Threads into comments, oldest first: deleted threads and comments and system comments left out. The first
 // PR_THREADS threads (by their first comment) are kept, the rest counted in moreComments. Pure.
 export function mapThreads(threads) {
@@ -321,7 +324,17 @@ export function mapThreads(threads) {
     author: c.author?.displayName ?? "", createdAt: c.publishedDate ?? null, body: safeMarkdown(String(c.content ?? "")),
     path: t.threadContext?.filePath ?? null, line: t.threadContext?.filePath ? (t.threadContext.rightFileStart?.line ?? null) : null,
   }))).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
-  return { comments, moreComments: kept.slice(PR_THREADS).reduce((n, x) => n + x.list.length, 0) };
+  // The threads on a file (#25), oldest first: line from the right side ("new"), else the left ("old"), else none.
+  const fileThreads = kept.slice(0, PR_THREADS).filter(({ t }) => t.threadContext?.filePath).map(({ t, list }) => {
+    const ctx = t.threadContext, right = ctx.rightFileStart?.line, left = ctx.leftFileStart?.line;
+    return {
+      id: t.id ?? null, path: String(ctx.filePath).replace(/^\/+/, ""),
+      line: right != null ? right : left != null ? left : null, side: right == null && left != null ? "old" : "new",
+      resolved: Object.hasOwn(RESOLVED, String(t.status)) ? RESOLVED[t.status] : null,
+      comments: list.map((c) => ({ author: c.author?.displayName ?? "", createdAt: c.publishedDate ?? null, body: safeMarkdown(String(c.content ?? "")) })),
+    };
+  });
+  return { comments, moreComments: kept.slice(PR_THREADS).reduce((n, x) => n + x.list.length, 0), threads: fileThreads };
 }
 
 // One Items Get answer: the text, or null when the item is binary or has no text content.
@@ -342,16 +355,17 @@ export function mapChange(entry, oldItem, newItem) {
 
 export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated }) {
   if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
-  const { comments, moreComments } = mapThreads(threads);
+  const { comments, moreComments, threads: fileThreads } = mapThreads(threads);
   const s = mapPrSummary(pr, org);
   return {
     key: s.key, id: s.id, title: s.title, url: s.url, repo: s.repo,
     state: PR_STATE[pr.status] ?? "open", draft: Boolean(pr.isDraft), author: s.author,
     branch: branchOf(pr.sourceRefName), target: branchOf(pr.targetRefName) || null,
+    head: /^[0-9a-f]{40}$/i.test(String(pr.lastMergeSourceCommit?.commitId ?? "")) ? pr.lastMergeSourceCommit.commitId : null,
     createdAt: pr.creationDate ?? null, updatedAt: null, mergedAt: pr.status === "completed" ? (pr.closedDate ?? null) : null,
     description: safeMarkdown(pr.description ?? ""),
     reviewers: (pr.reviewers ?? []).map((r) => ({ name: r.displayName ?? r.uniqueName ?? "", state: VOTE[r.vote] ?? "waiting" })),
-    comments, moreComments, files, moreFiles, truncated,
+    comments, moreComments, threads: fileThreads, files, moreFiles, truncated,
   };
 }
 

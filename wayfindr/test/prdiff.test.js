@@ -45,7 +45,15 @@ test("parsePrDiff cuts a patch over the limit at its last full line", () => {
 });
 
 test("parsePrDiff of empty output is no files", () => {
-  assert.deepEqual(parsePrDiff("--wayfindr status\n--wayfindr numstat\n--wayfindr patch\n"), { files: [], truncated: false });
+  assert.deepEqual(parsePrDiff("--wayfindr status\n--wayfindr numstat\n--wayfindr patch\n"), { files: [], truncated: false, head: null });
+});
+
+test("parsePrDiff reads the head section after the patch, which keeps its last file whole", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  const { files, head } = parsePrDiff(`${out}--wayfindr head\n${sha}\n`);
+  assert.equal(head, sha);
+  assert.equal(files.at(-1).patch, "@@ -1 +1,2 @@\n k\n+l");
+  assert.equal(parsePrDiff(`${out}--wayfindr head\nfatal: bad ref\n`).head, null);
 });
 
 test("unquotePath decodes git's C-style quoting", () => {
@@ -78,8 +86,8 @@ test("longestLine counts tabs as four spaces", () => {
   assert.equal(longestLine([]), 0);
 });
 
-test("PRDIFF_SH prints the three sections and checks nothing out", () => {
-  for (const name of ["status", "numstat", "patch"]) assert.ok(PRDIFF_SH.includes(`--wayfindr ${name}`));
+test("PRDIFF_SH prints the four sections and checks nothing out", () => {
+  for (const name of ["status", "numstat", "patch", "head"]) assert.ok(PRDIFF_SH.includes(`--wayfindr ${name}`));
   assert.ok(!PRDIFF_SH.includes("checkout"));
   assert.ok(PRDIFF_SH.includes('"+refs/heads/$2:refs/wayfindr/pr-$4"'));
 });
@@ -103,8 +111,10 @@ function fixture() {
 test("loadLocalPrDiff diffs the PR branch from its merge base, leaving the clone's checkout alone", async () => {
   const { io, env, clone } = fixture();
   const before = sh("git rev-parse HEAD && git status --porcelain", clone, env).stdout;
-  const { files, truncated } = await loadLocalPrDiff(clone, "feat", "main", 7, io);
+  const { files, truncated, head } = await loadLocalPrDiff(clone, "feat", "main", 7, io);
   assert.equal(truncated, false);
+  assert.equal(head, sh("git rev-parse refs/wayfindr/pr-7", clone, env).stdout.trim());
+  assert.equal(head, sh("git rev-parse origin/feat", clone, env).stdout.trim());
   assert.deepEqual(files.map((f) => [f.path, f.status, f.additions, f.deletions]), [["a.txt", "modified", 1, 1], ["gone.txt", "deleted", 0, 1], ["new.txt", "added", 1, 0]]);
   assert.equal(files[0].patch, "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c");
   assert.ok(!files.some((f) => f.path === "main.txt")); // the target's later commit isn't in the PR's diff
