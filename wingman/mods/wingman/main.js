@@ -59,7 +59,7 @@ import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, CONTROLLER, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
-import { fitBar, hunkButtons, withKey } from "./barfit.js";
+import { fitBar, fitHeader, hunkButtons, withKey, LAST_DROP } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
 import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
@@ -5541,10 +5541,12 @@ export default class Review extends View {
     if (this.lastReject && !this.lastReject.remote) add("reason", [withKey("Comment last rejection", this.kl("reason")), "Comment last rejection", "Reason"], 1);
     if (total > 0 && this.mode === "review") { add("reject-all", ["Reject all files", "Reject all"], 2, "all"); add("accept-all", ["Accept all files", "Accept all"], 2, "all"); }
     if (this.spaceId && this.mode === "review" && this.stores.some((st) => !st.plain)) add("checkpoints", [`Checkpoints ${this.cpCounts?.get(this.spaceId) ?? 0}`], 3);
-    if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`], Infinity);
+    // Comments and Settings shorten to icons (fitHeader drops the title first); Comments goes last, Settings never.
+    if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`, `💬 ${ncomments}`], LAST_DROP);
     add("settings", ["⚙ Settings", "⚙"], Infinity);
-    const fixed = 24 + 64 + (this.view ? 0 : 120) + SUBTITLE_MIN + 10 * 3; // padding, "Wingman", the Review/Edit switch, the subtitle, gaps
-    return fitBar(this.px(this.paneW), items, fixed, 10);
+    const { labels, narrow } = fitHeader(this.paneW == null ? 0 : this.px(this.paneW), items, { panel: !!this.view, subtitle: SUBTITLE_MIN });
+    if (narrow) labels.set("narrow", true);
+    return labels;
   }
 
   /**
@@ -5677,12 +5679,12 @@ export default class Review extends View {
         .on_size_change((size, cx) => { const u = unitOf(size.width); if (Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().child("Wingman"))
+        .when(!hb.has("narrow"), (e) => e.child(div().font_semibold().child("Wingman")))
         // A panel copy is one view: the panel's own Review and Edit buttons switch between them.
         .when(!this.view, (e) => e.child(h_flex().flex_none().gap(2).p(2).rounded(6).bg(t.raised).children(["review", "edit"].map((m) =>
           div().id(`mode-${m}`).h(22).px(8).flex().items_center().rounded(4).text_size(12).cursor_pointer()
             .when(this.mode === m, (e) => e.bg(t.selected)).on_click((_e, cx) => this.setMode(m, cx))
-            .child(m === "review" ? "Review" : "Edit")))))
+            .child(hb.has("narrow") ? (m === "review" ? "R" : "E") : m === "review" ? "Review" : "Edit")))))
         .child(div().flex_shrink(1).min_w(0).text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${this.counts(total, vis)}${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
         .child(div().flex_1())
         .when(hb.has("reason"), (e) => e.child(this.button("reason", hb.get("reason"), t.raised, (cx) => this.askReason(cx)).flex_none().whitespace_nowrap()))

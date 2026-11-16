@@ -38,6 +38,26 @@ export function fitBar(width, items, fixed = 0, gap = 4) {
   return out;
 }
 
+const TITLE_W = 64, SWITCH_W = 120, SWITCH_NARROW_W = 52, HEADER_PAD = 24, HEADER_GAP = 10;
+/** Items with this `drop` or higher are the header's last ones (Comments, Settings): they shorten before anything else of theirs goes. */
+export const LAST_DROP = 99;
+
+/**
+ * The pane header's buttons (fitBar) for a header `width` wide. `panel`: a panel copy (no
+ * Review/Edit switch); `subtitle`: the room the subtitle keeps while the title shows. When the
+ * last items (drop >= LAST_DROP: Comments, Settings) don't fit beside the title, the title goes and
+ * the switch shortens (`narrow`), so they still fit, as icons, down to 180 px. `fixed`: the width
+ * the bar keeps for the rest. Returns { labels, narrow, fixed }.
+ */
+export function fitHeader(width, items, { panel = true, subtitle = 80 } = {}) {
+  const used = (labels, fixed) => fixed + items.filter((it) => labels.has(it.id)).reduce((n, it) => n + textW(labels.get(it.id), it.size ?? 11) + (it.pad ?? 20) + HEADER_GAP, 0);
+  const wideFixed = HEADER_PAD + TITLE_W + HEADER_GAP + subtitle + HEADER_GAP + (panel ? 0 : SWITCH_W + HEADER_GAP);
+  const wide = fitBar(width, items, wideFixed, HEADER_GAP);
+  if (!(width > 0) || (used(wide, wideFixed) <= width && items.every((it) => (it.drop ?? 0) < LAST_DROP || wide.has(it.id)))) return { labels: wide, narrow: false, fixed: wideFixed };
+  const fixed = HEADER_PAD + (panel ? 0 : SWITCH_NARROW_W + HEADER_GAP);
+  return { labels: fitBar(width, items, fixed, HEADER_GAP), narrow: true, fixed };
+}
+
 /** "label  key" when there's a key, else the label. */
 export const withKey = (label, key) => (key ? `${label}  ${key}` : label);
 
