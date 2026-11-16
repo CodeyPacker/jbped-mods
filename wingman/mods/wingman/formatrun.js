@@ -1,8 +1,9 @@
 // Format on save, the part that runs tools. The buffer goes to a temp file beside the target (a mod's
-// exec has no stdin), the tool formats that file where the repo's tools run (git.js decides: this
-// computer, WSL, or another machine), the result is read back, and the temp file is removed in every
+// exec has no stdin), the tool formats that file where the repo's tools run (toolrun.js: this
+// computer, WSL, or another machine, with the user's shell's PATH), the result is read back, and the temp file is removed in every
 // outcome. The temp file stays inside the repo root and its name is made here (format.js tempName).
-import { inRepo, ownerOf, onWindows, wslArg } from "./git.js";
+import { ownerOf, onWindows } from "./git.js";
+import { runTool } from "./toolrun.js";
 import { pathKind, readText, writeText, deleteFile, join } from "./fsx.js";
 import { inside } from "./fileops.js";
 import { FORMAT_MS, formattersFor, extOf, tempName, newId } from "./format.js";
@@ -35,14 +36,12 @@ export async function formatText({ root, on = null, rel, text, cache = newFormat
       if (tool) break;
     }
     if (!tool) return { status: "none" };
-    // WSL runs the program by its WSL path (inRepo converts the arguments, not the program).
-    if (owner === "wsl" && !on) tool = { ...tool, cmd: wslArg(tool.cmd) };
     const folder = join(root, dir), cwd = tool.cwd ?? (folder || root), file = join(root, rel);
     // Does the tool ignore this file (Prettier: .prettierignore, or no parser for it)? Asked once per file.
     if (tool.info) {
       const ik = `${tool.name}|${file}`;
       if (!cache.info.has(ik)) {
-        cache.info.set(ik, inRepo(tool.cmd, tool.info(file), { cwd, timeout: left(), on }).then((r) => (r.code === 0 && tool.ignored(r.stdout)), () => false));
+        cache.info.set(ik, runTool([tool.cmd, ...tool.info(file)], { root, cwd, on, timeout: left(), paths: true }).then((r) => (r.code === 0 && tool.ignored(r.stdout)), () => false));
       }
       if (await cache.info.get(ik)) return { status: "none", ignoredBy: tool.name };
     }
@@ -59,7 +58,7 @@ async function run(tool, { root, on, tmp, cwd, text, left, rel }) {
   try {
     await writeText(tmp, text, null, { on });
     let r;
-    try { r = await inRepo(tool.cmd, tool.write(tmp), { cwd, timeout: left(), on }); }
+    try { r = await runTool([tool.cmd, ...tool.write(tmp)], { root, cwd, on, timeout: left(), paths: true }); }
     catch (e) { return (result = { status: "failed", reason: timedOut(e) ? `${tool.name} timed out` : String(e?.message ?? e).slice(0, 200), tool: tool.name }); }
     if (r.code !== 0) {
       const why = firstLine(r.stderr) || firstLine(r.stdout) || `exit ${r.code}`;

@@ -32,8 +32,10 @@ import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
-import { git, onWindows, ownerOf as gitOwner, toWsl, distroOf } from "./git.js";
-import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, plan as runPlan, exeFrom, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { git, onWindows, toWsl } from "./git.js";
+import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { plan as runPlan } from "./toolpath.js";
+import { toolWhere } from "./toolrun.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -3041,22 +3043,8 @@ export default class Review extends View {
 
   inlineFailed(j, msg, cx) { j.status = "error"; j.note = msg; this.paint(cx); }
 
-  /**
-   * Where the command runs for a repo (git.js decides the same for git): another machine runs it
-   * there; Windows runs it through WSL for a repo WSL owns, or when no native .exe is on PATH.
-   */
-  async inlineWhere(store, name) {
-    const on = store.on ?? null, cwd = store.root;
-    if (on) return { how: "remote", on, cwd, timeout: INLINE_MS };
-    if (!onWindows()) return { how: "sh", cwd, timeout: INLINE_MS };
-    const owner = await gitOwner(cwd);
-    let nativeExe = null;
-    if (owner !== "wsl") {
-      if (/^[A-Za-z]:[\\/].*\.exe$/i.test(name)) nativeExe = name;
-      else { const w = await exec("where", [name]).catch(() => null); nativeExe = w?.code === 0 ? exeFrom(w.stdout) : null; }
-    }
-    return { how: owner !== "wsl" && nativeExe ? "native" : "wsl", windows: true, owner, nativeExe, cwd, wslCwd: toWsl(cwd), distro: distroOf(cwd), timeout: INLINE_MS };
-  }
+  /** Where program `name` runs for `store`'s repo, with the PATH its tools need (toolrun.js toolWhere; Problems uses it too). */
+  inlineWhere(store, name) { return toolWhere(store.root, store.on ?? null, name, INLINE_MS); }
 
   /** Runs the command (a task of its own) and applies its answer, unless the job was cancelled meanwhile. */
   async runInline(j, seq, prompt, cx) {

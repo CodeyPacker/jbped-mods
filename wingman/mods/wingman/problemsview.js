@@ -1,7 +1,7 @@
 // The Problems tab in the Edit view's left column, and what feeds it: the project's own checkers
 // (problems.js decides which and parses them) run one-shot where the repo's tools run, the way
-// Inline edit runs its command (main.js inlineWhere: sh -lc with a fixed script on Linux, macOS and
-// another machine, wsl.exe for a repo WSL owns, a native .exe otherwise on Windows). Arguments are
+// Inline edit runs its command (toolrun.js: sh -lc with a fixed script and the user's shell's PATH on
+// Linux, macOS and another machine, wsl.exe for a repo WSL owns, a native .exe otherwise on Windows). Arguments are
 // always an argv array: no file name, setting or output is ever put into a shell string.
 //
 // One per copy (main.js: this.problems), and only the copy that owns Problems acts: the Edit
@@ -11,7 +11,7 @@ import { div } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { exec, readTextFile, agents, terminals, panes, hc, spaces, shared } from "herdr";
 import { PROBE_SH, parseProbe, dot, probes, ancestors, wantsListing, detect, parse, capOutput, failureLine, RunQueue, capDiags, shiftDiags, byLine, worst, problemRows, stepProblem, countText, buildProblemsPrompt, stripText, MAX_DIAGS } from "./problems.js";
-import { plan as runPlan } from "./inlineedit.js";
+import { plan as runPlan } from "./toolpath.js";
 import { chooseTarget, isWslArgv, promptProblem, sendToAgent } from "./commentprompt.js";
 import { listDir, execOn } from "./fsx.js";
 import { onWindows, toWsl } from "./git.js";
@@ -215,7 +215,7 @@ export class Problems {
     });
   }
 
-  /** Where `argv[0]` runs for `store` (main.js inlineWhere), cached. */
+  /** Where `argv[0]` runs for `store` (toolrun.js toolWhere, through main.js inlineWhere), cached. */
   async whereFor(store, name) {
     const k = `${idOf(store)}|${name}`, c = this.whereCache.get(k);
     if (c && Date.now() - c.at < WHERE_MS) return c.where;
