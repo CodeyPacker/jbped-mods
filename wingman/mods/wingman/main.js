@@ -24,7 +24,7 @@ import { captureNotices } from "./captureplan.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
-import { viewShown } from "./panelview.js";
+import { viewShown, copyView } from "./panelview.js";
 import { listDir, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs, execOn } from "./fsx.js";
 import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
@@ -32,8 +32,12 @@ import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
-import { git, onWindows, ownerOf as gitOwner, toWsl, distroOf } from "./git.js";
-import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, plan as runPlan, exeFrom, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { git, onWindows, toWsl } from "./git.js";
+import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { plan as runPlan } from "./toolpath.js";
+import { toolWhere } from "./toolrun.js";
+import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
+import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS } from "./cmdroute.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -55,7 +59,7 @@ import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, CONTROLLER, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
-import { fitBar, hunkButtons, withKey } from "./barfit.js";
+import { fitBar, fitHeader, hunkButtons, withKey, LAST_DROP, settingsTabs, settingsHeight } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
 import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
@@ -129,6 +133,11 @@ const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's
 // The Explorer's file operations: TREE_MENU names the copy whose tree the right-click menu is for
 // (every shown copy gets the menu's command); FILEOP tells the other copies what was renamed or deleted.
 const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
+// Commands (cmdroute.js): SETTINGS_REV / HOOK_REV ({ stamp }) tell every copy, hidden ones too, to read
+// the settings or look for the Claude hook again. CMD_INBOX: the shown copies' deliveries of a command,
+// so one acts (claim); module scope is shared by every copy of this build.
+const SETTINGS_REV = "wingman.settingsRev", HOOK_REV = "wingman.hookRev";
+const CMD_INBOX = [];
 
 // Review comments (comments.js): one file per space under data/wingman/comments, written compare-and-swap.
 // COMMENTS ({ "<space>": stamp }) tells every copy, the dialogs too, that a space's file changed;
@@ -219,35 +228,44 @@ export default class Review extends View {
     this.fmtCaches = new Map(); // space -> what formatrun.js found for it (the formatter per folder), cleared with the space
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
-    this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
+    // A panel copy shows one view; a tab or pane opened with props.view outside the panel layout starts in
+    // that view as a pane copy (panelview.copyView), so dialogs' jumps reach it.
+    const cv = copyView(props()?.view, layout());
+    this.view = cv.view; this.startMode = cv.mode;
     this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
     // Review comments per space (comments.js), loaded from their file when COMMENTS says it changed.
     this.cmts = new Map(); this.cmtSeen = new Map(); this.jumpSeen = Date.now(); this.anchorSeen = new Map();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
-    this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
+    this.mode = this.startMode; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
     cx.spawn(async (cx) => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.paint(cx); }); // host reads only from a task, never from init itself
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });
-    // The pane takes the keyboard back after its popup closes.
-    // Commands: "focus" when a popup over the pane closes; the rest come from the right-click menu.
+    // Commands (cmdroute.js): Herdr hands wingman.<command> to every shown copy. "focus" (a popup over
+    // this copy closed) and tree menu commands are this copy's own; settings and hook reloads reach
+    // every copy, hidden ones too, through a shared stamp; any other command is done by one copy only.
+    this.settingsRev = shared(SETTINGS_REV)?.stamp ?? 0; this.hookRev = shared(HOOK_REV)?.stamp ?? 0;
     cx.spawn(async (cx) => {
       for (;;) {
-        const c = String(await nextCommand()).replace(/^wingman\./, "");
+        const c = String(await nextCommand()).replace(/^wingman\./, ""), name = cmdName(c), kind = kindOf(name);
+        if (GIT_COMMANDS.test(c)) { this.gitx?.command(c, cx); continue; } // G6: the shown Changes copy acts (gitview.command)
+        if (kind === "all") { setShared(name === "hook" ? HOOK_REV : SETTINGS_REV, { stamp: Date.now() }); continue; } // tick() reloads
+        if (kind === "one" && !(await this.claim(name, cx))) continue;
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
-        // Problems' commands act in one copy: the Edit panel's, else a pane copy with no Edit panel (as inlineEdit).
-        else if (c === "checkProblems") { if (this.problems.owner()) this.problems.checkNow(cx); }
-        else if (/^problems[A-Z]/.test(c)) this.problems.command(c, cx);
-        else if (c === "openSettings") { if (this.problems.owner()) this.openSettings(); }
-        else if (GIT_COMMANDS.test(c)) this.gitx?.command(c, cx); // G6: the shown Changes copy acts (gitview.command)
-        else if (c === "inlineEdit" || c.startsWith("inlineEdit:")) {
-          // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
-          // "wingman.inlineEdit:<instruction>"`, which also runs it): every copy gets it, so the Edit
-          // panel's copy acts, or a pane copy when the layout has no Edit panel. ctrl-k itself goes
-          // to the copy that has the keyboard (key, runAction).
-          if (this.view === "edit" || (!this.view && !hasView("edit"))) this.openInline(cx, c.startsWith("inlineEdit:") ? c.slice("inlineEdit:".length) : null);
+        // Problems' commands run in the copy that owns Problems (the Edit panel's, else a pane copy with
+        // no Edit panel); another copy hands them over (PROBLEMS_REQ) and shows the Edit panel.
+        else if (c === "checkProblems" || /^problems[A-Z]/.test(c)) {
+          if (this.problems.owner()) { if (c === "checkProblems") this.problems.checkNow(cx); else this.problems.command(c, cx); }
+          else { showView("edit"); setShared(PROBLEMS_REQ, { space: this.spaceId, ...(c === "checkProblems" ? {} : { cmd: c }), stamp: Date.now() }); }
         }
+        else if (c === "openSettings") this.openSettings();
+        // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
+        // "wingman.inlineEdit:<instruction>"`, which also runs it): the Edit copy when it got it, else
+        // the copy that did hands it to Edit at its lines (openInline, as ctrl-k in Review).
+        else if (name === "inlineEdit") this.openInline(cx, c.startsWith("inlineEdit:") ? c.slice("inlineEdit:".length) : null);
+        // The checkpoints dialog: one, from whichever copy got the command.
+        else if (c === "checkpoints") this.openCheckpoints(cx);
         else {
           // The diff's right-click menu: [the action whose focus rule applies, what it does].
           const menu = {
@@ -257,12 +275,6 @@ export default class Review extends View {
             // Reject the current change, then add a review comment on where it was.
             rejectComment: ["reject", () => this.rejectWithComment(cx)],
             clear: [null, () => this.clearSelection(cx)],
-            // The settings popup saved a change.
-            settings: [null, async () => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); }],
-            // The settings popup installed or removed the Claude hook on a machine: look again now.
-            hook: [null, () => { forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }],
-            // G4: the checkpoints dialog, from the Review copy only (one dialog however many copies show).
-            checkpoints: [null, () => { if (this.mode === "review") this.openCheckpoints(cx); }],
           }[c];
           // Every action (a key keys.json sends as wingman.<action>, e.g. "alt-up": "wingman.moveLineUp",
           // or the menu's reject, accept, reason) goes through the same focus rule as its key (act).
@@ -286,7 +298,7 @@ export default class Review extends View {
     cx.timer.every(250, (cx) => {
       if (this.paintAsk) { this.paintAsk = false; cx.notify(); } // paint(): a redraw asked from a task, from this callback's own cx
       crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
-      this.syncComments(cx);
+      this.syncComments(cx); this.reloadShared(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
         const f = this.file();
@@ -329,6 +341,31 @@ export default class Review extends View {
    * again, from its own cx, whenever this was asked since its last run.
    */
   paint(cx) { this.paintAsk = true; cx.notify(); }
+
+  /**
+   * Whether this copy is the one that acts on command `name` (cmdroute.js): every copy that got it
+   * waits SETTLE_MS for the others, then the highest ranked acts. Its rank: it opened the menu that
+   * sent the command, it has the keyboard, the command is Problems' or inline edit's and this is
+   * their copy, it's a panel copy.
+   */
+  async claim(name, cx) {
+    const now = Date.now();
+    const me = { id: this.id, c: name, at: now, rank: cmdRank({ menu: now - (this.menuAt ?? 0) < 60000, focused: !!this.handle?.is_focused?.() || !!this.inBar,
+      owner: (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner(), panel: !!this.view }) };
+    cmdPrune(CMD_INBOX, now).push(me);
+    await cx.sleep(SETTLE_MS);
+    return cmdWinner(CMD_INBOX, me) === this.id;
+  }
+
+  /** Settings or the Claude hook changed (a shared stamp any copy sets): read them again, in every copy. */
+  reloadShared(cx) {
+    const s = shared(SETTINGS_REV)?.stamp ?? 0, h = shared(HOOK_REV)?.stamp ?? 0;
+    if (s !== this.settingsRev) {
+      this.settingsRev = s;
+      cx.spawn(async (cx) => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); this.paint(cx); });
+    }
+    if (h !== this.hookRev) { this.hookRev = h; forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }
+  }
 
   /** Per-space view state; no stores means no repo found yet. */
   reset(stores) {
@@ -808,7 +845,7 @@ export default class Review extends View {
 
   /** E5: with line wrap on, the text columns a row holds (0: wrap off). */
   wrapCols() {
-    return this.settings.wordWrap ? Math.max(20, Math.floor(((this.viewW ?? 600) - GUTTER - 16) / this.cw())) : 0;
+    return this.settings.wordWrap ? wrapColumns(this.vw(), GUTTER, 16, this.cw()) : 0;
   }
 
   /** E5: a long line's row becomes one row per segment ({ seg, segs }; later ones have `cont`). */
@@ -866,7 +903,7 @@ export default class Review extends View {
 
   tabMax() {
     const total = this.visible().reduce((w, x) => w + this.tabWidth(x), 0);
-    return Math.max(0, total - (this.tabViewW ?? 0));
+    return Math.max(0, total - this.tabVW());
   }
 
   setTabOffset(px) { this.tabOffset = Math.max(0, Math.min(px, this.tabMax())); }
@@ -874,11 +911,12 @@ export default class Review extends View {
   /** Shifts the strip just enough to show `key`'s tab. */
   showTab(key) {
     if (!this.tabViewW) return; // not laid out yet; the size callback reveals it
+    const view = this.tabVW();
     let x0 = 0;
     for (const x of this.visible()) {
       const w = this.tabWidth(x);
       if (x.key === key) {
-        const off = this.tabOffset ?? 0, view = this.tabViewW ?? 0;
+        const off = this.tabOffset ?? 0;
         if (x0 < off) this.setTabOffset(x0);
         else if (x0 + w > off + view) this.setTabOffset(x0 + w - view);
         return;
@@ -889,7 +927,7 @@ export default class Review extends View {
 
   /** Either wheel axis, in pixels (lines count as 20 px). */
   tabWheel(ev, cx) {
-    const d = ev.delta_lines ? (ev.delta_lines.x || ev.delta_lines.y) * 20 : ev.delta.x || ev.delta.y;
+    const d = ev.delta_lines ? (ev.delta_lines.x || ev.delta_lines.y) * 20 : this.px(ev.delta.x || ev.delta.y);
     if (!d) return;
     this.setTabOffset((this.tabOffset ?? 0) - d);
     this.paint(cx);
@@ -1952,8 +1990,8 @@ export default class Review extends View {
       // kept from the area around it and a click (clickChange) tells the checkbox from the row by it.
       .child(div().id("chg-list").flex_1().min_h(0).pt(4).relative().overflow_hidden()
         .on_size_change((size, cx) => { if (!this.crumbSized) { this.crumbSized = true; crumb(`on_size_change: first Changes list size ${size.width}x${size.height}`, "changes"); } if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; this.paint(cx); } })
-        .on_mouse_move((ev) => { this.chgX = ev.local_position?.x ?? null; })
-        .on_mouse_down("left", (ev) => { this.chgX = ev.local_position?.x ?? null; })
+        .on_mouse_move((ev) => { this.chgX = ev.local_position ? this.px(ev.local_position.x) : null; })
+        .on_mouse_down("left", (ev) => { this.chgX = ev.local_position ? this.px(ev.local_position.x) : null; })
         .when(rows.length > 0, (e) => e
           .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => { if (!this.crumbRange) { this.crumbRange = true; crumb(`virtual list: first range ${range.start}-${range.end} of ${rows.length}`, "changes"); } return rows.slice(range.start, range.end).map(row); })
             .w_full().h(Math.max(FILE_H, (this.chgH ?? 300) - 4)).track_scroll(this.chgScroll)
@@ -2307,6 +2345,7 @@ export default class Review extends View {
       ...(it.root ? [{ cmd: "treeRefresh", label: "Refresh", key: "" }]
         : [{ cmd: "treeRename", label: "Rename…", key: this.kl("renameItem") }, { cmd: "treeDelete", label: "Delete", key: this.kl("deleteItem") }]),
     ];
+    this.menuAt = Date.now(); // its command comes back to every shown copy: this one acts (claim)
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
     this.paint(cx);
   }
@@ -2683,7 +2722,7 @@ export default class Review extends View {
   // the top: the list reports no scroll position, and its rows can't take mouse handlers,
   // so this is what lets a pointer position map to a row (clicks, drags, the menu).
 
-  viewRows() { return Math.max(1, Math.floor((this.viewH ?? 400) / ROW)); }
+  viewRows() { return Math.max(1, Math.floor(this.vh() / ROW)); }
 
   /**
    * scroll_to_item only moves the list when the row is off screen, bringing it to the nearest
@@ -2718,13 +2757,13 @@ export default class Review extends View {
 
   wheel(ev, cx) {
     // Sideways (Shift+wheel, or a sideways swipe) scrolls long lines.
-    const dx = ev.delta_lines ? ev.delta_lines.x * 3 * this.cw() : ev.delta.x;
-    const sideways = ev.modifiers?.shift ? (ev.delta_lines ? ev.delta_lines.y * 3 * this.cw() : ev.delta.y) : dx;
-    if (ev.modifiers?.shift || Math.abs(dx) > Math.abs(ev.delta_lines?.y ?? ev.delta.y)) {
+    const dx = ev.delta_lines ? ev.delta_lines.x * 3 * this.cw() : this.px(ev.delta.x);
+    const sideways = ev.modifiers?.shift ? (ev.delta_lines ? ev.delta_lines.y * 3 * this.cw() : this.px(ev.delta.y)) : dx;
+    if (ev.modifiers?.shift || Math.abs(dx) > Math.abs(ev.delta_lines?.y ?? this.px(ev.delta.y))) {
       if (this.wrapCols()) return; // wrapped lines don't scroll sideways
       this.hx = Math.max(0, this.hx - sideways); this.paint(cx); cx.stop_propagation(); return;
     }
-    const lines = ev.delta_lines?.y ?? ev.delta.y / ROW;
+    const lines = ev.delta_lines?.y ?? this.px(ev.delta.y) / ROW;
     this.wheelAcc = (this.wheelAcc ?? 0) - lines;
     const step = Math.trunc(this.wheelAcc);
     if (!step) return;
@@ -2742,7 +2781,7 @@ export default class Review extends View {
     // A click in the editor closes the tree's name box or delete confirm (nothing is done).
     if (this.treeEdit && !this.treeEdit.busy) this.treeEdit = null;
     if (this.treeDel && !this.treeDel.busy) this.treeDel = null;
-    const f = this.file(), x = ev.local_position?.x ?? -1, y = ev.local_position?.y ?? -1, i = this.rowAt(y);
+    const f = this.file(), { x, y } = this.at(ev), i = this.rowAt(y);
     if (!f || i < 0) return;
     const r = this.rowsOf(f)[i];
     if (r.kind === "@") return this.mode === "changes" ? this.gitx?.hunkClick(r.hunk, x, GUTTER, BTN_GAP, cx) : this.rowButton(r.hunk, x, cx);
@@ -2760,9 +2799,9 @@ export default class Review extends View {
    *  a row at a time near the top and bottom edges. */
   pointerMove(ev, cx) {
     if (!this.dragging) return;
-    this.dragY = ev.local_position.y; this.dragX = ev.local_position.x;
+    ({ x: this.dragX, y: this.dragY } = this.at(ev));
     if (this.dragY < ROW) this.scrollTo((this.top ?? 0) - 1);
-    else if (this.dragY > (this.viewH ?? 400) - ROW) this.scrollTo((this.top ?? 0) + 1);
+    else if (this.dragY > this.vh() - ROW) this.scrollTo((this.top ?? 0) + 1);
     this.dragTo(this.dragY);
     this.paint(cx);
   }
@@ -3053,22 +3092,8 @@ export default class Review extends View {
 
   inlineFailed(j, msg, cx) { j.status = "error"; j.note = msg; this.paint(cx); }
 
-  /**
-   * Where the command runs for a repo (git.js decides the same for git): another machine runs it
-   * there; Windows runs it through WSL for a repo WSL owns, or when no native .exe is on PATH.
-   */
-  async inlineWhere(store, name) {
-    const on = store.on ?? null, cwd = store.root;
-    if (on) return { how: "remote", on, cwd, timeout: INLINE_MS };
-    if (!onWindows()) return { how: "sh", cwd, timeout: INLINE_MS };
-    const owner = await gitOwner(cwd);
-    let nativeExe = null;
-    if (owner !== "wsl") {
-      if (/^[A-Za-z]:[\\/].*\.exe$/i.test(name)) nativeExe = name;
-      else { const w = await exec("where", [name]).catch(() => null); nativeExe = w?.code === 0 ? exeFrom(w.stdout) : null; }
-    }
-    return { how: owner !== "wsl" && nativeExe ? "native" : "wsl", windows: true, owner, nativeExe, cwd, wslCwd: toWsl(cwd), distro: distroOf(cwd), timeout: INLINE_MS };
-  }
+  /** Where program `name` runs for `store`'s repo, with the PATH its tools need (toolrun.js toolWhere; Problems uses it too). */
+  inlineWhere(store, name) { return toolWhere(store.root, store.on ?? null, name, INLINE_MS); }
 
   /** Runs the command (a task of its own) and applies its answer, unless the job was cancelled meanwhile. */
   async runInline(j, seq, prompt, cx) {
@@ -3490,7 +3515,7 @@ export default class Review extends View {
     const machine = this.machine();
     // The space's repos, for the Problems command (kept per repo).
     const repos = this.repos().map((st) => ({ id: idOf(st), name: this.repoName(st) }));
-    openOverlay({ mod: "wingman", props: { form: "settings", repos, ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 990 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", repos, ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: settingsHeight(this.paneH == null ? null : this.px(this.paneH)) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -3555,7 +3580,18 @@ export default class Review extends View {
     this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; this.paint(cx);
   }
 
-  cw() { return this.charW ?? 7.2; }
+  /** One character's width in the diff font, in element px (zoom.js: measured widths include the app's zoom). */
+  cw() { return charWidth(this.charPx, 100, this.unit) ?? 7.2; }
+
+  /** The diff's width and height in element px. */
+  vw() { return this.viewW == null ? 600 : this.px(this.viewW); }
+  vh() { return this.viewH == null ? 400 : this.px(this.viewH); }
+
+  /** The file tab strip's width in element px. */
+  tabVW() { return this.tabViewW ? this.px(this.tabViewW) : 0; }
+
+  /** A pointer event's position in its element, in element px ({ x: -1, y: -1 } when it has none). */
+  at(ev) { const p = ev.local_position; return p ? { x: this.px(p.x), y: this.px(p.y) } : { x: -1, y: -1 }; }
   hasTextSel() { return !!(this.anchor && this.cur && cmp(this.anchor, this.cur)); }
   ordered() { return cmp(this.anchor, this.cur) <= 0 ? [this.anchor, this.cur] : [this.cur, this.anchor]; }
 
@@ -3567,9 +3603,9 @@ export default class Review extends View {
   /** The position under x on row `r` (a line of the current file). */
   posAt(f, r, x) {
     const text = body(linesOf(f)[r.line]), seg = r.seg;
-    if (!seg) return { line: r.line, col: charAt(text, (x - GUTTER + this.hx) / this.cw()) };
+    if (!seg) return { line: r.line, col: charAt(text, colAtX(x, GUTTER, this.hx, this.cw())) };
     // A wrapped segment: its own columns; past its end stays on it (the last segment takes the line end).
-    const v = (x - GUTTER) / this.cw() - seg.ind + visualCol(text, seg.from);
+    const v = colAtX(x, GUTTER, 0, this.cw()) - seg.ind + visualCol(text, seg.from);
     return { line: r.line, col: Math.max(seg.from, Math.min(charAt(text, Math.max(0, v)), seg.to === text.length ? seg.to : seg.to - 1)) };
   }
 
@@ -3601,7 +3637,7 @@ export default class Review extends View {
     if (row != null) this.ensureVisible(row);
     if (this.wrapCols()) { this.hx = 0; return; }
     const x = visualCol(body(linesOf(f)[this.cur.line]), this.cur.col) * this.cw();
-    const view = Math.max(60, (this.viewW ?? 600) - GUTTER - 40);
+    const view = Math.max(60, this.vw() - GUTTER - 40);
     if (x < this.hx) this.hx = Math.max(0, x - 60);
     else if (x > this.hx + view) this.hx = x - view + 60;
   }
@@ -4705,6 +4741,13 @@ export default class Review extends View {
       });
       cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.ieInput.set_value?.(this.st.inlineCommand ?? INLINE_COMMAND); this.pcInput.set_value?.(this.st.problemsCommands?.[this.pcRepo]?.command ?? ""); this.paint(cx); });
       if (this.form.machine) this.hookAction(null, cx);
+      // Its sections as commands, for keys and tests: wingman.settingsTab:general | editing | inline | problems | machine.
+      cx.spawn(async (cx) => {
+        for (;;) {
+          const c = String(await nextCommand()).replace(/^wingman\./, "");
+          if (c.startsWith("settingsTab:")) { this.setTab = c.slice("settingsTab:".length); this.paint(cx); }
+        }
+      });
       return;
     }
     if (this.form.form === "comment") return this.initCommentForm(cx);
@@ -5238,7 +5281,7 @@ export default class Review extends View {
    * selecting is left-click only. A line in a hunk, or its button row, makes that hunk current.
    */
   openMenu(ev, cx) {
-    const f = this.file(), i = this.rowAt(ev.local_position?.y ?? -1);
+    const f = this.file(), i = this.rowAt(this.at(ev).y);
     if (!f || i < 0) return;
     this.handle.focus(); this.treeFocus = false; this.searchFocus = false; this.problemsFocus = false; // a right-click in the file gives it the keyboard
     const r = this.rowsOf(f)[i], inHunk = r.hunk != null, sel = this.selection(f), hasSel = !!sel;
@@ -5262,6 +5305,7 @@ export default class Review extends View {
       ...(this.lastReject ? [{ cmd: "reason", label: "Comment last rejection", key: this.kl("reason") }] : []),
       ...(hasSel ? [{ cmd: "clear", label: "Clear selection", key: "Esc" }] : []),
     ];
+    this.menuAt = Date.now(); // its command comes back to every shown copy: this one acts (claim)
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
     this.paint(cx);
   }
@@ -5282,7 +5326,7 @@ export default class Review extends View {
     const next = this.st;
     this.paint(cx);
     cx.spawn(async () => {
-      try { await saveSettings(next); syncPanels(shared, setShared, next.hideHerdrPanels); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
+      try { await saveSettings(next); syncPanels(shared, setShared, next.hideHerdrPanels); setShared(SETTINGS_REV, { stamp: Date.now() }); } catch (e) { log(`settings: ${e.message ?? e}`); }
     });
   }
 
@@ -5303,7 +5347,7 @@ export default class Review extends View {
           if (!text) throw new Error("hooks/wingman-hook.sh is missing from the mod folder");
           result = await installHook(on, text);
         } else if (how === "remove") result = await uninstallHook(on);
-        if (how) { failed = false; run("wingman.hook"); }
+        if (how) { failed = false; setShared(HOOK_REV, { stamp: Date.now() }); }
         this.hook = { status: hookSummary(await hookStatus(on, { hookText: text }), on), result, failed };
       } catch (e) {
         this.hook = { status: this.hook?.status ?? null, result: String(e.message ?? e), failed: true };
@@ -5320,7 +5364,7 @@ export default class Review extends View {
     this.paint(cx);
     const km = this.km;
     cx.spawn(async () => {
-      try { await saveKeys(next); await syncHerdrKeys(km); run("wingman.settings"); } catch (e) { log(`keys: ${e.message ?? e}`); }
+      try { await saveKeys(next); await syncHerdrKeys(km); setShared(SETTINGS_REV, { stamp: Date.now() }); } catch (e) { log(`keys: ${e.message ?? e}`); }
     });
   }
 
@@ -5390,51 +5434,65 @@ export default class Review extends View {
       .child(div().w(34).h(18).flex_none().rounded(9).p(2).bg(on ? t.accent : t.raised)
         .child(div().size(14).rounded(7).bg(t.foreground).when(on, (e) => e.ml(16))))
       .child(v_flex().flex_1().min_w(0).child(div().text_size(13).child(label)).child(div().text_size(11).text_color(t.dim).child(hint))); // the hint wraps instead of running past the dialog
-    return v_flex().id("wingman-settings").track_focus(this.formHandle)
-      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
-      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground).overflow_y_scrollbar() // Problems rows make it taller than most windows
-      .child(h_flex().items_center().gap(8).child(div().flex_1().text_size(15).font_semibold().child("Settings"))
-        .child(this.button("open-keys", "Keyboard shortcuts…", t.raised, () => { closeOverlay(overlay); openOverlay({ mod: "wingman", props: { form: "keys" }, kind: "dialog", width: 700, height: 620 }); }))
-        .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .when(!st, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading…")))
-      .when(!!st, (e) => e
-        .child(toggle("set-note", "Auto note on rejections", "Tell the agent which of its changes you rejected.", st.autoNote, (cx) => this.setSetting({ autoNote: !st.autoNote }, cx)))
-        .child(toggle("set-editnote", "Note on my edits", "Tell the agent which lines of its files you changed.", st.editNote, (cx) => this.setSetting({ editNote: !st.editNote }, cx)))
-        .child(toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)))
-        .child(toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)))
-        .child(toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)))
-        .child(toggle("set-sessionlog", "Read the agent's session log", "List the files Claude read and edited (Edit › Agent files) from its own log under ~/.claude/projects, outside the repo.", st.sessionLog ?? true, (cx) => this.setSetting({ sessionLog: !(st.sessionLog ?? true) }, cx)))
-        .child(toggle("set-hidepanels", "Hide Herdr's Files and Changes buttons", "Takes them out of the tab bar. Wingman's own Review, Edit and Changes stay. Turn off to put them back.", st.hideHerdrPanels ?? false, (cx) => this.setSetting({ hideHerdrPanels: !(st.hideHerdrPanels ?? false) }, cx)))
-        .child(toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)))
-        .child(v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
-          .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
-          .child(h_flex().gap(4).children([0, 1, 2, 3, 5, 10].map((n) => div().id(`delay-${n}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
-            .bg(st.autosaveDelay === n ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
-            .on_click((_e, cx) => { if (st.autosave) this.setSetting({ autosaveDelay: n }, cx); })
-            .child(n ? `${n}s` : "Focus change")))))
-        .child(toggle("set-format", "Format on save", "Run the repo's Prettier (or CSharpier for C#) on Ctrl+S and Alt+Shift+F. Autosave never formats: it would move text while you are elsewhere.", st.formatOnSave ?? false, (cx) => this.setSetting({ formatOnSave: !(st.formatOnSave ?? false) }, cx)))
-        .child(v_flex().gap(6).pt(4)
+    // The rows are split into sections (settingsTabs), each short enough for an 820 px window at zoom
+    // 1.2 without scrolling; a section still scrolls when the window is smaller than that.
+    const tabs = settingsTabs(!!this.form.machine), cur = tabs.some((x) => x.id === this.setTab) ? this.setTab : tabs[0].id;
+    const section = !st ? [] : {
+      general: () => [
+        toggle("set-note", "Auto note on rejections", "Tell the agent which of its changes you rejected.", st.autoNote, (cx) => this.setSetting({ autoNote: !st.autoNote }, cx)),
+        toggle("set-editnote", "Note on my edits", "Tell the agent which lines of its files you changed.", st.editNote, (cx) => this.setSetting({ editNote: !st.editNote }, cx)),
+        toggle("set-sessionlog", "Read the agent's session log", "List the files Claude read and edited (Edit › Agent files) from its own log under ~/.claude/projects, outside the repo.", st.sessionLog ?? true, (cx) => this.setSetting({ sessionLog: !(st.sessionLog ?? true) }, cx)),
+        toggle("set-hidepanels", "Hide Herdr's Files and Changes buttons", "Takes them out of the tab bar. Wingman's own Review, Edit and Changes stay. Turn off to put them back.", st.hideHerdrPanels ?? false, (cx) => this.setSetting({ hideHerdrPanels: !(st.hideHerdrPanels ?? false) }, cx)),
+        v_flex().gap(6).pt(4)
           .child(div().text_size(12).text_color(t.muted).child("Editor"))
           .child(h_flex().gap(4).children([["wingman", "Wingman"], ["nvim", "Neovim"]].map(([v, label]) => div().id(`editor-${v}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
             .bg((st.editor ?? "wingman") === v ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => this.setSetting({ editor: v }, cx)).child(label))))
-          .child(div().text_size(11).text_color(t.dim).child("Neovim: clicking a line, Open in Neovim, or a file in the tree opens it in a Neovim pane beside Wingman.")))
-        .child(v_flex().gap(6).pt(4)
+          .child(div().text_size(11).text_color(t.dim).child("Neovim: clicking a line, Open in Neovim, or a file in the tree opens it in a Neovim pane beside Wingman.")),
+        v_flex().gap(6).pt(4)
           .child(div().text_size(12).text_color(t.muted).child("External editor (Open in external editor, and the file row's last button)"))
           .child(h_flex().gap(4).flex_wrap().children(Object.entries(EDITORS).map(([v, ed]) => div().id(`ext-${v}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
             .bg((st.externalEditor ?? "code") === v ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => this.setSetting({ externalEditor: v }, cx)).child(ed.name))))
           .when(st.externalEditor === "custom", (e) => e
             .child(Input.new(this.extInput))
-            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))))
-        .child(v_flex().gap(6).pt(4)
+            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))),
+      ],
+      editing: () => [
+        toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)),
+        toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)),
+        toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)),
+        toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)),
+        v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
+          .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
+          .child(h_flex().gap(4).children([0, 1, 2, 3, 5, 10].map((n) => div().id(`delay-${n}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
+            .bg(st.autosaveDelay === n ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
+            .on_click((_e, cx) => { if (st.autosave) this.setSetting({ autosaveDelay: n }, cx); })
+            .child(n ? `${n}s` : "Focus change")))),
+        toggle("set-format", "Format on save", "Run the repo's Prettier (or CSharpier for C#) on Ctrl+S and Alt+Shift+F. Autosave never formats: it would move text while you are elsewhere.", st.formatOnSave ?? false, (cx) => this.setSetting({ formatOnSave: !(st.formatOnSave ?? false) }, cx)),
+      ],
+      inline: () => [
+        v_flex().gap(6).pt(4)
           .child(h_flex().gap(8).items_center()
             .child(div().flex_1().text_size(12).text_color(t.muted).child("Inline edit command"))
             .when((st.inlineCommand ?? INLINE_COMMAND) !== INLINE_COMMAND, (e) => e.child(this.button("ie-default", "Default", t.raised, (cx) => { this.ieInput.set_value?.(INLINE_COMMAND); this.setSetting({ inlineCommand: INLINE_COMMAND }, cx); }).flex_none())))
           .child(Input.new(this.ieInput))
-          .child(div().text_size(11).text_color(t.dim).child('Runs once per edit, where the repo\'s git runs (WSL for a WSL repo). {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')))
-        .child(this.problemsSettings(t, toggle))
-        .when(!!this.form.machine, (e) => e.child(this.hookSection(t))));
+          .child(div().text_size(11).text_color(t.dim).child('Runs once per edit where the repo\'s tools live (WSL for a WSL repo), with your shell\'s PATH. {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')),
+      ],
+      problems: () => [this.problemsSettings(t, toggle)],
+      machine: () => [this.hookSection(t)],
+    }[cur]();
+    return v_flex().id("wingman-settings").track_focus(this.formHandle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
+      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().gap(8).child(div().flex_1().text_size(15).font_semibold().child("Settings"))
+        .child(this.button("open-keys", "Keyboard shortcuts…", t.raised, () => { closeOverlay(overlay); openOverlay({ mod: "wingman", props: { form: "keys" }, kind: "dialog", width: 700, height: 620 }); }))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(h_flex().flex_none().gap(2).p(2).rounded(6).bg(t.raised).children(tabs.map((x) =>
+        div().id(`set-tab-${x.id}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
+          .when(cur === x.id, (e) => e.bg(t.selected)).on_click((_e, cx) => { this.setTab = x.id; this.paint(cx); }).child(x.label))))
+      .when(!st, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .when(!!st, (e) => e.child(v_flex().id(`set-section-${cur}`).flex_1().min_h(0).gap(10).overflow_y_scrollbar().children(section)));
   }
 
   /** Settings: Problems on or off, Check after each agent turn, and the shown space's repos' Problems command. */
@@ -5518,10 +5576,12 @@ export default class Review extends View {
     if (this.lastReject && !this.lastReject.remote) add("reason", [withKey("Comment last rejection", this.kl("reason")), "Comment last rejection", "Reason"], 1);
     if (total > 0 && this.mode === "review") { add("reject-all", ["Reject all files", "Reject all"], 2, "all"); add("accept-all", ["Accept all files", "Accept all"], 2, "all"); }
     if (this.spaceId && this.mode === "review" && this.stores.some((st) => !st.plain)) add("checkpoints", [`Checkpoints ${this.cpCounts?.get(this.spaceId) ?? 0}`], 3);
-    if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`], Infinity);
+    // Comments and Settings shorten to icons (fitHeader drops the title first); Comments goes last, Settings never.
+    if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`, `💬 ${ncomments}`], LAST_DROP);
     add("settings", ["⚙ Settings", "⚙"], Infinity);
-    const fixed = 24 + 64 + (this.view ? 0 : 120) + SUBTITLE_MIN + 10 * 3; // padding, "Wingman", the Review/Edit switch, the subtitle, gaps
-    return fitBar(this.px(this.paneW), items, fixed, 10);
+    const { labels, narrow } = fitHeader(this.paneW == null ? 0 : this.px(this.paneW), items, { panel: !!this.view, subtitle: SUBTITLE_MIN });
+    if (narrow) labels.set("narrow", true);
+    return labels;
   }
 
   /**
@@ -5538,10 +5598,10 @@ export default class Review extends View {
   }
 
   /** The change header row's buttons for the diff's width now (barfit.hunkButtons). */
-  hunkBtns() { return hunkButtons(this.px(this.viewW), GUTTER, BTN_GAP, BUTTONS); }
+  hunkBtns() { return hunkButtons(this.vw(), GUTTER, BTN_GAP, BUTTONS); }
 
   /** A measured size (on_size_change: screen px) in element px, as w() and the bars' estimates use. */
-  px(measured) { return measured / (this.unit ?? 1); }
+  px(measured) { return toElem(measured, this.unit); }
 
   button(id, label, bg, onClick) {
     return div().id(id).h(22).px(10).flex().items_center().rounded(5).cursor_pointer().bg(bg).text_size(11)
@@ -5648,19 +5708,19 @@ export default class Review extends View {
     const ij = this.inlines?.get(this.spaceId) ?? null, it = ij && f && ij.key === f.key && ij.status !== "applying" ? ij.t : null;
     const inTarget = (r) => !!it && r.side === "new" && r.line >= it.a && r.line <= it.b;
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_size_change((size, cx) => { if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
+      .on_size_change((size, cx) => { this.paneH = size.height; if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
       // Sizes come back in screen px, the app's zoom included (w(100) measures 120 at zoom 1.2), and
       // the bars are laid out in element px: this 100 px probe gives the ratio (px()).
       .child(div().id("unit-probe").absolute().top(0).left(0).w(100).h(0)
-        .on_size_change((size, cx) => { const u = size.width / 100; if (u > 0 && Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
+        .on_size_change((size, cx) => { const u = unitOf(size.width); if (Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().child("Wingman"))
+        .when(!hb.has("narrow"), (e) => e.child(div().font_semibold().child("Wingman")))
         // A panel copy is one view: the panel's own Review and Edit buttons switch between them.
         .when(!this.view, (e) => e.child(h_flex().flex_none().gap(2).p(2).rounded(6).bg(t.raised).children(["review", "edit"].map((m) =>
           div().id(`mode-${m}`).h(22).px(8).flex().items_center().rounded(4).text_size(12).cursor_pointer()
             .when(this.mode === m, (e) => e.bg(t.selected)).on_click((_e, cx) => this.setMode(m, cx))
-            .child(m === "review" ? "Review" : "Edit")))))
+            .child(hb.has("narrow") ? (m === "review" ? "R" : "E") : m === "review" ? "Review" : "Edit")))))
         .child(div().flex_shrink(1).min_w(0).text_size(11).text_color(t.muted).truncate().child(`${away ? `on ${away} · ` : ""}${this.stores.map((st) => base(st.root)).join(", ")} · ${this.counts(total, vis)}${this.writing ? " · saving…" : ""}${agents().some((a) => a.space === this.spaceId && ACTIVE.has(a.status)) ? " · agent working" : ""}`))
         .child(div().flex_1())
         .when(hb.has("reason"), (e) => e.child(this.button("reason", hb.get("reason"), t.raised, (cx) => this.askReason(cx)).flex_none().whitespace_nowrap()))
@@ -5694,7 +5754,7 @@ export default class Review extends View {
           .when(this.mode !== "changes", (e) => e.child(h_flex().absolute().top(0).bottom(0).left(-(this.tabOffset ?? 0)).children(vis.map((x) => this.tab(x, t)))))
           // Position indicator, only when the tabs don't all fit.
           .when(this.tabMax() > 0, (e) => {
-            const total = this.tabMax() + (this.tabViewW ?? 0), view = this.tabViewW ?? 0;
+            const view = this.tabVW(), total = this.tabMax() + view;
             return e.child(div().absolute().bottom(1).h(2).rounded(1).bg(t.dim)
               .left(((this.tabOffset ?? 0) / total) * view).w(Math.max(24, (view / total) * view)));
           }))
@@ -5723,9 +5783,9 @@ export default class Review extends View {
         .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
         .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; this.paint(cx); })
-        // One character's width in the diff font, for cursor columns (the font is monospace).
+        // 100 characters' width in the diff font (screen px; cw() makes one in element px), for cursor columns (the font is monospace).
         .child(div().absolute().top(0).left(0).opacity(0).whitespace_nowrap().child("0".repeat(100))
-          .on_size_change((size, cx) => { const w = size.width / 100; if (w > 0 && Math.abs(w - (this.charW ?? 0)) > 0.001) { this.charW = w; this.paint(cx); } }))
+          .on_size_change((size, cx) => { const w = size.width; if (w > 0 && Math.abs(w - (this.charPx ?? 0)) > 0.05) { this.charPx = w; this.paint(cx); } }))
         .child(v_virtual_list("review-rows", rows.length, ROW, (i) => rows[i].kind === "@" ? `h${rows[i].hunk}` : `r${i}`,
           (range) => {
             // The list calls this twice a frame: once with [0, 1) to measure a row, then with

@@ -5,10 +5,18 @@ import { formatText, newFormatCache } from "../mods/wingman/formatrun.js";
 import { check } from "../mods/wingman/edit.js";
 import { segmentHunks } from "../mods/wingman/model.js";
 import { ACTIONS, BY_ID, allowedIn, holders, resolve } from "../mods/wingman/keymap.js";
-import { fake, execCalls } from "./herdr-shim.mjs";
+import { fake, execCalls as rawCalls } from "./herdr-shim.mjs";
+import { TOOL_SH, PROBE_SH } from "../mods/wingman/toolpath.js";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
+
+// Tools run under toolpath.js's wrapper (sh -lc TOOL_SH wingman <PATH> program args...): seen here as the program they run.
+const unwrap = (cmd, args) => (cmd === "sh" && args[0] === "-lc" && args[1] === TOOL_SH ? { cmd: args[4], args: args.slice(5) } : { cmd, args });
+const calls0 = { get length() { return rawCalls.length; } };
+const execCalls = { get length() { return calls0.length; }, filter: (f) => all().filter(f), slice: (a, b) => all().slice(a, b) };
+const all = () => rawCalls.map((c) => ({ ...c, ...unwrap(c.cmd, c.args) }));
+const fakeTool = (fn) => (cmd, args, opts) => { const u = unwrap(cmd, args); return fn(u.cmd, u.args, opts); };
 
 // ---- names ------------------------------------------------------------------------------------------
 assert.equal(extOf("src/App.TSX"), "tsx");
@@ -161,14 +169,14 @@ try {
   assert.deepEqual(leftovers(), []);
 
   // Timeout (the call rejects): a short reason, the temp file removed.
-  fake.exec = (cmd, args) => (cmd.endsWith(".bin/prettier") && args[0] === "--write" ? Promise.reject(new Error("command timed out after 10000 ms")) : undefined);
+  fake.exec = fakeTool((cmd, args) => (cmd.endsWith(".bin/prettier") && args[0] === "--write" ? Promise.reject(new Error("command timed out after 10000 ms")) : undefined));
   r = await formatText({ root: repo, rel: "src/a.ts", text: "a\tb", cache });
   fake.exec = null;
   assert.deepEqual([r.status, r.reason], ["failed", "Prettier timed out"]);
   assert.deepEqual(leftovers(), [], "removed after a timeout");
 
   // The tool cannot start at all (any other error): reported, temp removed.
-  fake.exec = (cmd, args) => (cmd.endsWith(".bin/prettier") && args[0] === "--write" ? Promise.reject(new Error("cannot start prettier")) : undefined);
+  fake.exec = fakeTool((cmd, args) => (cmd.endsWith(".bin/prettier") && args[0] === "--write" ? Promise.reject(new Error("cannot start prettier")) : undefined));
   r = await formatText({ root: repo, rel: "src/a.ts", text: "a", cache });
   fake.exec = null;
   assert.equal(r.status, "failed");
@@ -179,7 +187,7 @@ try {
   mkdirSync(`${repo}/ig`, { recursive: true });
   writeFileSync(`${repo}/.prettierignore`, "ig/\n");
   const written = [];
-  fake.exec = (cmd, args) => { if (args[0] === "--write") written.push(args); return undefined; };
+  fake.exec = fakeTool((cmd, args) => { if (args[0] === "--write") written.push(args); return undefined; });
   r = await formatText({ root: repo, rel: "ig/x.ts", text: "a", cache });
   fake.exec = null;
   assert.equal(r.status, "none");
@@ -212,11 +220,11 @@ try {
   try {
     writeFileSync(`${cs}/.csharpierrc.json`, "{}");
     const seen = [];
-    fake.exec = (cmd, args, opts) => {
+    fake.exec = fakeTool((cmd, args, opts) => {
       if (cmd !== "dotnet") return undefined;
       seen.push({ cmd, args, cwd: opts.cwd });
       return Promise.resolve({ code: 0, stdout: "", stderr: "" });
-    };
+    });
     const r = await formatText({ root: cs, rel: "A.cs", text: "class A{}", cache: newFormatCache() });
     fake.exec = null;
     assert.equal(r.status, "ok");
@@ -383,14 +391,16 @@ const probes = (cmd, args) => {
   fake.exec = (cmd, args, opts) => {
     const p = probes(cmd, args);
     if (p) return p;
+    // The PATH probe (once per distro), then the tool under the wrapper with that PATH.
+    if (cmd === "wsl.exe" && args.includes(PROBE_SH)) return Promise.resolve({ code: 0, stdout: "banner\n__WINGMAN_PATH__/home/me/.nvm/versions/node/v22.1.0/bin:/usr/bin__WINGMAN_END__\n", stderr: "" });
+    if (cmd === "wsl.exe" && args.includes(TOOL_SH)) { wslCalls.push({ args, timeout: opts.timeout }); return Promise.resolve({ code: 0, stdout: '{"ignored":true,"inferredParser":null}', stderr: "" }); }
     if (cmd === "wsl.exe" && args.includes("wingman")) return Promise.resolve({ code: 0, stdout: /^\/home\/me\/r\/node_modules\/\.bin\/prettier$/.test(args.at(-1)) ? "f\n" : "", stderr: "" });
-    if (cmd === "wsl.exe") { wslCalls.push({ args, timeout: opts.timeout }); return Promise.resolve({ code: 0, stdout: '{"ignored":true,"inferredParser":null}', stderr: "" }); }
     return undefined;
   };
   try {
     const r = await formatText({ root: "//wsl.localhost/Ubuntu/home/me/r", rel: "src/a.ts", text: "a", cache: newFormatCache() });
     assert.equal(r.status, "none", "ignored: nothing written");
-    assert.deepEqual(wslCalls[0].args, ["-d", "Ubuntu", "--cd", "/home/me/r", "-e", "/home/me/r/node_modules/.bin/prettier", "--file-info", "/home/me/r/src/a.ts"]);
+    assert.deepEqual(wslCalls[0].args, ["-d", "Ubuntu", "--cd", "/home/me/r", "-e", "sh", "-lc", TOOL_SH, "wingman", "/home/me/.nvm/versions/node/v22.1.0/bin:/usr/bin", "/home/me/r/node_modules/.bin/prettier", "--file-info", "/home/me/r/src/a.ts"]);
     assert.ok(wslCalls[0].timeout <= 10000);
   } finally { fake.exec = null; fake.read = null; process.env.WINGMAN_TEST_HOME = saved; }
 }
@@ -401,10 +411,12 @@ const probes = (cmd, args) => {
   const calls = [];
   fake.read = (p) => Promise.resolve(p === "C:/r/.git/config" ? "[core]\n\tfilemode = false\n" : null);
   fake.exec = (cmd, args, opts) => {
+    // Prettier's script runs with the node.exe `where` finds (toolrun.js toolWhere).
+    if (cmd === "where" && args[0] === "node") return Promise.resolve({ code: 0, stdout: "C:\\Program Files\\nodejs\\node.exe\r\n", stderr: "" });
     const p = probes(cmd, args);
     if (p) return p;
     if (cmd === "powershell") return Promise.resolve({ code: 0, stdout: / 'C:.r.node_modules.(?:\.bin.prettier|prettier.bin.prettier\.cjs)'$/.test(args.at(-1)) ? "f\n" : "", stderr: "" });
-    if (cmd === "node") { calls.push({ args, cwd: opts.cwd }); return Promise.resolve({ code: 0, stdout: '{"ignored":true,"inferredParser":null}', stderr: "" }); }
+    if (cmd === "C:\\Program Files\\nodejs\\node.exe") { calls.push({ args, cwd: opts.cwd }); return Promise.resolve({ code: 0, stdout: '{"ignored":true,"inferredParser":null}', stderr: "" }); }
     return undefined;
   };
   try {

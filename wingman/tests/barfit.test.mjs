@@ -1,7 +1,7 @@
 // D2/D3: a bar of buttons degrades in order as its width shrinks: key hints, then long labels,
 // then whole buttons by their drop order. A label is never cut: it's a shorter one or none.
 import assert from "node:assert";
-import { fitBar, hunkButtons, textW, withKey } from "../mods/wingman/barfit.js";
+import { fitBar, fitHeader, hunkButtons, textW, withKey, LAST_DROP, settingsTabs, settingsHeight, SETTINGS_H } from "../mods/wingman/barfit.js";
 
 const items = [
   { id: "pos", labels: ["1/3 · ctrl-shift-↑/ctrl-shift-↓", "1/3"], drop: 2, size: 10, pad: 12 },
@@ -54,4 +54,46 @@ assert.equal(h.note, false); assert.equal(h.shown, 4); assert.ok(58 + 4 * (h.w +
 h = hunkButtons(240, 58, 6);
 assert.ok(h.shown < 4 && 58 + h.shown * (h.w + 6) <= 240, "the buttons shown fit");
 assert.equal(hunkButtons(undefined, 58, 6).w, 110);
+
+// X6: the pane header. Comments and Settings shorten to icons and the title goes, so nothing
+// overflows from 460 px down to 180 px, in a panel copy and in a pane copy (with its Review/Edit switch).
+{
+  const header = (n) => [
+    { id: "reject-all", labels: ["Reject all files", "Reject all"], drop: 2, group: "all", size: 11, pad: 20 },
+    { id: "accept-all", labels: ["Accept all files", "Accept all"], drop: 2, group: "all", size: 11, pad: 20 },
+    { id: "checkpoints", labels: ["Checkpoints 3"], drop: 3, size: 11, pad: 20 },
+    { id: "comments", labels: [withKey(`Comments ${n}`, "alt-shift-m"), `Comments ${n}`, `💬 ${n}`], drop: LAST_DROP, size: 11, pad: 20 },
+    { id: "settings", labels: ["⚙ Settings", "⚙"], drop: Infinity, size: 11, pad: 20 },
+  ];
+  const used = (fixed, labels, items) => fixed + items.filter((it) => labels.has(it.id)).reduce((s, it) => s + textW(labels.get(it.id), 11) + 20 + 10, 0);
+  for (const panel of [true, false]) {
+    for (const w of [460, 300, 230, 200, 180]) {
+      const items = header(12), { labels, narrow, fixed } = fitHeader(w, items, { panel, subtitle: 80 });
+      assert.ok(used(fixed, labels, items) <= w, `fits at ${w} (panel ${panel}): ${[...labels.values()].join(" | ")}`);
+      assert.ok(labels.has("settings"), `settings stays at ${w}`);
+      assert.ok(labels.has("comments"), `comments stays at ${w} (panel ${panel})`);
+      if (w >= 460) assert.equal(narrow, false, `wide at ${w}`); if (w <= 230) assert.equal(narrow, true, `narrow at ${w}`);
+    }
+  }
+  // Wide: everything in full with the title; narrow: icons, no title.
+  assert.equal(fitHeader(1200, header(2), { panel: true }).labels.get("comments"), withKey("Comments 2", "alt-shift-m"));
+  const tight = fitHeader(180, header(2), { panel: true });
+  assert.equal(tight.narrow, true);
+  assert.equal(tight.labels.get("settings"), "⚙");
+  assert.ok(!tight.labels.has("reject-all") && !tight.labels.has("checkpoints"), "the droppable buttons go first");
+  // Narrower than the icons need: Comments goes, Settings stays.
+  assert.ok(!fitHeader(120, header(2), { panel: false }).labels.has("comments"));
+  assert.ok(fitHeader(120, header(2), { panel: false }).labels.has("settings"));
+  // Not measured yet: everything in full.
+  assert.equal(fitHeader(0, header(2)).narrow, false);
+}
+// X7: the Settings dialog fits an 820 px window at zoom 1.2 (its height is element px), less when
+// the pane shows the window is shorter; its sections, Machine only for a space on another machine.
+assert.ok(SETTINGS_H * 1.2 <= 820 - 40);
+assert.equal(settingsHeight(null), SETTINGS_H);
+assert.equal(settingsHeight(900), SETTINGS_H);
+assert.equal(settingsHeight(400), 440);
+assert.equal(settingsHeight(100), 360);
+assert.deepEqual(settingsTabs(false).map((x) => x.id), ["general", "editing", "inline", "problems"]);
+assert.deepEqual(settingsTabs(true).map((x) => x.id), ["general", "editing", "inline", "problems", "machine"]);
 console.log("barfit ok");

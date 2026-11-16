@@ -1,6 +1,7 @@
 // inlineedit.js: instruction cleaning, prompt, answer cleaning, line replacement, the range
 // re-check, argv template expansion and where the command runs.
-import { cleanInstruction, MAX_INSTRUCTION, target, targetProblem, relocate, buildPrompt, cleanAnswer, replaceLines, words, expand, usesFile, plan, exeFrom, failure, DEFAULT_COMMAND, WRAP_SH, MAX_LINES, TIMEOUT_MS } from "../mods/wingman/inlineedit.js";
+import { cleanInstruction, MAX_INSTRUCTION, target, targetProblem, relocate, buildPrompt, cleanAnswer, replaceLines, words, expand, usesFile, failure, DEFAULT_COMMAND, MAX_LINES, TIMEOUT_MS } from "../mods/wingman/inlineedit.js";
+import { plan, exeFrom, TOOL_SH } from "../mods/wingman/toolpath.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -102,13 +103,13 @@ try {
 
 // ---- where the command runs ----
 const av = ["claude", "-p", "P"];
-assert.deepEqual(plan(av, { cwd: "/home/me/repo" }), { how: "sh", cmd: "sh", args: ["-lc", WRAP_SH, "wingman", ...av], opts: { cwd: "/home/me/repo", timeout: TIMEOUT_MS } });
-assert.deepEqual(plan(av, { on: "box", cwd: "/srv/repo" }), { how: "remote", cmd: "sh", args: ["-lc", WRAP_SH, "wingman", ...av], opts: { cwd: "/srv/repo", on: "box", timeout: TIMEOUT_MS } });
+assert.deepEqual(plan(av, { cwd: "/home/me/repo", timeout: TIMEOUT_MS }), { how: "sh", cmd: "sh", args: ["-lc", TOOL_SH, "wingman", "", ...av], opts: { cwd: "/home/me/repo", timeout: TIMEOUT_MS } });
+assert.deepEqual(plan(av, { on: "box", cwd: "/srv/repo", timeout: TIMEOUT_MS, path: "/u/bin:/bin" }), { how: "remote", cmd: "sh", args: ["-lc", TOOL_SH, "wingman", "/u/bin:/bin", ...av], opts: { cwd: "/srv/repo", on: "box", timeout: TIMEOUT_MS } });
 // Windows: a WSL-owned repo goes through wsl.exe even with a native claude.exe there.
-assert.deepEqual(plan(av, { windows: true, owner: "wsl", nativeExe: "C:\\bin\\claude.exe", cwd: "//wsl.localhost/Ubuntu/home/me/r", wslCwd: "/home/me/r", distro: "Ubuntu" }),
-  { how: "wsl", cmd: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/home/me/r", "-e", "sh", "-lc", WRAP_SH, "wingman", ...av], opts: { timeout: TIMEOUT_MS } });
+assert.deepEqual(plan(av, { windows: true, owner: "wsl", nativeExe: "C:\\bin\\claude.exe", cwd: "//wsl.localhost/Ubuntu/home/me/r", wslCwd: "/home/me/r", distro: "Ubuntu", timeout: TIMEOUT_MS, path: "/n/bin" }),
+  { how: "wsl", cmd: "wsl.exe", args: ["-d", "Ubuntu", "--cd", "/home/me/r", "-e", "sh", "-lc", TOOL_SH, "wingman", "/n/bin", ...av], opts: { timeout: TIMEOUT_MS } });
 // A native repo with a native claude.exe: run it directly.
-assert.deepEqual(plan(av, { windows: true, owner: "native", nativeExe: "C:\\bin\\claude.exe", cwd: "C:/dev/r", wslCwd: "/mnt/c/dev/r" }),
+assert.deepEqual(plan(av, { windows: true, owner: "native", nativeExe: "C:\\bin\\claude.exe", cwd: "C:/dev/r", wslCwd: "/mnt/c/dev/r", timeout: TIMEOUT_MS }),
   { how: "native", cmd: "C:\\bin\\claude.exe", args: ["-p", "P"], opts: { cwd: "C:/dev/r", timeout: TIMEOUT_MS } });
 // A native repo without one: WSL's.
 assert.deepEqual(plan(av, { windows: true, owner: "native", nativeExe: null, cwd: "C:/dev/r", wslCwd: "/mnt/c/dev/r" }).args.slice(0, 4), ["--cd", "/mnt/c/dev/r", "-e", "sh"]);

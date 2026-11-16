@@ -387,7 +387,7 @@ export function failureLine(name, r, { elapsed = 0, timeout = PROJECT_MS, parsed
   if (r.code === 127 || /: not found$|No such file or directory$|is not recognized as/m.test(str(r.stderr))) {
     // sh's "exec: node: not found", env's "'node': No such file or directory": name the program.
     const prog = /exec: ([^:\s]+): not found/.exec(str(r.stderr))?.[1] ?? /env: '?([^':\s]+)'?: No such file/.exec(str(r.stderr))?.[1];
-    if (prog) return `${name}: ${cleanMessage(prog, 60)} isn't on the PATH where the repo's tools run (a login shell's PATH; WSL for a WSL repo)`;
+    if (prog) return `${name}: ${cleanMessage(prog, 60)} isn't on your shell's PATH where the repo's tools run (WSL for a WSL repo)`;
     return `${name}: not found where the repo's tools run (${lastLine(r.stderr || r.stdout) || `exit ${r.code}`})`;
   }
   if (r.code !== 0) return `${name}: exited with ${r.code}${lastLine(r.stderr || r.stdout) ? `: ${lastLine(r.stderr || r.stdout)}` : ""}`;

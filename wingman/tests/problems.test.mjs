@@ -255,7 +255,7 @@ assert.equal(parseTsc("../../../etc/shadow(1,1): error TS1: x\n", { root: "/r", 
   assert.equal(failureLine("tsc", t, { timeout: PROJECT_MS }), "tsc: timed out after 180 s");
   assert.equal(failureLine("eslint", { code: 1, stdout: "", stderr: "" }, { elapsed: 20000, timeout: FILE_MS }), "eslint: timed out after 20 s");
   assert.match(failureLine("tsc", new Error("cannot start node: program not found"), {}), /^tsc: couldn't start/);
-  assert.equal(failureLine("tsc", { code: 127, stdout: "", stderr: "wingman: 1: exec: node: not found\n" }, {}), "tsc: node isn't on the PATH where the repo's tools run (a login shell's PATH; WSL for a WSL repo)");
+  assert.equal(failureLine("tsc", { code: 127, stdout: "", stderr: "wingman: 1: exec: node: not found\n" }, {}), "tsc: node isn't on your shell's PATH where the repo's tools run (WSL for a WSL repo)");
   assert.match(failureLine("tsc", { code: 127, stdout: "", stderr: "weird\n" }, {}), /^tsc: not found where the repo's tools run \(weird\)$/);
   assert.equal(failureLine("eslint", { code: 2, stdout: "", stderr: "\nOops! Something went wrong! :(\n\nESLint: 9.39.5\n\nError: Cannot find module 'typescript-eslint'\n" }, {}), "eslint: exited with 2: Error: Cannot find module 'typescript-eslint'");
   assert.equal(failureLine("tsc", { code: 2, stdout: "x", stderr: "" }, { parsed: 3 }), null); // errors found: exit 2 is normal

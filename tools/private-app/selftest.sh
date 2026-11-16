@@ -4,6 +4,8 @@
 # 1. no mod: start, status without errors, screenshot, stop, nothing left
 # 2. Wingman as committed at <ref> (git archive, never the working tree): start with it,
 #    status without errors, `check` passes, open it in a tab, screenshot, stop, nothing left
+# 3. two starts at the same moment: each records its own app (different pids), both alive, both
+#    stop with nothing left
 # Before and after: the person's own Herdr processes (recorded before anything starts) are all
 # still alive. Instances are stopped on failure too.
 set -euo pipefail
@@ -45,8 +47,9 @@ trap 'exit 130' INT TERM
 
 # The person's own Herdr: every herdr-app.exe and herdr-core.exe now ("pid ticks name").
 # hc.exe is left out: the person's mods start short-lived hc.exe calls all the time.
+# `herdr-core.exe exec` is left out too: one-shot calls the person's mods run (seen: a docker poll every few seconds).
 owner_snapshot() {
-  plat procs | awk -F'\t' '$3 == "herdr-app.exe" || $3 == "herdr-core.exe" { print $1, $4, $3 }'
+  win_ps "Get-CimInstance Win32_Process -Filter \"Name='herdr-app.exe' or Name='herdr-core.exe'\" | Where-Object { -not (\$_.Name -eq 'herdr-core.exe' -and \$_.CommandLine -match '\\sexec\\s') } | ForEach-Object { '{0} {1} {2}' -f \$_.ProcessId,\$_.CreationDate.ToUniversalTime().Ticks,\$_.Name }" | grep -E '^[0-9]+ [0-9]+ herdr-(app|core)\.exe$' || true
 }
 alive_set() { plat procs | awk -F'\t' '{ print $1, $4 }'; }
 owner=$(owner_snapshot)
@@ -62,6 +65,7 @@ owner_alive() {
   return $missing
 }
 
+differ() { [ -n "$1" ] && [ "$1" != "$2" ]; }
 no_errors() { [ "$("$PA" status "$1" | sed -n 's/^errors //p')" = "[]" ]; }
 
 # Stop an instance and check nothing of it is left: its processes (by pid and creation time),
@@ -118,6 +122,27 @@ crash=$("$PA" crashinfo "$n2" | awk '/^== tail/ { exit } NR > 1')
 check "$n2: no crash events for its app" [ -z "$crash" ]
 stop_and_verify "$n2"
 if owner_alive; then ok "owner's Herdr alive after $n2 (Wingman)"; else bad "owner's Herdr NOT all alive after $n2 (Wingman); not restarted"; fi
+
+# ---- 3. two starts at the same moment -----------------------------------------------------
+# Each must find its own app (the start lock), never the other's, and stop cleanly.
+n3a=st-$(date +%H%M%S)-c1 n3b=st-$(date +%H%M%S)-c2
+started+=("$n3a" "$n3b")
+echo "== $n3a + $n3b: started together"
+"$PA" start --name "$n3a" >"$tmp/$n3a.out" 2>&1 & pa=$!
+"$PA" start --name "$n3b" >"$tmp/$n3b.out" 2>&1 & pb=$!
+ra=0 rb=0; wait "$pa" || ra=$?; wait "$pb" || rb=$?
+check "$n3a: started (exit $ra; $(tail -1 "$tmp/$n3a.out"))" [ "$ra" = 0 ]
+check "$n3b: started (exit $rb; $(tail -1 "$tmp/$n3b.out"))" [ "$rb" = 0 ]
+if [ "$ra" = 0 ] && [ "$rb" = 0 ]; then
+  pid_a=$(jfield "$PA_BASE/$n3a/instance.json" app_pid) pid_b=$(jfield "$PA_BASE/$n3b/instance.json" app_pid)
+  check "$n3a and $n3b recorded different apps ($pid_a, $pid_b)" differ "$pid_a" "$pid_b"
+  check "$n3a: app alive" "$PA" alive "$n3a"
+  check "$n3b: app alive" "$PA" alive "$n3b"
+  check "$n3a: status has no errors" no_errors "$n3a"
+  check "$n3b: status has no errors" no_errors "$n3b"
+fi
+for n in "$n3a" "$n3b"; do [ -f "$PA_BASE/$n/instance.json" ] && stop_and_verify "$n"; done
+check "owner's Herdr alive after the concurrent starts" owner_alive
 
 echo "== $([ $fails = 0 ] && echo "selftest passed" || echo "selftest FAILED: $fails")"
 [ $fails = 0 ]

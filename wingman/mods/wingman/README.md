@@ -112,7 +112,7 @@ This adds the hooks to `~/.claude/settings.json` and creates `~/.config/herdr-ap
 
 The installer keeps your other hooks and writes `settings.json.bak-herdr-wingman` first. Running it again changes nothing. It needs `python3` to edit the JSON. The hook itself is plain `sh`.
 
-**Another machine** (a space on a Herdr machine reached over ssh, or a WSL machine of this PC): open a space there, then **⚙ Settings** › **Claude hook on <machine>** › **Install**. Nothing is needed on the machine but `sh`. It makes, on that machine:
+**Another machine** (a space on a Herdr machine reached over ssh, or a WSL machine of this PC): open a space there, then **⚙ Settings** › **Machine** › **Claude hook on <machine>** › **Install**. Nothing is needed on the machine but `sh`. It makes, on that machine:
 
 1. The folder `~/.config/herdr-app/data/wingman/` (or `$HERDR_WINGMAN_DIR` when that's set there), with `events/` and `feedback/`. The hook does nothing on a machine without this folder.
 2. `wingman-hook.sh` in that folder, a copy of this mod's hook. Claude runs it as `sh '<path>'`, so it needs no execute bit.
@@ -142,11 +142,11 @@ Herdr's own layouts (`layout:<name>` in `installed.json`) are copied once to `<n
 
 Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/` and `refs/wingman/` refs (see Checkpoints).
 
-On another machine: **⚙ Settings** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
+On another machine: **⚙ Settings** › **Machine** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
 
 ## Use
 
-Open a Wingman pane beside an agent: run `pane.split` with `{"direction": "right", "mod": "wingman"}`, for example from the palette or a key in `keys.json`. Each pane shows the review for the space it's in.
+Open a Wingman pane beside an agent: run `pane.split` with `{"direction": "right", "mod": "wingman"}`, for example from the palette or a key in `keys.json`. Each pane shows the review for the space it's in. A pane or tab opened with `"props": {"view": "review"}` (or `"edit"`) in a layout without that Wingman panel starts in that view and switches between Review and Edit itself, like any pane; the comments and checkpoints dialogs open their files in it.
 
 Or put Wingman in the side panel beside Files and Changes, as two panel tabs, Review and Edit. In a layout of your own (a clone, since Herdr's shipped layouts are read-only), add two blocks to the `panel-body` stack: `{"id": "wingman-review", "type": "block", "content": {"mod": "wingman", "props": {"view": "review"}}}` and the same with `wingman-edit` and `"view": "edit"`. Raise the `panel` column's `max` (for example to 2400), and point the `tabs` block at a clone of the `tabs` mod that draws a button per Wingman block. The `tabs-plus` clone does that. It also takes the commands `tabs-plus.wingmanReview` and `tabs-plus.wingmanEdit`, which the palette entries **Wingman: Review** and **Wingman: Edit** run to select the tab and show the panel. It keeps a width per panel tab: Review and Edit open at 960px the first time and then at whatever width you drag them to.
 
@@ -316,9 +316,13 @@ claude -p --output-format text --tools "" --permission-mode dontAsk --strict-mcp
 
 `--tools ""` takes away every built-in tool (no file reads or edits, no shell), `--permission-mode dontAsk` denies anything that would ask, `--strict-mcp-config` loads no MCP servers, `--disable-slash-commands` no skills, `disableAllHooks` keeps your hooks out of these calls, and `--no-session-persistence` keeps no transcript. It answers in about 4 to 5 seconds. The command is a template: words split at spaces, `"quotes"` keep spaces (`""` is an empty argument), `{prompt}` is the whole prompt as one argument and `{promptFile}` the path of a temp file holding it (`data/wingman/inline-*.txt`, removed afterwards; this computer's files only); with neither, the prompt goes last. It runs as an argument list: no shell reads the template, the instruction or the code. **Default** in Settings puts the default back. Nothing is sent anywhere else, and Wingman itself makes no network calls for it.
 
-Where it runs follows the repo's git (see Which git runs): on Linux and macOS through `sh -lc` with `~/.local/bin` added to `PATH` (where Claude Code installs), on another machine there, and on Windows through `wsl.exe` for a repo WSL owns. For other repos on Windows, a native `claude.exe` on `PATH` runs directly, and without one WSL's `claude` does. The command runs in the repo's top folder, so Claude Code reads that repo's `CLAUDE.md`.
+It runs where the repo's tools live (see Where tools run): this computer, WSL for a repo WSL owns, or the space's machine, with your shell's `PATH` and `~/.local/bin` (where Claude Code installs) first. For other repos on Windows, a native `claude.exe` on `PATH` runs directly, and without one WSL's `claude` does. The command runs in the repo's top folder, so Claude Code reads that repo's `CLAUDE.md`.
 
-`herdr-app do "wingman.inlineEdit:<instruction>"` (or that string as an action in `keys.json`) opens the box with the instruction and runs it. The Edit panel's copy acts on it, or a pane copy when the layout has no Edit panel.
+### Where tools run
+
+Inline edit's command, Format on save's formatter and the Problems checkers all run the same way (`toolrun.js`). On Linux, macOS, WSL (for a repo WSL owns, through `wsl.exe`) and another machine, each runs through `sh -lc` with a fixed script that takes the `PATH` and the program's arguments as arguments: no shell ever reads a file name, a setting or your text. A login shell's `PATH` (and WSL's) lacks what your interactive shell adds, such as Node from nvm, fnm or volta, which `~/.bashrc` or `~/.zshrc` sets up. So Wingman asks your shell once per machine (`$SHELL -lic`, printing `PATH` between two markers, so a banner can't get in; at most 10 s) and keeps the answer while Wingman runs. Measured on this PC, bash with nvm: 0.2 s in Linux and 0.5 s through `wsl.exe`; later calls cost nothing more. Only bash, zsh and other POSIX shells are asked. When the shell isn't one of those or doesn't answer, the newest `~/.nvm/versions/node/*/bin`, `~/.volta/bin` and fnm's default are added instead, and the shell is asked again a minute later. `~/.local/bin` and `~/.claude/local` always come first. On Windows, a repo that isn't WSL's runs the native `.exe` that `where` finds (`node.exe`, `dotnet.exe`, `claude.exe`), else WSL's.
+
+`herdr-app do "wingman.inlineEdit:<instruction>"` (or that string as an action in `keys.json`) opens the box with the instruction and runs it, in one Wingman copy (see Commands): the Edit copy when it's shown, else the shown copy hands the cursor's lines to Edit, as `ctrl-k` in Review does.
 
 Comment, Accept and Reject act on the lines a text selection covers. Clicking the line numbers still selects whole lines. Not supported: input methods that compose characters (Chinese, Japanese, Korean), and wide characters or emoji, which put the cursor in the wrong column.
 
@@ -344,7 +348,7 @@ Wingman marks what the project's own checkers report. It holds no language serve
 
 eslint and tsc run as `node <the package's own script>` (what `node_modules/.bin/<name>` points to), so they need `node` where they run. Project checkers run with **Check**: `ctrl-shift-m` (command `wingman.checkProblems`), the Problems tab's **Check** button, and, with **Check after each agent turn** on in Settings (off by default: a build can be slow), whenever an agent of the space finishes a turn. Check runs the project checkers found at the repo's top and from files opened, plus the current file's own. Nothing runs in a repo where no checker is found ("No checker found in …"), nothing is installed, and plain folders (no git) aren't checked. **Problems** in Settings (on by default) turns all of it off.
 
-Where they run follows the repo's git, as Inline edit's command does: `sh -lc` with a fixed script on Linux, macOS and another machine; on Windows, `wsl.exe` for a repo WSL owns, else the native `node.exe` or `dotnet.exe` found with `where`. Every command is an argument list: no shell ever reads a file name, a setting or checker output. A checker's time limit is 20 s for one file and 180 s for a project. The same checker never runs twice at once in a repo: a request while it runs makes it run exactly once more after. A run that can't start, times out, or exits with an error and nothing readable shows one line in the tab ("tsc: timed out after 180 s"), and the last good list stays. WSL repos often fail with "node isn't on the PATH where the repo's tools run": a login shell's `PATH` doesn't include a Node installed with nvm. Add it to `~/.profile`, or set a Problems command with node's full path.
+They run where the repo's tools live, with your shell's `PATH` (see Where tools run), so a Node from nvm is found in WSL too. Every command is an argument list: no shell ever reads a file name, a setting or checker output. A checker's time limit is 20 s for one file and 180 s for a project. The same checker never runs twice at once in a repo: a request while it runs makes it run exactly once more after. A run that can't start, times out, or exits with an error and nothing readable shows one line in the tab ("tsc: timed out after 180 s"), and the last good list stays. "node isn't on your shell's PATH where the repo's tools run" means your shell has no `node` there (see Where tools run).
 
 Output is read as data: at most 2 MB of it, paths outside the repo (or climbing out with `..`) dropped, messages cut at 300 characters with control and bidirectional characters removed, and at most 1,000 problems per repo, errors first ("… N more not shown").
 
@@ -358,7 +362,7 @@ Where they show:
 
 On another machine, detection is one `sh` call there and checkers run there. A machine without `sh` (Windows) shows "Problems need sh on <machine>". Only this computer has been tried (a Windows drive and WSL's own files).
 
-Problems run and show in one Wingman copy: the Edit panel's, else a pane copy when the layout has no Edit panel. `ctrl-shift-m` pressed in another copy asks that one. Commands for keys and tests: `wingman.checkProblems`, `wingman.nextProblem`, `wingman.prevProblem`, `wingman.problemsShow`, `wingman.problemsUp`, `wingman.problemsDown`, `wingman.problemsEnter`, `wingman.problemsSend`, `wingman.problemsSendFile`, `wingman.problemsCopy`, `wingman.problemsConfirm`, `wingman.openSettings`.
+Problems run and show in one Wingman copy: the Edit panel's, else a pane copy when the layout has no Edit panel. `ctrl-shift-m` pressed in another copy, and a Problems command that reaches another copy (see Commands), asks that one and shows the Edit panel. Commands for keys and tests: `wingman.checkProblems`, `wingman.nextProblem`, `wingman.prevProblem`, `wingman.problemsShow`, `wingman.problemsUp`, `wingman.problemsDown`, `wingman.problemsEnter`, `wingman.problemsSend`, `wingman.problemsSendFile`, `wingman.problemsCopy`, `wingman.problemsConfirm`, `wingman.openSettings`.
 
 Measured on this PC (the sample project: two files, three tsc errors, three eslint problems): on a Windows drive with Windows Node, eslint on one file 5.4 to 6.5 s and tsc 2.5 to 2.9 s; in WSL's own files through `wsl.exe`, eslint 0.9 s and tsc 1.8 s; `dotnet build` of a one-file console app 7.4 s.
 
@@ -376,6 +380,10 @@ Herdr's global shortcuts reach Herdr before Wingman. When a Wingman key is one o
 
 Your changes are saved in `~/.config/herdr-app/data/wingman/keys.json` as `{ "<action>": ["key", ...] }`, holding only the actions you changed. Each action is also a command, `wingman.<action>` (for example `wingman.joinLines`), that you can bind anywhere in Herdr's `keys.json`.
 
+### Commands
+
+Herdr hands a `wingman.<command>` to every Wingman copy on screen (the shown panel tab, each Wingman pane of the shown tab, an open Wingman dialog) and to no hidden one. Exactly one copy acts (`cmdroute.js`): the copies that got it wait 60 ms for each other, then the one ranked first does it: the copy whose right-click menu sent it, else the copy with the keyboard, else the copy the command belongs to (Problems and Inline edit: the Edit copy), else a panel copy over a pane copy. So `wingman.addComment` or `wingman.checkpoints` opens one dialog with a Wingman pane beside the panel too. A dialog's own commands (`wingman.cp*`) and the file tree menu's act where they belong. Settings saved from the Settings dialog, and the Claude hook installed or removed there, reach every copy, hidden ones too (a shared stamp each copy checks 4 times a second); `wingman.settings` does the same from a key.
+
 ## Format on save
 
 `alt-shift-f` formats the open file, then saves it. With **Format on save** on, `ctrl-s` does the same. Wingman only runs a formatter the repo already has:
@@ -390,14 +398,14 @@ Anything else is saved as it is. Add a formatter to the `FORMATTERS` table in `f
 How it runs:
 
 - The buffer is written to a temp file beside the file, named `.wingman-fmt-<random>.<ext>` (same extension, so the tool picks the same language and finds the same config and ignore files for that folder). The tool formats that file, Wingman reads it back and deletes it, also when the tool fails or times out. A mod's calls have no stdin, which is why a file is used. Per-file config (a Prettier `overrides` entry that matches the real file name, such as `*.test.ts`) does not see the temp name.
-- It runs where the repo's tools run: this computer, WSL for a repo WSL owns, or the space's machine. The command is an argument list, never a shell line built from file names. The whole run for one file has 10 seconds.
+- It runs where the repo's tools live, with your shell's `PATH` (see Where tools run): this computer, WSL for a repo WSL owns, or the space's machine. The command is an argument list, never a shell line built from file names. The whole run for one file has 10 seconds.
 - The result is applied to the buffer as one undo step, with the cursor kept on the same line where possible, and then saved. Line endings stay as the file had them. In Review, formatting is treated like your own save: lines outside the agent's changes change the baseline too, so formatting never shows as an agent change, and lines inside its added lines stay part of its pending change.
 - If the formatter is missing, rejects the file (a syntax error) or times out, the buffer is saved as it is and a one-line notice says why. Your text is never lost and the save is never blocked. If you type while the formatter runs, its result is dropped and your buffer is saved as it is.
 - The tool is found once per folder and remembered for the space while Wingman runs.
 
 ## Settings
 
-The header's **⚙ Settings** opens:
+The header's **⚙ Settings** (or the narrow header's ⚙; command `wingman.openSettings`) opens a dialog in sections, each short enough for an 820 px window at zoom 1.2 (a section scrolls in a smaller window): **General** (the notes, the session log, Herdr's buttons, the editor, the external editor), **Editing** (brackets, tags, wrap, autosave, Format on save), **Inline edit** (its command), **Problems** and, for a space on another machine, **Machine**. Commands for keys and tests: `wingman.settingsTab:general`, `:editing`, `:inline`, `:problems`, `:machine`. The settings:
 
 - **Auto note on rejections**: tell the agent which of its changes you rejected. On by default.
 - **Note on my edits**: when you save, tell the agent that changed the file which lines you edited, so it reads the file again before its next change. On by default. The note is delivered with the agent's next tool call or prompt, and a newer save replaces a note it hasn't read yet.
@@ -407,7 +415,7 @@ The header's **⚙ Settings** opens:
 - **Inline edit command**: the command `ctrl-k` runs (see Inline edit), with **Default** to put the default back.
 - **Problems**: run the project's checkers and mark what they report (see Problems). On by default.
 - **Check after each agent turn**: Check when an agent of the space finishes a turn. Off by default.
-- **Problems command** (per repo of the shown space, with a repo choice when there are several): your own checker and how its output reads (see Problems). The dialog scrolls: these rows are at its end.
+- **Problems command** (per repo of the shown space, with a repo choice when there are several): your own checker and how its output reads (see Problems).
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
 - **Format on save**: `ctrl-s` (and the Save button) format the file with the repo's formatter first, then save. Off by default. Autosave never formats, because it saves while you are elsewhere and formatting moves text. See Format on save.

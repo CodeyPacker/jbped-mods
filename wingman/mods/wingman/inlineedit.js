@@ -26,13 +26,6 @@ export const TIMEOUT_MS = 120000;
  */
 export const DEFAULT_COMMAND = 'claude -p --output-format text --tools "" --permission-mode dontAsk --strict-mcp-config --disable-slash-commands --no-session-persistence --settings {"disableAllHooks":true} {prompt}';
 
-/**
- * The fixed sh script the command runs under on Linux, macOS, WSL and another machine: a login
- * shell's PATH (claude lives in ~/.local/bin, which a GUI app's or wsl.exe's PATH lacks), then the
- * command itself with its arguments as given ("$@"): nothing in them is parsed by the shell.
- */
-export const WRAP_SH = 'PATH="$HOME/.local/bin:$HOME/.claude/local:$PATH"; exec "$@"';
-
 /** An instruction as typed: control characters dropped (a newline or tab becomes a space), trimmed, capped. */
 export function cleanInstruction(s) {
   const t = String(s ?? "").replace(/[\r\n\t]+/g, " ").replace(/[\x00-\x1F\x7F-\x9F]/g, "").trim();
@@ -179,26 +172,7 @@ export function expand(template, { prompt, promptFile = null }) {
 /** Whether a template sends the prompt through a temp file. */
 export const usesFile = (template) => words(template).some((w) => w.includes("{promptFile}"));
 
-/**
- * Where and how the command runs: { how, cmd, args, opts }.
- * - another machine (`on`): sh -c WRAP_SH there, in the repo's folder;
- * - Linux and macOS here: sh -c WRAP_SH;
- * - Windows: through wsl.exe for a repo WSL owns, or when there's no native .exe (`nativeExe`
- *   null), else the native .exe directly. `wslCwd`/`distro`: the repo as WSL sees it.
- */
-export function plan(argv, { windows = false, on = null, owner = "native", nativeExe = null, cwd = null, wslCwd = null, distro = null, timeout = TIMEOUT_MS } = {}) {
-  const shArgs = ["-lc", WRAP_SH, "wingman", ...argv];
-  if (on) return { how: "remote", cmd: "sh", args: shArgs, opts: { ...(cwd ? { cwd } : {}), on, timeout } };
-  if (!windows) return { how: "sh", cmd: "sh", args: shArgs, opts: { ...(cwd ? { cwd } : {}), timeout } };
-  if (owner !== "wsl" && nativeExe) return { how: "native", cmd: nativeExe, args: argv.slice(1), opts: { ...(cwd ? { cwd } : {}), timeout } };
-  const at = wslCwd ? ["--cd", wslCwd] : [];
-  return { how: "wsl", cmd: "wsl.exe", args: [...(distro ? ["-d", distro] : []), ...at, "-e", "sh", "-lc", WRAP_SH, "wingman", ...argv], opts: { timeout } };
-}
-
-/** The first .exe of a `where` listing, or null. */
-export function exeFrom(whereOut) {
-  return String(whereOut ?? "").split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) ?? null;
-}
+// Where the command runs: toolpath.js plan, with toolrun.js toolWhere (shared with Format on save and Problems).
 
 /** A one-line message for a failed run ({ code, stdout, stderr } or a thrown error), or null when it worked. */
 export function failure(r, { name = "claude", elapsed = 0, timeout = TIMEOUT_MS } = {}) {
