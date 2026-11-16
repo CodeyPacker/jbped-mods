@@ -3,7 +3,7 @@
 # Edit mods in the config folder, where Herdr hot-reloads them, then run this before committing.
 #
 #   ./sync.sh              sync every share folder
-#   ./sync.sh skillshare-wsl   sync one share folder
+#   ./sync.sh wingman   sync one share folder
 #
 # Only what a share folder already has is synced: each mods/<name>/ and each layouts/<file>.
 # To add a mod to a share, create <share>/mods/<name>/ first.
