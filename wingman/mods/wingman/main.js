@@ -37,6 +37,7 @@ import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buil
 import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
 import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
+import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS } from "./cmdroute.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -131,6 +132,11 @@ const DIRTY_FRESH = 30000; // ms: an entry older than this is from a copy that's
 // The Explorer's file operations: TREE_MENU names the copy whose tree the right-click menu is for
 // (every shown copy gets the menu's command); FILEOP tells the other copies what was renamed or deleted.
 const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
+// Commands (cmdroute.js): SETTINGS_REV / HOOK_REV ({ stamp }) tell every copy, hidden ones too, to read
+// the settings or look for the Claude hook again. CMD_INBOX: the shown copies' deliveries of a command,
+// so one acts (claim); module scope is shared by every copy of this build.
+const SETTINGS_REV = "wingman.settingsRev", HOOK_REV = "wingman.hookRev";
+const CMD_INBOX = [];
 
 // Review comments (comments.js): one file per space under data/wingman/comments, written compare-and-swap.
 // COMMENTS ({ "<space>": stamp }) tells every copy, the dialogs too, that a space's file changed;
@@ -231,24 +237,30 @@ export default class Review extends View {
     cx.spawn(async (cx) => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.paint(cx); }); // host reads only from a task, never from init itself
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });
-    // The pane takes the keyboard back after its popup closes.
-    // Commands: "focus" when a popup over the pane closes; the rest come from the right-click menu.
+    // Commands (cmdroute.js): Herdr hands wingman.<command> to every shown copy. "focus" (a popup over
+    // this copy closed) and tree menu commands are this copy's own; settings and hook reloads reach
+    // every copy, hidden ones too, through a shared stamp; any other command is done by one copy only.
+    this.settingsRev = shared(SETTINGS_REV)?.stamp ?? 0; this.hookRev = shared(HOOK_REV)?.stamp ?? 0;
     cx.spawn(async (cx) => {
       for (;;) {
-        const c = String(await nextCommand()).replace(/^wingman\./, "");
+        const c = String(await nextCommand()).replace(/^wingman\./, ""), name = cmdName(c), kind = kindOf(name);
+        if (kind === "all") { setShared(name === "hook" ? HOOK_REV : SETTINGS_REV, { stamp: Date.now() }); continue; } // tick() reloads
+        if (kind === "one" && !(await this.claim(name, cx))) continue;
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
-        // Problems' commands act in one copy: the Edit panel's, else a pane copy with no Edit panel (as inlineEdit).
-        else if (c === "checkProblems") { if (this.problems.owner()) this.problems.checkNow(cx); }
-        else if (/^problems[A-Z]/.test(c)) this.problems.command(c, cx);
-        else if (c === "openSettings") { if (this.problems.owner()) this.openSettings(); }
-        else if (c === "inlineEdit" || c.startsWith("inlineEdit:")) {
-          // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
-          // "wingman.inlineEdit:<instruction>"`, which also runs it): every copy gets it, so the Edit
-          // panel's copy acts, or a pane copy when the layout has no Edit panel. ctrl-k itself goes
-          // to the copy that has the keyboard (key, runAction).
-          if (this.view === "edit" || (!this.view && !hasView("edit"))) this.openInline(cx, c.startsWith("inlineEdit:") ? c.slice("inlineEdit:".length) : null);
+        // Problems' commands run in the copy that owns Problems (the Edit panel's, else a pane copy with
+        // no Edit panel); another copy hands them over (PROBLEMS_REQ) and shows the Edit panel.
+        else if (c === "checkProblems" || /^problems[A-Z]/.test(c)) {
+          if (this.problems.owner()) { if (c === "checkProblems") this.problems.checkNow(cx); else this.problems.command(c, cx); }
+          else { showView("edit"); setShared(PROBLEMS_REQ, { space: this.spaceId, ...(c === "checkProblems" ? {} : { cmd: c }), stamp: Date.now() }); }
         }
+        else if (c === "openSettings") this.openSettings();
+        // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
+        // "wingman.inlineEdit:<instruction>"`, which also runs it): the Edit copy when it got it, else
+        // the copy that did hands it to Edit at its lines (openInline, as ctrl-k in Review).
+        else if (name === "inlineEdit") this.openInline(cx, c.startsWith("inlineEdit:") ? c.slice("inlineEdit:".length) : null);
+        // The checkpoints dialog: one, from whichever copy got the command.
+        else if (c === "checkpoints") this.openCheckpoints(cx);
         else {
           // The diff's right-click menu: [the action whose focus rule applies, what it does].
           const menu = {
@@ -258,12 +270,6 @@ export default class Review extends View {
             // Reject the current change, then add a review comment on where it was.
             rejectComment: ["reject", () => this.rejectWithComment(cx)],
             clear: [null, () => this.clearSelection(cx)],
-            // The settings popup saved a change.
-            settings: [null, async () => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); }],
-            // The settings popup installed or removed the Claude hook on a machine: look again now.
-            hook: [null, () => { forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }],
-            // G4: the checkpoints dialog, from the Review copy only (one dialog however many copies show).
-            checkpoints: [null, () => { if (this.mode === "review") this.openCheckpoints(cx); }],
           }[c];
           // Every action (a key keys.json sends as wingman.<action>, e.g. "alt-up": "wingman.moveLineUp",
           // or the menu's reject, accept, reason) goes through the same focus rule as its key (act).
@@ -287,7 +293,7 @@ export default class Review extends View {
     cx.timer.every(250, (cx) => {
       if (this.paintAsk) { this.paintAsk = false; cx.notify(); } // paint(): a redraw asked from a task, from this callback's own cx
       crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
-      this.syncComments(cx);
+      this.syncComments(cx); this.reloadShared(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
         const f = this.file();
@@ -330,6 +336,31 @@ export default class Review extends View {
    * again, from its own cx, whenever this was asked since its last run.
    */
   paint(cx) { this.paintAsk = true; cx.notify(); }
+
+  /**
+   * Whether this copy is the one that acts on command `name` (cmdroute.js): every copy that got it
+   * waits SETTLE_MS for the others, then the highest ranked acts. Its rank: it opened the menu that
+   * sent the command, it has the keyboard, the command is Problems' or inline edit's and this is
+   * their copy, it's a panel copy.
+   */
+  async claim(name, cx) {
+    const now = Date.now();
+    const me = { id: this.id, c: name, at: now, rank: cmdRank({ menu: now - (this.menuAt ?? 0) < 60000, focused: !!this.handle?.is_focused?.() || !!this.inBar,
+      owner: (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner(), panel: !!this.view }) };
+    cmdPrune(CMD_INBOX, now).push(me);
+    await cx.sleep(SETTLE_MS);
+    return cmdWinner(CMD_INBOX, me) === this.id;
+  }
+
+  /** Settings or the Claude hook changed (a shared stamp any copy sets): read them again, in every copy. */
+  reloadShared(cx) {
+    const s = shared(SETTINGS_REV)?.stamp ?? 0, h = shared(HOOK_REV)?.stamp ?? 0;
+    if (s !== this.settingsRev) {
+      this.settingsRev = s;
+      cx.spawn(async (cx) => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); this.paint(cx); });
+    }
+    if (h !== this.hookRev) { this.hookRev = h; forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }
+  }
 
   /** Per-space view state; no stores means no repo found yet. */
   reset(stores) {
@@ -2299,6 +2330,7 @@ export default class Review extends View {
       ...(it.root ? [{ cmd: "treeRefresh", label: "Refresh", key: "" }]
         : [{ cmd: "treeRename", label: "Rename…", key: this.kl("renameItem") }, { cmd: "treeDelete", label: "Delete", key: this.kl("deleteItem") }]),
     ];
+    this.menuAt = Date.now(); // its command comes back to every shown copy: this one acts (claim)
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
     this.paint(cx);
   }
@@ -5249,6 +5281,7 @@ export default class Review extends View {
       ...(this.lastReject ? [{ cmd: "reason", label: "Comment last rejection", key: this.kl("reason") }] : []),
       ...(hasSel ? [{ cmd: "clear", label: "Clear selection", key: "Esc" }] : []),
     ];
+    this.menuAt = Date.now(); // its command comes back to every shown copy: this one acts (claim)
     openOverlay({ mod: "wingman", props: { form: "menu", items }, kind: "popup", at: "pointer", width: 260, height: items.length * 30 + 12 });
     this.paint(cx);
   }
@@ -5269,7 +5302,7 @@ export default class Review extends View {
     const next = this.st;
     this.paint(cx);
     cx.spawn(async () => {
-      try { await saveSettings(next); syncPanels(shared, setShared, next.hideHerdrPanels); run("wingman.settings"); } catch (e) { log(`settings: ${e.message ?? e}`); }
+      try { await saveSettings(next); syncPanels(shared, setShared, next.hideHerdrPanels); setShared(SETTINGS_REV, { stamp: Date.now() }); } catch (e) { log(`settings: ${e.message ?? e}`); }
     });
   }
 
@@ -5290,7 +5323,7 @@ export default class Review extends View {
           if (!text) throw new Error("hooks/wingman-hook.sh is missing from the mod folder");
           result = await installHook(on, text);
         } else if (how === "remove") result = await uninstallHook(on);
-        if (how) { failed = false; run("wingman.hook"); }
+        if (how) { failed = false; setShared(HOOK_REV, { stamp: Date.now() }); }
         this.hook = { status: hookSummary(await hookStatus(on, { hookText: text }), on), result, failed };
       } catch (e) {
         this.hook = { status: this.hook?.status ?? null, result: String(e.message ?? e), failed: true };
@@ -5307,7 +5340,7 @@ export default class Review extends View {
     this.paint(cx);
     const km = this.km;
     cx.spawn(async () => {
-      try { await saveKeys(next); await syncHerdrKeys(km); run("wingman.settings"); } catch (e) { log(`keys: ${e.message ?? e}`); }
+      try { await saveKeys(next); await syncHerdrKeys(km); setShared(SETTINGS_REV, { stamp: Date.now() }); } catch (e) { log(`keys: ${e.message ?? e}`); }
     });
   }
 

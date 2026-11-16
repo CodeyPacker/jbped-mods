@@ -304,7 +304,7 @@ It runs where the repo's tools live (see Where tools run): this computer, WSL fo
 
 Inline edit's command, Format on save's formatter and the Problems checkers all run the same way (`toolrun.js`). On Linux, macOS, WSL (for a repo WSL owns, through `wsl.exe`) and another machine, each runs through `sh -lc` with a fixed script that takes the `PATH` and the program's arguments as arguments: no shell ever reads a file name, a setting or your text. A login shell's `PATH` (and WSL's) lacks what your interactive shell adds, such as Node from nvm, fnm or volta, which `~/.bashrc` or `~/.zshrc` sets up. So Wingman asks your shell once per machine (`$SHELL -lic`, printing `PATH` between two markers, so a banner can't get in; at most 10 s) and keeps the answer while Wingman runs. Measured on this PC, bash with nvm: 0.2 s in Linux and 0.5 s through `wsl.exe`; later calls cost nothing more. Only bash, zsh and other POSIX shells are asked. When the shell isn't one of those or doesn't answer, the newest `~/.nvm/versions/node/*/bin`, `~/.volta/bin` and fnm's default are added instead, and the shell is asked again a minute later. `~/.local/bin` and `~/.claude/local` always come first. On Windows, a repo that isn't WSL's runs the native `.exe` that `where` finds (`node.exe`, `dotnet.exe`, `claude.exe`), else WSL's.
 
-`herdr-app do "wingman.inlineEdit:<instruction>"` (or that string as an action in `keys.json`) opens the box with the instruction and runs it. The Edit panel's copy acts on it, or a pane copy when the layout has no Edit panel.
+`herdr-app do "wingman.inlineEdit:<instruction>"` (or that string as an action in `keys.json`) opens the box with the instruction and runs it, in one Wingman copy (see Commands): the Edit copy when it's shown, else the shown copy hands the cursor's lines to Edit, as `ctrl-k` in Review does.
 
 Comment, Accept and Reject act on the lines a text selection covers. Clicking the line numbers still selects whole lines. Not supported: input methods that compose characters (Chinese, Japanese, Korean), and wide characters or emoji, which put the cursor in the wrong column.
 
@@ -344,7 +344,7 @@ Where they show:
 
 On another machine, detection is one `sh` call there and checkers run there. A machine without `sh` (Windows) shows "Problems need sh on <machine>". Only this computer has been tried (a Windows drive and WSL's own files).
 
-Problems run and show in one Wingman copy: the Edit panel's, else a pane copy when the layout has no Edit panel. `ctrl-shift-m` pressed in another copy asks that one. Commands for keys and tests: `wingman.checkProblems`, `wingman.nextProblem`, `wingman.prevProblem`, `wingman.problemsShow`, `wingman.problemsUp`, `wingman.problemsDown`, `wingman.problemsEnter`, `wingman.problemsSend`, `wingman.problemsSendFile`, `wingman.problemsCopy`, `wingman.problemsConfirm`, `wingman.openSettings`.
+Problems run and show in one Wingman copy: the Edit panel's, else a pane copy when the layout has no Edit panel. `ctrl-shift-m` pressed in another copy, and a Problems command that reaches another copy (see Commands), asks that one and shows the Edit panel. Commands for keys and tests: `wingman.checkProblems`, `wingman.nextProblem`, `wingman.prevProblem`, `wingman.problemsShow`, `wingman.problemsUp`, `wingman.problemsDown`, `wingman.problemsEnter`, `wingman.problemsSend`, `wingman.problemsSendFile`, `wingman.problemsCopy`, `wingman.problemsConfirm`, `wingman.openSettings`.
 
 Measured on this PC (the sample project: two files, three tsc errors, three eslint problems): on a Windows drive with Windows Node, eslint on one file 5.4 to 6.5 s and tsc 2.5 to 2.9 s; in WSL's own files through `wsl.exe`, eslint 0.9 s and tsc 1.8 s; `dotnet build` of a one-file console app 7.4 s.
 
@@ -361,6 +361,10 @@ Every key in the tables above can be changed in **Settings → Keyboard shortcut
 Herdr's global shortcuts reach Herdr before Wingman. When a Wingman key is one of them (by default `alt-up`, `alt-down` and `ctrl-shift-k`), Wingman adds it to the `mod:wingman` section of Herdr's `keys.json`. Herdr then sends it to Wingman while Wingman has focus, and the shortcuts page shows which Herdr action it hides there. Wingman only changes its own entries in that section (`wingman.<action>`).
 
 Your changes are saved in `~/.config/herdr-app/data/wingman/keys.json` as `{ "<action>": ["key", ...] }`, holding only the actions you changed. Each action is also a command, `wingman.<action>` (for example `wingman.joinLines`), that you can bind anywhere in Herdr's `keys.json`.
+
+### Commands
+
+Herdr hands a `wingman.<command>` to every Wingman copy on screen (the shown panel tab, each Wingman pane of the shown tab, an open Wingman dialog) and to no hidden one. Exactly one copy acts (`cmdroute.js`): the copies that got it wait 60 ms for each other, then the one ranked first does it: the copy whose right-click menu sent it, else the copy with the keyboard, else the copy the command belongs to (Problems and Inline edit: the Edit copy), else a panel copy over a pane copy. So `wingman.addComment` or `wingman.checkpoints` opens one dialog with a Wingman pane beside the panel too. A dialog's own commands (`wingman.cp*`) and the file tree menu's act where they belong. Settings saved from the Settings dialog, and the Claude hook installed or removed there, reach every copy, hidden ones too (a shared stamp each copy checks 4 times a second); `wingman.settings` does the same from a key.
 
 ## Format on save
 

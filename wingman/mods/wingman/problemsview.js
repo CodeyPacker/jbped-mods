@@ -19,7 +19,7 @@ import { idOf } from "./remote.js";
 import { ACTIVE } from "./captureloop.js";
 import { fitBar, withKey } from "./barfit.js";
 
-/** Check pressed in a copy that doesn't own Problems: { space, stamp } for the owner copy (tick). */
+/** Check (or another Problems command) in a copy that doesn't own Problems: { space, cmd?, stamp } for the owner copy (tick). */
 export const PROBLEMS_REQ = "wingman.problemsReq";
 const PROBE_MS = 30000; // how long what exists in a folder is trusted
 const WHERE_MS = 60000; // how long where a program runs from is trusted
@@ -185,7 +185,12 @@ export class Problems {
   tick(cx) {
     if (!this.owner()) return;
     const req = shared(PROBLEMS_REQ);
-    if (req && req.stamp > this.reqSeen) { this.reqSeen = req.stamp; if (this.host.stateOf(req.space)) this.checkNow(cx, req.space); }
+    // From another copy: Check ({ space, stamp }), or one of Problems' commands ({ space, cmd, stamp }) for the shown space.
+    if (req && req.stamp > this.reqSeen) {
+      this.reqSeen = req.stamp;
+      if (req.cmd) { if (req.space === this.host.spaceId) { this.command(req.cmd, cx); this.host.paint(cx); } }
+      else if (this.host.stateOf(req.space)) this.checkNow(cx, req.space);
+    }
     const on = this.enabled() && this.host.settings?.problemsAfterTurn === true;
     const live = new Set();
     for (const a of agents()) {
