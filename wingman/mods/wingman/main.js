@@ -33,17 +33,17 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git, onWindows, toWsl } from "./git.js";
-import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, whereLabel, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
 import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
 import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
-import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS } from "./cmdroute.js";
-import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
+import { kindOf, nameOf as cmdName, rank as cmdRank, winner as cmdWinner, prune as cmdPrune, SETTLE_MS, ownerView, ownedAction, handoff, HANDOFF_MS } from "./cmdroute.js";
+import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines, headDiffArgs, fitHunks } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
 import { ACTIONS, BY_ID, resolve, index, holders, bind, unbind, reset as resetKey, refused, keystrokeOf, keyLabel, withModSection, herdrGlobal, allowedIn } from "./keymap.js";
 import { lineSpan, moveLines, copyLines, deleteLines, joinLines, toggleComment, commentFor } from "./lineops.js";
-import { splitLines } from "./model.js";
+import { splitLines, parseHunks } from "./model.js";
 import { spaceRoots, addFolder, removeFolder, repoInfo, addWorktree, removeWorktree, scanRepos, sharedBranch, worktreeDest, isHome } from "./workspace.js";
 import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, rootId, idOf, mapLimit, addSleeper } from "./remote.js";
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
@@ -65,6 +65,8 @@ import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab,
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
 import { isClaude } from "./sessionlog.js";
 import { GitActions, GIT_COMMANDS } from "./gitview.js"; // G6 in Changes: sync, branches, Discard change, Generate message
+import { noteAfterUndo } from "./hunkdiscard.js";
+import { layoutOf, WANT } from "./columns.js"; // the left column of Changes and Edit at any width
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
 const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
@@ -138,6 +140,9 @@ const TREE_MENU = "wingman.treeMenu", FILEOP = "wingman.fileop";
 // so one acts (claim); module scope is shared by every copy of this build.
 const SETTINGS_REV = "wingman.settingsRev", HOOK_REV = "wingman.hookRev";
 const CMD_INBOX = [];
+// A git command won by a copy that isn't the shown Changes copy: GIT_REQ ({ space, cmd, stamp }) hands it
+// over; GIT_TAKEN (stamp -> when) is where the Changes copy that took it says so, so exactly one acts.
+const GIT_REQ = "wingman.gitReq", GIT_TAKEN = new Map();
 
 // Review comments (comments.js): one file per space under data/wingman/comments, written compare-and-swap.
 // COMMENTS ({ "<space>": stamp }) tells every copy, the dialogs too, that a space's file changed;
@@ -232,7 +237,7 @@ export default class Review extends View {
     // that view as a pane copy (panelview.copyView), so dialogs' jumps reach it.
     const cv = copyView(props()?.view, layout());
     this.view = cv.view; this.startMode = cv.mode;
-    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
+    this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now(); this.gitReqSeen = Date.now();
     // Review comments per space (comments.js), loaded from their file when COMMENTS says it changed.
     this.cmts = new Map(); this.cmtSeen = new Map(); this.jumpSeen = Date.now(); this.anchorSeen = new Map();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
@@ -248,10 +253,11 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wingman\./, ""), name = cmdName(c), kind = kindOf(name);
-        if (GIT_COMMANDS.test(c)) { this.gitx?.command(c, cx); continue; } // G6: the shown Changes copy acts (gitview.command)
         if (kind === "all") { setShared(name === "hook" ? HOOK_REV : SETTINGS_REV, { stamp: Date.now() }); continue; } // tick() reloads
         if (kind === "one" && !(await this.claim(name, cx))) continue;
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
+        // G6: Changes' git commands run in the shown Changes copy; another copy shows Changes and hands them over (GIT_REQ).
+        else if (GIT_COMMANDS.test(c)) this.gitCommand(c, cx);
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
         // Problems' commands run in the copy that owns Problems (the Edit panel's, else a pane copy with
         // no Edit panel); another copy hands them over (PROBLEMS_REQ) and shows the Edit panel.
@@ -297,7 +303,7 @@ export default class Review extends View {
     cx.timer.every(1000, () => crumb(`alive ${this.view ?? this.mode} leader=${!!this.loop.isLeader}`, null, ALIVE_MS)); // crash breadcrumbs: every copy, first 10 s after Changes shows
     cx.timer.every(250, (cx) => {
       if (this.paintAsk) { this.paintAsk = false; cx.notify(); } // paint(): a redraw asked from a task, from this callback's own cx
-      crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx);
+      crumb("tick: autosave", "changes", 2000); this.autosave(cx); this.publishDirty(); crumb("tick: publishReview", "changes", 2000); this.publishReview(); this.takeShared(cx); this.takeGit(cx);
       this.syncComments(cx); this.reloadShared(cx);
       if (this.mode === "changes") {
         // The picked row's texts (selected some other way too: a hand-off), then its neighbours'.
@@ -350,11 +356,31 @@ export default class Review extends View {
    */
   async claim(name, cx) {
     const now = Date.now();
+    const owner = ownerView(name) ? this.view === ownerView(name) : (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner();
     const me = { id: this.id, c: name, at: now, rank: cmdRank({ menu: now - (this.menuAt ?? 0) < 60000, focused: !!this.handle?.is_focused?.() || !!this.inBar,
-      owner: (name === "inlineEdit" || name === "checkProblems" || /^problems[A-Z]/.test(name)) && !!this.problems?.owner(), panel: !!this.view }) };
+      owner, panel: !!this.view }) };
     cmdPrune(CMD_INBOX, now).push(me);
     await cx.sleep(SETTLE_MS);
     return cmdWinner(CMD_INBOX, me) === this.id;
+  }
+
+  /** A git command this copy won (claim): the shown Changes copy runs it; any other shows Changes and hands it over (GIT_REQ). */
+  gitCommand(c, cx) {
+    if (ownedAction(this.view, this.mode === "changes" && this.changesShown(), "changes") === "act") return this.gitx?.command(c, cx);
+    if (!showView("changes")) { this.error = "This layout has no Wingman Changes panel"; return; }
+    const now = Date.now();
+    for (const [k, at] of GIT_TAKEN) if (now - at > 2 * HANDOFF_MS) GIT_TAKEN.delete(k);
+    setShared(GIT_REQ, { space: this.spaceId, cmd: c, stamp: now });
+  }
+
+  /** The Changes copy, every tick: a git command handed over by another copy, once this copy is shown (exactly one copy takes it). */
+  takeGit(cx) {
+    if (this.view !== "changes" || !this.gitx) return;
+    const req = shared(GIT_REQ), now = Date.now();
+    const what = handoff(req, { seen: this.gitReqSeen, taken: GIT_TAKEN, space: this.spaceId, shown: this.mode === "changes" && this.changesShown(), now });
+    if (what === "wait") return;
+    if (req) this.gitReqSeen = Math.max(this.gitReqSeen ?? 0, req.stamp);
+    if (what === "take") { GIT_TAKEN.set(req.stamp, now); this.gitx.command(req.cmd, cx); this.paint(cx); }
   }
 
   /** Settings or the Claude hook changed (a shared stamp any copy sets): read them again, in every copy. */
@@ -964,8 +990,9 @@ export default class Review extends View {
     return this.withTokens({ ...f, Btext: text, Ctext: text, B: C, C }, cx);
   }
 
-  async openFile(store, rel, cx, at = null) {
+  async openFile(store, rel, cx, at = null, { check = false } = {}) {
     [store, rel] = this.own(store, rel); // one identity per file, however it was reached (P1)
+    this.narrowLeft = false; // a narrow Edit view (columns.js) shows the file, not the column
     const key = `${store.root}|${rel}`, space = this.spaceId, rk = `${idOf(store)}|${rel}`;
     this.recent = [rk, ...this.recent.filter((k) => k !== rk)].slice(0, 30);
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
@@ -986,7 +1013,7 @@ export default class Review extends View {
     if (fresh) this.opened.push(key);
     this.pick(key, cx);
     const f = this.file();
-    if (fresh && f?.key === key) this.problems.opened(f.store, f.rel, cx);
+    if ((fresh || check) && f?.key === key) this.problems.opened(f.store, f.rel, cx); // check: a hand-off from Review or Changes, whose file may have changed since its last run
     if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); this.paint(cx); }
     if (f && this.nvim()) this.toNvim(f, at?.line ?? f.hunks[0]?.n ?? 0, cx);
   }
@@ -1402,7 +1429,7 @@ export default class Review extends View {
         else if (store && this.view === "edit") {
           // An inline edit asked for in Review (ctrl-k there) opens here, on the same lines.
           const inline = g.inline ?? null;
-          cx.spawn(async (cx) => { await this.openFile(store, g.key.slice(i + 1), cx, g.at); if (inline && this.file()?.key === g.key) this.openInline(cx, inline.instruction ?? null, inline.span); });
+          cx.spawn(async (cx) => { await this.openFile(store, g.key.slice(i + 1), cx, g.at, { check: true }); if (inline && this.file()?.key === g.key) this.openInline(cx, inline.instruction ?? null, inline.span); });
         }
         else if (store && this.visible().some((f) => f.key === g.key)) {
           this.pick(g.key, cx);
@@ -1619,10 +1646,18 @@ export default class Review extends View {
       if (Btext.includes("\0") || Ctext?.includes("\0")) return { ...f, inHead, error: "binary file" };
       // The diff runs here, on temp copies (merge.js), wherever the texts came from.
       crumb(`changeTexts: before diffHunks ${rel} B=${Btext.length} C=${Ctext?.length ?? 0}`, "changes");
-      const hunks = await diffHunks(Btext, Ctext ?? "");
+      // The repo's git diffs a file it has, by the repo's line-ending rules (a CRLF checkout of an LF
+      // blob is one changed line, not all of them); a new or deleted file, or hunks that don't fit, here.
+      const hunks = (inHead && typeof Ctext === "string" && await this.headHunks(st, rel, Btext, Ctext)) || await diffHunks(Btext, Ctext ?? "");
       crumb(`changeTexts: after diffHunks ${rel} hunks=${hunks.length}`, "changes");
       return { ...f, inHead, created: !inHead, Btext, Ctext, B: splitLines(Btext), C: splitLines(Ctext ?? ""), hunks, toTok: true };
     } catch (e) { return { ...f, error: String(e.message ?? e) }; }
+  }
+
+  /** A file's change against HEAD as the repo's git sees it (changes.headDiffArgs), when its hunks fit the texts; else null. */
+  async headHunks(st, rel, Btext, Ctext) {
+    const r = await this.git(st, headDiffArgs(rel)).catch(() => null);
+    return r?.code === 0 ? fitHunks(parseHunks(String(r.stdout)), splitLines(Btext).length, splitLines(Ctext).length) : null;
   }
 
   /** changeTexts' result highlighted (an error stays as it is). */
@@ -1943,10 +1978,10 @@ export default class Review extends View {
     }
     const f = r.f;
     if (what === "check") { if (this.unchecked.has(f.key)) this.unchecked.delete(f.key); else this.unchecked.add(f.key); this.paint(cx); return; }
-    if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; this.paint(cx); }
+    if (!f.error) { this.pick(f.key, cx); this.chgSide = "content"; } else { this.error = `${f.rel}: ${f.error}`; this.paint(cx); } // narrow (columns.js): the diff in the list's place
   }
 
-  renderChanges(t) {
+  renderChanges(t, cols) {
     const review = shared(REVIEW), st = this.commitStore(), multi = this.repos().length > 1;
     const checked = st ? this.checkedIn(st) : [], open = checked.filter((f) => (review?.[f.key] ?? 0) > 0).length;
     const box = (on) => div().w(14).h(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.border).bg(on ? t.accent : t.background)
@@ -1978,7 +2013,8 @@ export default class Review extends View {
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     if (!this.crumbBuilt) { this.crumbBuilt = true; crumb(`renderChanges: built ${rows.length} rows, building tree`, "changes"); }
     const gx = this.gitx, branches = !!gx?.branchOpen();
-    return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
+    this.chgLeftW = cols.leftW; // gitview fits the sync buttons to it
+    return v_flex().h_full().when(cols.single, (e) => e.flex_1().min_w(0)).when(!cols.single, (e) => e.w(cols.leftW).flex_none().border_r(1).border_color(t.border))
       .children(gx ? gx.syncRows(t, multi) : []) // G6: branch, upstream, ↑/↓, Fetch, Pull, Push per repo
       .when(branches, (e) => e.child(gx.branchPanel(t)))
       .when(!branches, (e) => e.child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
@@ -2011,6 +2047,12 @@ export default class Review extends View {
   /** ctrl-b: shows or hides the tree, switching to the Edit view first if needed. */
   toggleTree(cx) {
     if (this.mode !== "edit") { this.treeOn = true; return this.setMode("edit", cx); }
+    // Too narrow for both (columns.js): the column shows in the editor's place, and ctrl-b swaps them.
+    if (this.editCols(true).single) {
+      if (!this.treeOn) { this.treeOn = true; this.narrowLeft = true; } else this.narrowLeft = !this.narrowLeft;
+      if (this.narrowLeft) this.refreshTrees(cx);
+      return this.paint(cx);
+    }
     this.treeOn = !this.treeOn;
     if (this.treeOn) this.refreshTrees(cx);
     this.paint(cx);
@@ -2923,6 +2965,7 @@ export default class Review extends View {
       if (i >= 0) this.files[i] = snap;
     }
     this.sel = entry.snaps[0].key; this.error = null; this.settle(); this.reveal(); this.paint(cx);
+    this.commitNote = noteAfterUndo(this.commitNote, entry.note); // Changes: a discard undone takes its note with it
     this.enqueue(async () => {
       await entry.snaps[0].store.undo(entry.writes);
       for (const m of entry.feedback) await this.noteToClaude(m, () => withdrawFeedback(m.terminal, m.text, { on: m.on }));
@@ -3099,9 +3142,9 @@ export default class Review extends View {
   async runInline(j, seq, prompt, cx) {
     const template = String(this.settings.inlineCommand ?? "").trim() || INLINE_COMMAND;
     const name = commandWords(template)[0] ?? "the command";
-    let tmp = null, r, started = Date.now();
+    let tmp = null, r, started = Date.now(), where = null;
     try {
-      const where = await this.inlineWhere(j.store, name);
+      where = await this.inlineWhere(j.store, name);
       // {promptFile}: the prompt in a temp file under data/wingman, removed afterwards.
       if (usesFile(template)) {
         if (where.on) throw new Error("{promptFile} works only for files on this computer: use {prompt}");
@@ -3118,7 +3161,7 @@ export default class Review extends View {
     const elapsed = Date.now() - started, live = this.inlineLive(j, seq);
     log(`inline edit ${j.rel} lines ${j.t.a + 1}-${j.t.b + 1}: ${r instanceof Error ? `error ${r.message}` : `exit ${r.code}, ${r.stdout.length} chars`} in ${elapsed} ms${live ? "" : " (cancelled)"}`);
     if (!live) return;
-    const why = runFailure(r, { name, elapsed, timeout: INLINE_MS });
+    const why = runFailure(r, { name, elapsed, timeout: INLINE_MS, where: whereLabel(where) });
     if (why) return this.inlineFailed(j, why, cx);
     const answer = cleanAnswer(r.stdout);
     if (!answer) return this.inlineFailed(j, `${name} gave no answer`, cx);
@@ -4338,14 +4381,23 @@ export default class Review extends View {
   }
 
   /** The Edit tab's left column: the Explorer / Search / Agent files switch over the tree, the Search view or the agent's files. */
-  renderLeft(t, full = false) {
-    const on = this.search.left === "search" || this.search.left === "problems"; // the wider column
-    this.leftW = full ? this.px(this.paneW) : on ? 300 : 260; // problemsview fits its buttons to it
+  /** The Changes view's sides for the pane's width now (columns.js). */
+  changesCols() { return layoutOf(this.paneW == null ? 0 : this.px(this.paneW), WANT.changes, this.chgSide === "content" ? "content" : "left"); }
+
+  /** The Edit view's sides with the tree on (columns.js); `any`: whether one side shows at a time, whatever is picked. */
+  editCols(any = false) {
+    const wide = this.search.left === "search" || this.search.left === "problems"; // the wider column
+    return layoutOf(this.paneW == null ? 0 : this.px(this.paneW), wide ? WANT.editWide : WANT.edit, any || this.narrowLeft ? "left" : "content");
+  }
+
+  renderLeft(t, full = false, cols = null) {
+    const single = !full && !!cols?.single;
+    this.leftW = full ? this.px(this.paneW) : cols?.leftW ?? WANT.edit; // problemsview fits its buttons to it
     const tab = (id, label, here) => div().id(`left-${id}`).h(22).px(8).flex().items_center().rounded(4).text_size(11.5).cursor_pointer()
       .text_color(here ? t.foreground : t.muted).when(here, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
       .on_click((_e, cx) => this.setLeft(id, cx)).child(label);
     return v_flex().id("left-column").h_full().min_h(0)
-      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(this.leftW).flex_none().border_r(1).border_color(t.border))
+      .when(full || single, (e) => e.flex_1().min_w(0)).when(!full && !single, (e) => e.w(this.leftW).flex_none().border_r(1).border_color(t.border))
       .child(h_flex().h(30).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
         .children(this.leftTabs(this.leftW).map(([id, label]) => tab(id, label, this.search.left === id))))
       .child(this.search.left === "search" ? this.renderSearch(t) : this.search.left === "problems" ? this.problems.render(t) : this.search.left === "agent" ? this.agentFiles.render(t) : this.renderTree(t, full));
@@ -5547,6 +5599,8 @@ export default class Review extends View {
    */
   fileBar(f, vis) {
     const items = [], add = (id, labels, drop, size = 11, pad = 20, group) => items.push({ id, labels, drop, size, pad, group });
+    // Too narrow for the column beside it (columns.js): back to the list or the tree.
+    if (this.mode === "changes" ? !!this.cols?.single : this.mode === "edit" && !this.treeOnly() && this.editCols(true).single) add("back", ["‹ Files", "‹"], Infinity);
     if (vis.length > 1 && this.mode !== "changes") {
       const pos = `${vis.findIndex((x) => x.key === this.sel) + 1}/${vis.length}`;
       add("pos", [`${pos} · ${this.kl("prevFile")}/${this.kl("nextFile")}`, pos], 2, 10, 12);
@@ -5703,6 +5757,9 @@ export default class Review extends View {
     const strip = this.pb && this.mode === "edit" && this.cur ? this.problems.strip(f, this.cur.line) : null;
     const stripStale = !!(strip && strip.stale), stripErr = !!(strip && strip.severity === "error");
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
+    // The left column and the diff or editor beside it, or one at a time when narrow (columns.js).
+    const cols = this.mode === "changes" ? this.changesCols() : this.mode === "edit" && this.treeOn && !this.treeOnly() ? this.editCols() : { left: false, content: true, leftW: 0, single: false };
+    this.cols = cols;
     const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
     // An inline edit of this space; its target lines show selected while the box is open (ij.t, current lines).
     const ij = this.inlines?.get(this.spaceId) ?? null, it = ij && f && ij.key === f.key && ij.status !== "applying" ? ij.t : null;
@@ -5740,13 +5797,15 @@ export default class Review extends View {
       .when(this.mode === "review", (e) => e.children(this.agentFiles.reviewLine(t))) // edits only the session log saw
       .child(h_flex().flex_1().min_h(0)
       .when(this.treeOnly(), (e) => e.child(this.renderLeft(t, true)))
-      .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))
-      .when(this.mode === "changes", (e) => e.child(this.renderChanges(t)))
-      .when(!this.treeOnly(), (e) => e.child(v_flex().flex_1().min_w(0).h_full()
+      .when(this.mode === "edit" && this.treeOn && !this.treeOnly() && cols.left, (e) => e.child(this.renderLeft(t, false, cols)))
+      .when(this.mode === "changes" && cols.left, (e) => e.child(this.renderChanges(t, cols)))
+      .when(!this.treeOnly() && cols.content, (e) => e.child(v_flex().flex_1().min_w(0).h_full()
       // File tabs scroll sideways in their own area; the hint and file buttons stay pinned right,
       // fitted to the bar's width (fileBar: keys go first, then long labels, then whole buttons).
       .child(h_flex().id("file-bar").h(36).flex_none().px(8).gap(4).items_center().border_b(1).border_color(t.border)
         .on_size_change((size, cx) => { if (Math.abs((this.barW ?? 0) - size.width) > 0.5) { this.barW = size.width; this.paint(cx); } })
+        // One side at a time (columns.js): back to the list (Changes) or the tree (Edit).
+        .when(fb.has("back"), (e) => e.child(this.button("cols-back", fb.get("back"), t.raised, (cx) => { if (this.mode === "changes") this.chgSide = "left"; else { this.treeOn = true; this.narrowLeft = true; this.refreshTrees(cx); } this.paint(cx); }).flex_none().whitespace_nowrap()))
         .child(div().id("file-tabs").flex_1().min_w(0).h_full().relative().overflow_hidden()
           .on_size_change((size, cx) => { this.tabViewW = size.width; this.setTabOffset(this.tabOffset ?? 0); if (this.sel) this.showTab(this.sel); this.paint(cx); })
           .on_scroll_wheel((ev, cx) => this.tabWheel(ev, cx))

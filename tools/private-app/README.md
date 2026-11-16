@@ -23,6 +23,16 @@ $P list
 $P stop "$n" [--keep-home]   |   $P stop --all
 ```
 
+Input, to the instance's own window only (see Input below):
+
+```sh
+$P click "$n" 640 130 [--button left|right|middle] [--double|--triple] [--mods ctrl,shift]
+$P drag "$n" 100 700 400 780 [--mods shift]
+$P wheel "$n" 640 520 -240                   # 120 per notch; negative scrolls down
+$P key "$n" ctrl-s                           # alt-shift-f, escape, shift-f8, ctrl-enter, ctrl-/, f8 ...
+$P type "$n" 'some text'                     # into what has the keyboard; a newline presses Enter
+```
+
 `start` options:
 
 - `--name N`: matches `^[a-z0-9][a-z0-9-]{0,30}$`. The default is `i<MMDD-HHMMSS>-<random>`.
@@ -69,14 +79,34 @@ $P stop "$n" [--keep-home]   |   $P stop --all
   4. End any remaining descendant from the pre-stop snapshot, re-verified.
   5. Delete the home and the core state folder, retrying while files are locked.
 
+## Input
+
+`click`, `drag`, `wheel`, `key` and `type` drive the private window the way a person would, without touching the person's own input. `wininput.ps1` does the Windows side.
+
+- **Positions** are the window's client px, the same as in a `shot` screenshot (both are physical pixels), so a place read off a screenshot can be clicked. A position outside the client area is refused.
+- **Only the named instance's window.** The window is the visible, unowned top-level window of the recorded app pid, and the pid's name and creation time (to the 100 ns tick) are checked against `instance.json` right before anything is sent, in the same PowerShell call. If the check fails nothing is sent and the command exits non-zero.
+- **How.** Window messages are posted to that window handle: `WM_MOUSEMOVE`, button down and up, `WM_MOUSEWHEEL` (with screen coordinates, as Windows sends it), `WM_KEYDOWN`/`WM_KEYUP` (`WM_SYSKEY*` with alt). The app turns a key into its keystroke and, for a typing key, into `WM_CHAR` itself, as with a real key. Modifiers (ctrl, shift, alt) are set in the keyboard state of the app's own input thread for that one key or click (`AttachThreadInput` + `SetKeyboardState`), then put back as they were and detached. The app reads modifiers from that state, not from the message.
+- **Never:** `SendInput`, `keybd_event`, `mouse_event`, `SetCursorPos`, `SetForegroundWindow` or any activation, or the clipboard. The real pointer doesn't move, the window doesn't come to the front, and the focused window stays the person's (the selftest checks that the private window did not come to the front).
+- **Text** goes to PowerShell as base64 (at most 4000 characters a call), never as code. Each character is sent through its key on the current keyboard layout (with shift when it needs it), so a mod's key handler and a text box both see it; a character the layout has no key for is sent as `WM_CHAR` alone, which a text box takes and a key handler doesn't see.
+- **Keys:** `a`–`z`, `0`–`9`, `f1`–`f24`, `escape enter tab space backspace delete insert up down left right home end pageup pagedown`, and the US punctuation keys `` ` - = [ ] \ ; ' , . / ``, after any of `ctrl-`, `shift-`, `alt-`.
+- The app's own keys apply as for a real key: `ctrl--` zooms the private app out, and Herdr's global keys reach Herdr before a mod.
+
+Limits:
+
+- Windows only (the WSL driver). Each call starts PowerShell and compiles the helper: about 1.5 s.
+- Hover looks (an element styled while the pointer is over it) are not checked by the selftest; the real pointer stays wherever it is. Clicks, drags and wheels carry their own position.
+- A key's modifiers are held only in the app's thread's keyboard state. A keystroke pressed on the real keyboard while that private window is in front during the same ~0.1 s would see them.
+- Input methods that compose characters (IME) aren't used. Characters outside the Basic Multilingual Plane (emoji) arrive as two `WM_CHAR` halves.
+
 ## Self-test
 
-`tools/private-app/selftest.sh [--ref REV]` does the following:
+`tools/private-app/selftest.sh [--ref REV] [--only N,...]` does the following (`--only 4` runs only the fourth part):
 
 - Records your `herdr-app.exe` and `herdr-core.exe` processes (not one-shot `herdr-core.exe exec` calls, which your mods start and end all the time).
 - Runs an instance with no mod: start, status without errors, screenshot, stop, nothing left.
 - Runs an instance with Wingman from `git archive REV` (default `HEAD`, never the working tree): start, status without errors, `check` passes, opens Wingman in a tab, status without errors, screenshot, no crash events, stop, nothing left.
 - Starts two instances at the same moment: each records its own app (different pids), both answer without errors, both stop with nothing left.
+- Runs an instance with the `pa-probe` mod in the `probe.json` layout (four bands: a button, a text box, a wheel area, a pad; every event written to `<home>/data/pa-probe.json`). It clicks the button (left, right, double), presses `ctrl-s`, `alt-shift-f` and `escape` on the pad, types text with quotes, `$(...)` and `ö` into the text box, wheels and drags, shift-clicks, and checks each event arrived. It checks that the input did not bring the private window to the front. A copy of the record with the app's creation time one tick off must be refused by `click`, `type` and `wininput.ps1` itself, with the probe getting nothing.
 - After each instance, checks that your recorded processes are all still alive. It reports a missing one and never restarts anything.
 - Stops its instances on failure (trap).
 
@@ -101,3 +131,4 @@ Not verified:
 - `crashinfo` matches Application Error 1000 events to the app's pid. WER 1001 events name no pid and are left out.
 - One Wingman run in an early version of this tool coincided with a crash of the person's own Herdr (13:44:23). Later runs with Wingman did not repeat it. Treat runs with Wingman loaded as the riskier case.
 - `start` blanks the inherited Windows variables it finds, but it only knows the `HC_*`/`HERDR_*` names. A mod that reads other variables from the Windows environment still sees the real values.
+- Claude Code run by a mod in a private app (Wingman's inline edit, Generate) uses the same sign-in as a shell: WSL's `claude` there had the same `HOME`, binary, config folder and `claude auth status` as the shell, and answered. An "OAuth session expired and could not be refreshed" comes from the sign-in itself, not the instance: Windows' `claude.exe` and WSL's `claude` sign in separately, and a sign-in has a fixed end ("this sign-in can end at any time from now until <date>"). It fails the same way in your own Herdr. Check with `claude auth status` (and `claude.exe auth status`) in a plain shell.

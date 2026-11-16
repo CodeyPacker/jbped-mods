@@ -15,7 +15,8 @@ import { readInfo, runSync, counts, cantSync, cantPublish, fetchArgs, pullArgs, 
 import { nameProblem, checkArgs, LIST, parseBranches, switchArgs, createArgs, unsavedIn, unsavedMessage, ago } from "./branches.js";
 import { cantDiscard, discardText, reviewWrites, discardQuestion, discardWhat } from "./hunkdiscard.js";
 import { buildPrompt, cleanMessage, parseSubjects, newFileDiff, SUBJECT_ARGS, diffArgs } from "./commitmsg.js";
-import { expand as expandCommand, usesFile, plan as runPlan, failure as runFailure, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
+import { expand as expandCommand, usesFile, failure as runFailure, whereLabel, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
+import { plan as runPlan } from "./toolpath.js";
 import { READ } from "./changes.js";
 import { idOf } from "./remote.js";
 import { chunkArgs, execOn } from "./fsx.js";
@@ -23,8 +24,8 @@ import { toWsl } from "./git.js";
 import { fitBar } from "./barfit.js";
 import { capSteps } from "./undocap.js";
 
-/** Commands of this module (wingman.<name>[:arg]); main.js hands them to the Changes copy. */
-export const GIT_COMMANDS = /^(fetch|pull|push|publish|syncConfirm|syncCancel|branches|branchSwitch|branchNew|branchClose|discardChange|discardChangeConfirm|discardChangeCancel|genMessage|genReplace|genKeep|genCancel)(:|$)/;
+/** Commands of this module (wingman.<name>[:arg]): cmdroute.js routes them to one Changes copy. */
+export { GIT_COMMANDS } from "./cmdroute.js";
 /** How often the ↑/↓ counts are reread from local refs while Changes is shown (ms). */
 export const INFO_MS = 30000;
 /** The "Discard change" button on a change's header row in Changes: its width, and the narrow one's. */
@@ -328,7 +329,8 @@ export class GitActions {
       entry.writes.push(...applied);
       if (e) await h.sendEditNotes(writes.map((w) => h.editNote(target, w)).filter(Boolean)).catch(() => {});
       const s = h.stateOf(space);
-      if (s) s.commitNote = `Discarded ${what} in ${f.rel}`;
+      entry.note = `Discarded ${what} in ${f.rel}`; // undo clears it (main.js undo)
+      if (s) s.commitNote = entry.note;
     }, cx, space);
     const queued = h.queue;
     cx.spawn(async (cx) => { await queued; if (h.spaceId === space) await h.loadChanges(cx); h.paint(cx); });
@@ -429,7 +431,7 @@ export class GitActions {
       const [diff, subj] = await Promise.all([this.diffOf(st, files, !!head), head ? h.git(st, [...READ, ...SUBJECT_ARGS]) : null]);
       const prompt = buildPrompt({ repo: h.repoName(st), files: files.map((f) => ({ rel: f.rel, letter: f.letter, add: f.add, del: f.del, binary: f.error === "binary file" })), diff, subjects: subj?.code === 0 ? parseSubjects(subj.stdout) : [] });
       // The inline edit command's runner, as runInline uses it: where (this computer, WSL, the machine), {promptFile}.
-      const where = await h.inlineWhere(st, job.name);
+      const where = job.where = await h.inlineWhere(st, job.name);
       if (usesFile(template)) {
         if (where.on) throw new Error("{promptFile} works only for files on this computer: use {prompt}");
         const dir = `${appHome()}/data/wingman`;
@@ -445,7 +447,7 @@ export class GitActions {
     } catch (e) { r = e instanceof Error ? e : new Error(String(e?.message ?? e)); this.log(`commit message: ${r.message}`); }
     finally { if (tmp) await fs.unlink(tmp).catch(() => {}); }
     if (!live()) return;
-    const why = runFailure(r, { name: job.name, elapsed: ms, timeout: TIMEOUT_MS });
+    const why = runFailure(r, { name: job.name, elapsed: ms, timeout: TIMEOUT_MS, where: whereLabel(job.where) });
     const draft = why ? null : cleanMessage(r.stdout);
     if (!draft) { Object.assign(job, { status: "error", note: why ?? `${job.name} gave no answer` }); h.paint(cx); return; }
     job.draft = draft; job.ms = ms;
@@ -473,7 +475,7 @@ export class GitActions {
     if (yes) this.put(space, g, cx); else { g.status = "done"; g.note = "Kept your message"; this.host.paint(cx); }
   }
 
-  // ---- drawing (inside renderChanges' 320 px column) ------------------------------------
+  // ---- drawing (inside renderChanges' column, 320 px or narrower: columns.js) ------------
 
   /** Every repo's sync rows, at the top of the Changes column. */
   syncRows(t, multi) {
@@ -491,7 +493,7 @@ export class GitActions {
       { id: "pull", labels: [i?.behind ? `Pull ↓${i.behind}` : "Pull", "Pull"], drop: Infinity },
       push === "push" ? { id: "push", labels: [i?.ahead ? `Push ↑${i.ahead}` : "Push", "Push"], drop: Infinity } : { id: "publish", labels: ["Publish branch", "Publish"], drop: Infinity },
     ].map((x) => ({ ...x, size: 11, pad: 20 }));
-    const fit = fitBar(304, items, busy ? 90 : 0, 6);
+    const fit = fitBar((h.chgLeftW || 320) - 16, items, busy ? 90 : 0, 6); // the column's width now (columns.js), less its padding
     const can = { fetch: !!fetchRemote(i), pull: !cantSync(i, "pull"), push: !cantSync(i, "push"), publish: !cantPublish(i) };
     const hot = (k) => (k === "push" && i?.ahead > 0 && can.push) || (k === "pull" && i?.behind > 0 && can.pull) || (k === "publish" && can.publish);
     const btn = (k) => h.button(`sync-${k}-${id}`, fit.get(k), hot(k) ? t.accent + "88" : t.raised, (cx) => this.sync(k, st, cx))

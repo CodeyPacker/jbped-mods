@@ -1,6 +1,6 @@
 // inlineedit.js: instruction cleaning, prompt, answer cleaning, line replacement, the range
 // re-check, argv template expansion and where the command runs.
-import { cleanInstruction, MAX_INSTRUCTION, target, targetProblem, relocate, buildPrompt, cleanAnswer, replaceLines, words, expand, usesFile, failure, DEFAULT_COMMAND, MAX_LINES, TIMEOUT_MS } from "../mods/wingman/inlineedit.js";
+import { cleanInstruction, MAX_INSTRUCTION, target, targetProblem, relocate, buildPrompt, cleanAnswer, replaceLines, words, expand, usesFile, failure, whereLabel, DEFAULT_COMMAND, MAX_LINES, TIMEOUT_MS } from "../mods/wingman/inlineedit.js";
 import { plan, exeFrom, TOOL_SH } from "../mods/wingman/toolpath.js";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
@@ -124,5 +124,18 @@ assert.match(failure(new Error("cannot start claude: program not found")), /clau
 assert.match(failure({ code: 1, stdout: "", stderr: "Warning: sign-in ends soon\nError: overloaded\n" }), /^claude exited with 1: Error: overloaded$/);
 assert.match(failure({ code: 1, stdout: "", stderr: "" }, { elapsed: TIMEOUT_MS }), /timed out after 120 s/);
 assert.match(failure(new Error("timed out")), /timed out/);
+// Not signed in where it ran: Windows' claude.exe and WSL's claude sign in separately (seen: claude.exe
+// signed out while WSL's claude was signed in), so the message says which one.
+{
+  const r = { code: 1, stdout: "", stderr: "Failed to authenticate: OAuth session expired and could not be refreshed\n" };
+  assert.equal(failure(r, { where: whereLabel({ how: "native" }) }),
+    "claude (Windows) isn't signed in: run `claude auth login` in Windows, then try again (Failed to authenticate: OAuth session expired and could not be refreshed)");
+  assert.match(failure(r, { where: whereLabel({ how: "wsl" }) }), /^claude \(WSL\) isn't signed in: run `claude auth login` in WSL/);
+  assert.match(failure(r, { where: whereLabel({ how: "remote", on: "vps" }) }), /^claude \(vps\) isn't signed in/);
+  assert.match(failure(r), /^claude isn't signed in: run `claude auth login`, then/);
+  assert.match(failure({ code: 1, stdout: "Invalid API key · Please run /login", stderr: "" }), /isn't signed in/);
+  assert.equal(whereLabel({ how: "sh" }), null);
+  assert.equal(whereLabel(null), null);
+}
 
 console.log("inlineedit ok");

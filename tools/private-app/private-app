@@ -44,6 +44,7 @@ print("" if v is None else (json.dumps(v) if isinstance(v,(list,dict,bool)) else
 #   plat_inherited_names HC_*/HERDR_* names the platform hands to started programs regardless of
 #                        this shell's environment (blanked in every call)
 #   plat_app_version     the installed app's version, read without running it
+#   plat_input ARGS      mouse/keyboard input to the instance's own window only (wininput.ps1 args)
 # ======================================================================================
 
 plat_detect() {
@@ -208,6 +209,18 @@ foreach (\$x in \$e) { '{0:o} id={1} {2}' -f \$x.TimeCreated, \$x.Id, ((\$x.Mess
 wsl_inherited_names() {
   win_ps 'Get-ChildItem env: | Where-Object { $_.Name -match "^(HC_|HERDR_)" } | ForEach-Object { $_.Name }' |
     grep -E '^[A-Z0-9_]+$' || true
+}
+
+# Input to the instance's window: wininput.ps1 re-checks the app's pid and creation time and posts
+# window messages to that window only (see the script's header). Every argument is validated here
+# and again there; text goes as base64.
+wsl_input() {
+  guard_instance
+  [[ $I_APP_PID =~ ^[0-9]+$ && $I_APP_TICKS =~ ^[0-9]+$ ]] || die "no app recorded for $I_NAME"
+  local ps1
+  ps1=$(wslpath -w "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/wininput.ps1")
+  (cd /mnt/c && powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$ps1" \
+    -ProcId "$I_APP_PID" -Ticks "$I_APP_TICKS" "$@" | tr -d '\r'; exit "${PIPESTATUS[0]}")
 }
 
 # ---- dispatch to the platform -----------------------------------------------------------
@@ -589,6 +602,88 @@ cmd_status() {
   [ $a = yes ] && [ $c = yes ] && [ "$errs" = "[]" ]
 }
 
+# ---- input: click, drag, wheel, key, type ---------------------------------------------------
+# Coordinates are window client px, as in `shot` screenshots. Only the named instance's window
+# gets anything (see wininput.ps1); a failed check does nothing and exits non-zero.
+
+need_int() { [[ $2 =~ ^[0-9]{1,5}$ ]] || die "$1: '$2' is not a pixel position"; }
+need_mods() { [[ $1 =~ ^((ctrl|shift|alt)(,(ctrl|shift|alt))*)?$ ]] || die "--mods takes ctrl,shift,alt: '$1'"; }
+input_ok() { app_alive || die "the app of $I_NAME is not running (pid $I_APP_PID)"; }
+
+cmd_click() {
+  load_instance "${1:-}"; shift
+  [ $# -ge 2 ] || die "click <name> <x> <y> [--button left|right|middle] [--double|--triple] [--mods ctrl,shift]"
+  local x=$1 y=$2 button=left count=1 mods=""; shift 2
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --button) button=${2:-}; shift ;;
+      --double) count=2 ;;
+      --triple) count=3 ;;
+      --mods) mods=${2:-}; shift ;;
+      *) die "click: unknown argument '$1'" ;;
+    esac
+    shift
+  done
+  need_int x "$x"; need_int y "$y"; need_mods "$mods"
+  [[ $button =~ ^(left|right|middle)$ ]] || die "--button takes left, right or middle"
+  input_ok
+  plat input -Op click -X "$x" -Y "$y" -Button "$button" -Count "$count" -Mods "$mods"
+}
+
+cmd_drag() {
+  load_instance "${1:-}"; shift
+  [ $# -ge 4 ] || die "drag <name> <x1> <y1> <x2> <y2> [--mods ctrl,shift]"
+  local x1=$1 y1=$2 x2=$3 y2=$4 mods=""; shift 4
+  while [ $# -gt 0 ]; do
+    case $1 in --mods) mods=${2:-}; shift ;; *) die "drag: unknown argument '$1'" ;; esac
+    shift
+  done
+  need_int x1 "$x1"; need_int y1 "$y1"; need_int x2 "$x2"; need_int y2 "$y2"; need_mods "$mods"
+  input_ok
+  plat input -Op drag -X "$x1" -Y "$y1" -X2 "$x2" -Y2 "$y2" -Mods "$mods"
+}
+
+cmd_wheel() {
+  load_instance "${1:-}"; shift
+  [ $# -ge 3 ] || die "wheel <name> <x> <y> <delta> [--mods ctrl,shift] (delta: 120 per notch, negative scrolls down)"
+  local x=$1 y=$2 d=$3 mods=""; shift 3
+  while [ $# -gt 0 ]; do
+    case $1 in --mods) mods=${2:-}; shift ;; *) die "wheel: unknown argument '$1'" ;; esac
+    shift
+  done
+  need_int x "$x"; need_int y "$y"; need_mods "$mods"
+  [[ $d =~ ^-?[1-9][0-9]{0,3}$ ]] || die "wheel: delta must be a nonzero whole number"
+  input_ok
+  plat input -Op wheel -X "$x" -Y "$y" -Delta "$d" -Mods "$mods"
+}
+
+# key <name> <combo>: modifiers then one key, joined by '-': ctrl-s, alt-shift-f, shift-f8, escape,
+# ctrl--, ctrl-/. Keys: a-z 0-9, f1..f24, the named ones in PA_KEYS, and US punctuation.
+PA_KEYS='escape|enter|tab|space|backspace|delete|insert|up|down|left|right|home|end|pageup|pagedown'
+PA_PUNCT='^[][`=;,./\\'"'"'-]$'
+cmd_key() {
+  load_instance "${1:-}"; shift
+  local combo=${1:-} mods=() k
+  [ -n "$combo" ] || die "key <name> <combo> (e.g. ctrl-s, alt-shift-f, escape)"
+  k=$combo
+  while [[ $k =~ ^(ctrl|shift|alt)-(.+)$ ]]; do mods+=("${BASH_REMATCH[1]}"); k=${BASH_REMATCH[2]}; done
+  if [[ $k =~ $PA_PUNCT ]]; then k=c$(printf '%d' "'$k") # punctuation goes as its code: c45 is '-'
+  elif ! [[ $k =~ ^([a-z0-9]|f([1-9]|1[0-9]|2[0-4])|$PA_KEYS)$ ]]; then die "key: unknown key '$k' in '$combo'"; fi
+  input_ok
+  plat input -Op key -Key "$k" -Mods "$(IFS=,; echo "${mods[*]}")"
+}
+
+# type <name> <text>: the text, character by character, into whatever has the keyboard in the
+# app. A newline presses Enter. It goes to PowerShell as base64, never as code.
+cmd_type() {
+  load_instance "${1:-}"; shift
+  [ $# -eq 1 ] || die "type <name> <text> (one argument; quote it)"
+  local text=$1
+  [ ${#text} -le 4000 ] || die "type: at most 4000 characters at a time"
+  input_ok
+  plat input -Op type -Text64 "$(printf '%s' "$text" | base64 -w0)"
+}
+
 cmd_alive() { load_instance "${1:-}"; app_alive; }
 cmd_crashinfo() { load_instance "${1:-}"; plat crashinfo; }
 cmd_procs() { load_instance "${1:-}"; inst_procs; }
@@ -624,6 +719,12 @@ private-app: a private Herdr app instance for testing mods (see README.md)
   app N ARGS...        herdr-app with the instance's environment (status, ls, do, check, ...)
   hc N ARGS...         hc with the instance's environment
   shot N [FILE]        screenshot, prints its path
+  click N X Y [--button left|right|middle] [--double|--triple] [--mods ctrl,shift]
+  drag N X1 Y1 X2 Y2 [--mods ctrl,shift]
+  wheel N X Y DELTA [--mods ctrl,shift]   DELTA: 120 per notch, negative scrolls down
+  key N COMBO          ctrl-s, alt-shift-f, escape, shift-f8, ...
+  type N TEXT          characters into what has the keyboard (a newline presses Enter)
+                       (input goes to the instance's own window only; X Y are shot px)
   wait N SECS CMD...   poll until CMD succeeds (CMD: app|hc|shot|status|alive ... or a program)
   status N             app alive, core alive, layout, errors (exit 0 when all fine)
   alive N              exit 0 while the private app process exists
@@ -647,6 +748,11 @@ main() {
     app) cmd_app "$@" ;;
     hc) cmd_hc "$@" ;;
     shot) cmd_shot "$@" ;;
+    click) cmd_click "$@" ;;
+    drag) cmd_drag "$@" ;;
+    wheel) cmd_wheel "$@" ;;
+    key) cmd_key "$@" ;;
+    type) cmd_type "$@" ;;
     wait) cmd_wait "$@" ;;
     status) cmd_status "$@" ;;
     alive) cmd_alive "$@" ;;

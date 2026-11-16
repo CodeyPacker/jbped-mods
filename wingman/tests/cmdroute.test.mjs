@@ -1,5 +1,5 @@
 // cmdroute.js: which Wingman copy acts on a wingman.<command> that reached several shown copies.
-import { kindOf, nameOf, rank, winner, prune, WINDOW_MS, KEEP_MS } from "../mods/wingman/cmdroute.js";
+import { kindOf, nameOf, rank, winner, prune, WINDOW_MS, KEEP_MS, GIT_COMMANDS, ownerView, ownedAction, handoff, HANDOFF_MS } from "../mods/wingman/cmdroute.js";
 import { ACTIONS } from "../mods/wingman/keymap.js";
 import assert from "node:assert/strict";
 
@@ -45,3 +45,36 @@ assert.equal(winner([], { id: "only", c: "x", at: t, rank: 0 }), "only");
 // Old entries are dropped.
 const list = [{ at: 0 }, { at: KEEP_MS }, { at: KEEP_MS + 10 }];
 assert.equal(prune(list, KEEP_MS + 5).length, 2);
+
+// Changes' git commands: one copy, the Changes copy's rule. They are "one" commands like the rest,
+// owned by the Changes view: the shown Changes copy acts; any other winner shows Changes and hands over.
+for (const c of ["fetch", "pull", "push:r1", "publish", "syncConfirm", "branches", "branchSwitch:main", "branchNew:x y", "discardChange", "discardChangeConfirm", "genMessage", "genCancel"]) {
+  assert.equal(kindOf(nameOf(c)), "one", c);
+  assert.equal(ownerView(nameOf(c)), "changes", c);
+  assert.ok(GIT_COMMANDS.test(c), c);
+}
+for (const c of ["checkProblems", "inlineEdit", "pushover", "fetchAll", "undo"]) assert.equal(ownerView(c), null, c);
+assert.equal(ownedAction("changes", true, "changes"), "act");
+assert.equal(ownedAction("changes", false, "changes"), "hand"); // a Changes copy that isn't shown can't act
+assert.equal(ownedAction("review", true, "changes"), "hand");
+assert.equal(ownedAction(null, true, "changes"), "hand"); // a pane copy
+// A Changes copy beside a focused Wingman pane: the pane outranks it (keyboard), so the pane wins and
+// hands over; the Changes copy, not the winner, does nothing then; it takes the hand-over once.
+{
+  const t0 = 1000, pane = { id: "a-pane", c: "push", at: t0, rank: rank({ focused: true }) };
+  const chg = { id: "b-changes", c: "push", at: t0 + 5, rank: rank({ owner: true, panel: true }) };
+  assert.equal(winner([pane, chg], chg), "a-pane");
+  assert.equal(winner([pane, chg], pane), "a-pane");
+  const taken = new Map(), req = { space: "s1", cmd: "push", stamp: t0 + 70 };
+  // two Changes copies (the panel's and a Changes pane): the first that's shown takes it, the other skips
+  assert.equal(handoff(req, { seen: 0, taken, space: "s1", shown: false, now: t0 + 100 }), "wait");
+  assert.equal(handoff(req, { seen: 0, taken, space: "s1", shown: true, now: t0 + 300 }), "take");
+  taken.set(req.stamp, t0 + 300);
+  assert.equal(handoff(req, { seen: 0, taken, space: "s1", shown: true, now: t0 + 310 }), "skip");
+  assert.equal(handoff(req, { seen: req.stamp, taken: new Map(), space: "s1", shown: true, now: t0 + 310 }), "skip"); // seen
+  assert.equal(handoff(req, { seen: 0, taken: new Map(), space: "s2", shown: true, now: t0 + 310 }), "skip"); // another space
+  assert.equal(handoff(req, { seen: 0, taken: new Map(), space: "s1", shown: true, now: req.stamp + HANDOFF_MS + 1 }), "skip"); // too old
+  assert.equal(handoff(null, { seen: 0, taken, space: "s1", shown: true, now: 0 }), "skip");
+}
+// Without a pane, the shown Changes copy is the only one that got it: it wins and acts.
+assert.equal(winner([{ id: "z", c: "fetch", at: 5, rank: rank({ owner: true, panel: true }) }], { id: "z", c: "fetch", at: 5, rank: 3 }), "z");

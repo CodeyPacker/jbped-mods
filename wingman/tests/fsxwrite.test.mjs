@@ -1,7 +1,7 @@
 // fsx.js writes (D1): writeText, removeFile, makeDir and fingerprints, here and on another machine.
 // The shim runs machine "vps" here (each call recorded in remoteCalls); "nosh" has no sh (Windows).
-import { writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, BIG_CALL, STALE, WINDOWS_NOTE, WRITE_SH } from "../mods/wingman/fsx.js";
-import { remoteCalls } from "herdr";
+import { writeText, removeFile, makeDir, fingerprints, callBytes, SAFE_CALL, BIG_CALL, STALE, WINDOWS_NOTE, WRITE_SH, WRITE_TRIES, transientWrite } from "../mods/wingman/fsx.js";
+import { remoteCalls, writeFaults } from "herdr";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync, statSync, chmodSync, symlinkSync, lstatSync, mkdirSync } from "node:fs";
@@ -140,5 +140,30 @@ try {
 } finally {
   try { chmodSync(`${dir}/ro`, 0o755); } catch {}
   rmSync(dir, { recursive: true, force: true });
+}
+
+// A local write that Windows refused for a moment (another reader had the file open over
+// \\wsl.localhost) is tried again, compare-and-swap checked each time; a real failure isn't.
+{
+  const d2 = mkdtempSync(`${tmpdir()}/fsxw2-`), p = `${d2}/f.txt`;
+  try {
+    writeFileSync(p, "old");
+    writeFaults.push("`herdr.writeTextFile`: Access is denied. (os error 5)");
+    await writeText(p, "new", "old");
+    assert.equal(readFileSync(p, "utf8"), "new");
+    writeFaults.push(...Array(WRITE_TRIES).fill("Access is denied. (os error 5)"));
+    await assert.rejects(writeText(p, "newer", "new"), /Access is denied/);
+    assert.equal(writeFaults.length, 0, "tried WRITE_TRIES times");
+    assert.equal(readFileSync(p, "utf8"), "new");
+    writeFaults.push("No space left on device (os error 28)", "unused");
+    await assert.rejects(writeText(p, "newer", "new"), /No space/);
+    assert.equal(writeFaults.length, 1, "not tried again"); writeFaults.length = 0;
+    // changed meanwhile: the retry's compare-and-swap check refuses it
+    writeFaults.push("Access is denied. (os error 5)");
+    writeFileSync(p, "someone else");
+    await assert.rejects(writeText(p, "mine", "new"), /changed since it was read/);
+    assert.ok(transientWrite(new Error("The process cannot access the file because it is being used by another process. (os error 32)")));
+    assert.ok(!transientWrite(new Error("stale snapshot")));
+  } finally { writeFaults.length = 0; rmSync(d2, { recursive: true, force: true }); }
 }
 console.log("fsxwrite ok");

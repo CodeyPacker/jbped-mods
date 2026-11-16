@@ -104,6 +104,9 @@ export function discardWhat(f, i, pick = null) {
   return `change ${i + 1} of ${f.hunks.length} (${at})`;
 }
 
+/** The note under the commit box once a discard is undone: its own "Discarded …" note goes; any other note stays. */
+export const noteAfterUndo = (note, discardNote) => (discardNote && note === discardNote ? null : note ?? null);
+
 /** The confirm line. */
 export function discardQuestion(f, i, pick = null) {
   return `Discard ${discardWhat(f, i, pick)} in ${f.rel}? Those lines go back to what HEAD has. Ctrl+Z here puts them back.`;

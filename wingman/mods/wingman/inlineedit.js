@@ -174,8 +174,26 @@ export const usesFile = (template) => words(template).some((w) => w.includes("{p
 
 // Where the command runs: toolpath.js plan, with toolrun.js toolWhere (shared with Format on save and Problems).
 
-/** A one-line message for a failed run ({ code, stdout, stderr } or a thrown error), or null when it worked. */
-export function failure(r, { name = "claude", elapsed = 0, timeout = TIMEOUT_MS } = {}) {
+/** Where a command ran, for a message: toolrun.js toolWhere's `where` -> "Windows", "WSL", the machine, or null (this computer). */
+export function whereLabel(where) {
+  if (!where) return null;
+  if (where.how === "native") return "Windows";
+  if (where.how === "wsl") return "WSL";
+  if (where.how === "remote") return where.on ?? null;
+  return null;
+}
+
+/** A sign-in failure in a command's output (Claude Code's, or a similar tool's). */
+const SIGNED_OUT = /failed to authenticate|oauth (session|token)[^\n]*(expired|invalid|revoked)|not logged in|please run \/login|invalid api key/i;
+
+/**
+ * A one-line message for a failed run ({ code, stdout, stderr } or a thrown error), or null when it
+ * worked. `where` (whereLabel): where it ran, named when the tool isn't signed in there, since
+ * Windows' claude.exe and WSL's claude have separate sign-ins.
+ */
+export function failure(r, { name = "claude", elapsed = 0, timeout = TIMEOUT_MS, where = null } = {}) {
+  if (r && !(r instanceof Error) && !r.error && r.code !== 0 && SIGNED_OUT.test(`${r.stderr ?? ""}\n${r.stdout ?? ""}`))
+    return `${name}${where ? ` (${where})` : ""} isn't signed in: run \`${name} auth login\`${where ? ` in ${where}` : ""}, then try again (${firstLine(r.stderr || r.stdout)})`;
   if (r instanceof Error || (r && r.error)) {
     const m = String(r.message ?? r.error ?? r);
     if (/time(d)? ?out/i.test(m) || elapsed >= timeout - 500) return `${name} timed out after ${Math.round(timeout / 1000)} s`;
