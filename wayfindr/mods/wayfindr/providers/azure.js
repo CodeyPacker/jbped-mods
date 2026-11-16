@@ -447,7 +447,8 @@ export const azure = {
 
   // A PrDetail (#1). pr: a PrSummary from pullRequests(). The PR, its threads, its last iteration's changes,
   // then both sides of the first PR_FILES files (the target's last merge commit and the source's), diffed here.
-  async pullRequest(account, pr, io) {
+  // opts.patches false: no item fetches, so each file has its path and status, patch null and counts 0.
+  async pullRequest(account, pr, io, { patches = true } = {}) {
     const [repoId, n] = String(pr.key).split("!");
     if (!repoId || !/^\d+$/.test(n ?? "")) throw new Error("This row has no Pull Request to show");
     const project = pr.repo.slice(0, pr.repo.lastIndexOf("/"));
@@ -466,6 +467,13 @@ export const azure = {
     const item = (path, version) => (version
       ? rest(org, tok, io, `${base}/items?path=${seg(path)}&versionDescriptor.versionType=commit&versionDescriptor.version=${version}&includeContent=true`)
       : Promise.resolve(null));
+    if (patches === false) {
+      const files = entries.map((e) => {
+        const status = fileStatus(e.changeType);
+        return { path: e.item.path, oldPath: status === "renamed" ? (e.originalPath ?? e.sourceServerItem ?? null) : null, status, additions: 0, deletions: 0, patch: null, binary: false };
+      });
+      return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: 0, truncated: false });
+    }
     let truncated = false;
     const files = await pool(entries.slice(0, PR_FILES), FILE_FETCHES, async (e) => {
       const status = fileStatus(e.changeType), oldPath = status === "renamed" ? (e.originalPath ?? e.sourceServerItem ?? e.item.path) : e.item.path;

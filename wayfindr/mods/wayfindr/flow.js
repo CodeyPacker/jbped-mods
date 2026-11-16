@@ -2,7 +2,8 @@
 // It never branches on which Provider it's talking to.
 import { PROVIDERS } from "./providers/index.js";
 import { can, keepsRepo, moveTarget } from "./providers/contract.js";
-import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH, ORIGIN_SH, parseScript } from "./launch.js";
+import { EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH, ORIGIN_SH, PRDIFF_SH, parseScript } from "./launch.js";
+import { parsePrDiff } from "./prdiff.js";
 import { parseClones, remoteRepo } from "./clones.js";
 import { identityOf, wranglrPattern, patternPath } from "./wranglr.js";
 
@@ -175,6 +176,13 @@ export async function listClones(roots, io) {
   return parseClones(await script(io, SCAN_SH, "wayfindr-scan", roots, 120000));
 }
 
+// A Pull Request's files and patches from its local clone (#22): the merge base of origin's `target` and the
+// PR's `branch` against the branch. clonePath: a host path. Returns { files, truncated } (prdiff.js), or rejects
+// with git's message.
+export async function loadLocalPrDiff(clonePath, branch, target, number, io) {
+  return parsePrDiff(await script(io, PRDIFF_SH, "wayfindr-prdiff", [clonePath, branch, target, String(number)], 120000));
+}
+
 // A picked folder's origin: { url, repo }, url "" when it has none. Rejects when it isn't a git repository.
 export async function cloneOrigin(folder, io) {
   const line = (await script(io, ORIGIN_SH, "wayfindr-origin", [folder], 30000)).split(/\r?\n/).find((l) => /^url( |$)/.test(l)) ?? "";
@@ -192,12 +200,13 @@ export async function loadReviewInfo(profile, accountId, pr, io, registry = PROV
 }
 
 // One Pull Request's detail (#1): description, reviewers, comments and files with their diffs.
-export async function loadPullRequestDetail(profile, accountId, pr, io, registry = PROVIDERS) {
+// opts: { patches } handed to the Provider; patches false: files without patches (the clone gives them).
+export async function loadPullRequestDetail(profile, accountId, pr, io, opts = {}, registry = PROVIDERS) {
   const account = profile.accounts.find((a) => a.id === accountId);
   if (!account) throw new Error(`No account "${accountId}" in this profile`);
   const provider = providerFor(account, registry);
   if (!can(provider, "prDetail")) throw new Error(`Pull Request detail on ${account.provider} isn't supported yet`);
-  return provider.pullRequest(account, pr, io);
+  return provider.pullRequest(account, pr, io, opts);
 }
 
 // Moves a Ticket to a Column on its Board (#15). columnId: a Column of the Board as shown.

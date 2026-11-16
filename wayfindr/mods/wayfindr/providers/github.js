@@ -422,13 +422,16 @@ export const github = {
     return r;
   },
 
-  // A PrDetail (#1). pr: a PrSummary from pullRequests(). Files: up to 3 pages of 100.
-  async pullRequest(account, pr, io) {
+  // A PrDetail (#1). pr: a PrSummary from pullRequests(). Files: up to 3 pages of 100. opts.patches false:
+  // no REST file pages, so no files (GraphQL gives only their count, in moreFiles); the caller has a clone.
+  async pullRequest(account, pr, io, { patches = true } = {}) {
     const node = (await graphql(account, io, PR_DETAIL_QUERY, { id: pr.key })).node;
     if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
     const repo = node.repository?.nameWithOwner ?? pr.repo;
     if (!REPO_NAME.test(String(repo)) || !Number.isInteger(node.number)) throw new Error("GitHub returned a Pull Request without a repo or number");
-    const t = await token(account, io), files = [];
+    const files = [];
+    if (patches === false) return mapPrDetail(node, files, pr);
+    const t = await token(account, io);
     const pages = Math.min(FILE_PAGES, Math.ceil((node.changedFiles ?? PAGE * FILE_PAGES) / PAGE));
     for (let page = 1; page <= pages; page++) {
       const list = await restGet(io, `${REST}/repos/${repo}/pulls/${node.number}/files?per_page=${PAGE}&page=${page}`, t);

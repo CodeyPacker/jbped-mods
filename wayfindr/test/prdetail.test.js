@@ -230,11 +230,36 @@ test("prDetail is a capability of GitHub and Azure, not ClickUp, and the flow re
     github: { capabilities: ["prDetail"], pullRequest: async (account, pr) => { seen = [account.id, pr.key]; return { ok: 1 }; } },
     clickup: { capabilities: ["board"] },
   };
-  assert.deepEqual(await loadPullRequestDetail(profile, "gh", { key: "K" }, {}, registry), { ok: 1 });
+  assert.deepEqual(await loadPullRequestDetail(profile, "gh", { key: "K" }, {}, {}, registry), { ok: 1 });
   assert.deepEqual(seen, ["gh", "K"]);
-  await assert.rejects(loadPullRequestDetail(profile, "cu", { key: "K" }, {}, registry), /isn't supported/);
-  await assert.rejects(loadPullRequestDetail(profile, "nope", { key: "K" }, {}, registry), /No account/);
+  await assert.rejects(loadPullRequestDetail(profile, "cu", { key: "K" }, {}, {}, registry), /isn't supported/);
+  await assert.rejects(loadPullRequestDetail(profile, "nope", { key: "K" }, {}, {}, registry), /No account/);
   const { clickup } = await import("../mods/wayfindr/providers/clickup.js");
   assert.ok(!clickup.capabilities.includes("prDetail"));
   assert.ok(github.capabilities.includes("prDetail") && azure.capabilities.includes("prDetail"));
+});
+
+test("GitHub pullRequest with patches false: the GraphQL query only, no files", async () => {
+  const io = ghIo(ghNode(), [[ghFile(0)]]);
+  const d = await github.pullRequest({ login: "me" }, { key: "PR_node", repo: "o/web" }, io, { patches: false });
+  assert.equal(io.calls.length, 1);
+  assert.equal(io.calls[0].url, "https://api.github.com/graphql");
+  assert.ok(d.files.every((f) => f.patch === null));
+  assert.equal(d.branch, "feat/x");
+});
+
+test("Azure pullRequest with patches false: no item fetches, files with patch null", async () => {
+  const entries = [change("/src/a.js", "edit"), change("/src/new.js", "add"), change("/src/b.js", "rename", { originalPath: "/src/old-b.js" })];
+  const io = azIo(entries, {});
+  const d = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, io, { patches: false });
+  assert.equal(io.calls.filter((c) => c.includes("/items?")).length, 0);
+  assert.deepEqual(d.files.map((f) => [f.path, f.status, f.patch, f.oldPath]),
+    [["/src/a.js", "modified", null, null], ["/src/new.js", "added", null, null], ["/src/b.js", "renamed", null, "/src/old-b.js"]]);
+});
+
+test("loadPullRequestDetail hands opts to the Provider", async () => {
+  let got = null;
+  const registry = { github: { capabilities: ["prDetail"], pullRequest: async (_a, _p, _io, opts) => { got = opts; return {}; } } };
+  await loadPullRequestDetail({ accounts: [{ id: "gh", provider: "github" }] }, "gh", { key: "K" }, {}, { patches: false }, registry);
+  assert.deepEqual(got, { patches: false });
 });
