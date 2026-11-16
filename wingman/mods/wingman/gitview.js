@@ -15,7 +15,8 @@ import { readInfo, runSync, counts, cantSync, cantPublish, fetchArgs, pullArgs, 
 import { nameProblem, checkArgs, LIST, parseBranches, switchArgs, createArgs, unsavedIn, unsavedMessage, ago } from "./branches.js";
 import { cantDiscard, discardText, reviewWrites, discardQuestion, discardWhat } from "./hunkdiscard.js";
 import { buildPrompt, cleanMessage, parseSubjects, newFileDiff, SUBJECT_ARGS, diffArgs } from "./commitmsg.js";
-import { expand as expandCommand, usesFile, plan as runPlan, failure as runFailure, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
+import { expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
+import { plan as runPlan } from "./toolpath.js";
 import { READ } from "./changes.js";
 import { idOf } from "./remote.js";
 import { chunkArgs, execOn } from "./fsx.js";
