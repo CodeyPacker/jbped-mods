@@ -29,6 +29,7 @@ export const ACTIONS = [
   { id: "deleteItem", label: "Delete the selected file or folder (file tree)", group: "Files and views", scope: "tree", keys: ["delete"] },
   // Editing
   { id: "save", label: "Save", group: "Editing", scope: "pane", keys: ["ctrl-s"] },
+  { id: "formatFile", label: "Format the file with the repo's formatter, then save", group: "Editing", scope: "pane", keys: ["alt-shift-f"] },
   { id: "undo", label: "Undo", group: "Editing", scope: "pane", keys: ["ctrl-z"] },
   { id: "redo", label: "Redo", group: "Editing", scope: "pane", keys: ["ctrl-shift-y"] },
   { id: "selectAll", label: "Select all", group: "Editing", scope: "edit", keys: ["ctrl-a"] },
@@ -86,7 +87,7 @@ export function index(keymap, scope) {
 }
 
 // Pane actions that change the open file's text or its review: never while the tree has the keyboard.
-const CHANGES_FILE = new Set(["accept", "reject", "acceptFile", "rejectFile", "undo", "redo"]);
+const CHANGES_FILE = new Set(["accept", "reject", "acceptFile", "rejectFile", "undo", "redo", "formatFile"]);
 const FIND_BAR = new Set(["find", "replace", "goToLine", "findNext", "findPrev"]);
 const SEARCH_BOX = new Set(["findCase", "findWord", "findRegex", "replaceAll", "searchFiles"]);
 

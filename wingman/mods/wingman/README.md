@@ -25,7 +25,7 @@ A restore isn't a Ctrl+Z step. Before it writes, it keeps a checkpoint **Before 
 
 Each repo keeps the newest 30 checkpoints in `<git-dir>/wingman/checkpoints.json`. Each checkpoint's tree is named by a ref, `refs/wingman/checkpoints/<id>`, so `git gc` keeps it; the oldest go with their refs. These refs point at trees: they are not branches, tags or stash entries, `git log --all` leaves them out, and nothing else of yours (index, `HEAD`, branches, stash) is touched. A repo on another machine works the same, through the same calls there. To drop them all: `git for-each-ref --format='delete %(refname)' refs/wingman/checkpoints/ | git update-ref --stdin`, and delete `checkpoints.json`.
 
-Syntax highlighting (Prism 1.30, MIT, vendored in `prism.js` and `grammars.js`) covers JavaScript, TypeScript (`.ts .mts .cts .d.ts`), React (`.jsx .tsx`, and JSX in `.js`), Vue (`.vue`), Angular (`.ts` and `.html` templates with `{{ }}`), HTML, C#, JSON, Markdown, Dockerfiles, YAML (including `docker-compose.yml`) and `.env` files. CSS (`.css`) and SCSS (`.scss`) are covered too. In HTML and Vue files, `<script>` blocks use the grammar their `lang` names and `<style>` blocks use CSS or SCSS. Vue and Angular template syntax is recognized: `v-if`, `v-for`, `:prop`, `@event`, `#slot`, `[prop]`, `(event)`, `[(ngModel)]`, `*ngFor`, `#ref`, `@if`/`@for`/`@switch`/`@defer` blocks and `{{ }}`, with the expressions inside highlighted as JavaScript. Other files show as plain text.
+Syntax highlighting (Prism 1.30, MIT, vendored in `prism.js` and `grammars.js`) covers JavaScript, TypeScript (`.ts .mts .cts .d.ts`), React (`.jsx .tsx`, and JSX in `.js`), Vue (`.vue`), Angular (`.ts` and `.html` templates with `{{ }}`), HTML, C#, JSON, Markdown, Dockerfiles, YAML (including `docker-compose.yml`) and `.env` files. CSS (`.css`) and SCSS (`.scss`) are covered too. In HTML and Vue files, `<script>` blocks use the grammar their `lang` names and `<style>` blocks use CSS or SCSS. Vue and Angular template syntax is recognized: `v-if`, `v-for`, `:prop`, `@event`, `#slot`, `[prop]`, `(event)`, `[(ngModel)]`, `*ngFor`, `#ref`, `@if`/`@for`/`@switch`/`@defer` blocks and `{{ }}`, with the expressions inside highlighted as JavaScript. Also coloured: Bash and shell (`.sh .bash .zsh`, `.bashrc`-style names, and extension-less files whose first line is a `#!` shell line), PowerShell (`.ps1 .psm1 .psd1`), Python (`.py`, also a `#!` python line), SQL (`.sql`), Go (`.go`), Rust (`.rs`), TOML (`.toml`), C (`.c .h`), C++ (`.cpp .hpp .cc .cxx .hxx`), Java (`.java`), Lua (`.lua`), INI (`.ini .cfg .editorconfig .gitconfig`), diff and patch files (`.diff .patch`) and JSON with comments (`.jsonc`, `tsconfig*.json`, `jsconfig*.json`, `.code-workspace`). `ctrl-/` knows each one's comment marker. Code inside Markdown fences is not coloured. Other files show as plain text.
 
 Review shows only what belongs to this space and branch:
 - **Branch:** each change records the branch it was made on. Switching branches sets it aside, and it comes back when you switch back. A worktree has its own review anyway.
@@ -264,6 +264,7 @@ The diff is also an editor. Click in the text to place the cursor and type. Your
 | Go to line | `ctrl-g`, then a line or `line:column` |
 | Bracket matching | with the cursor next to `(` `)` `[` `]` `{` `}`, both brackets of the pair get a box. Brackets in strings and comments don't count. None while text is selected. |
 | Save | `ctrl-s` |
+| Format the file, then save | `alt-shift-f` (command `wingman.formatFile`), whatever **Format on save** says. See Format on save. |
 | Undo / redo | `ctrl-z` / `ctrl-shift-y` (one history with accept and reject; redo is for edits). Each space keeps the newest 200 steps, fewer when they hold over about 24 MB of file text; older steps are dropped. |
 | Scroll sideways | Shift+wheel |
 
@@ -326,6 +327,25 @@ Herdr's global shortcuts reach Herdr before Wingman. When a Wingman key is one o
 
 Your changes are saved in `~/.config/herdr-app/data/wingman/keys.json` as `{ "<action>": ["key", ...] }`, holding only the actions you changed. Each action is also a command, `wingman.<action>` (for example `wingman.joinLines`), that you can bind anywhere in Herdr's `keys.json`.
 
+## Format on save
+
+`alt-shift-f` formats the open file, then saves it. With **Format on save** on, `ctrl-s` does the same. Wingman only runs a formatter the repo already has:
+
+| Files | Formatter |
+|---|---|
+| `.js .jsx .mjs .cjs .ts .tsx .mts .cts .json .jsonc .json5 .css .scss .less .html .htm .vue .md .markdown .mdx .yml .yaml .graphql .gql` | Prettier, when `node_modules/.bin/prettier` exists in the file's folder or any folder above it up to the repo root (the nearest one is used). A file that `.prettierignore` excludes, or that Prettier has no parser for, is left alone. |
+| `.cs .csx` | `dotnet csharpier`, only when a `.csharpierrc*` file or a `.config/dotnet-tools.json` listing `csharpier` is at or above the file's folder up to the repo root. `dotnet format` is never run. |
+
+Anything else is saved as it is. Add a formatter to the `FORMATTERS` table in `format.js`.
+
+How it runs:
+
+- The buffer is written to a temp file beside the file, named `.wingman-fmt-<random>.<ext>` (same extension, so the tool picks the same language and finds the same config and ignore files for that folder). The tool formats that file, Wingman reads it back and deletes it, also when the tool fails or times out. A mod's calls have no stdin, which is why a file is used. Per-file config (a Prettier `overrides` entry that matches the real file name, such as `*.test.ts`) does not see the temp name.
+- It runs where the repo's tools run: this computer, WSL for a repo WSL owns, or the space's machine. The command is an argument list, never a shell line built from file names. The whole run for one file has 10 seconds.
+- The result is applied to the buffer as one undo step, with the cursor kept on the same line where possible, and then saved. Line endings stay as the file had them. In Review, formatting is treated like your own save: lines outside the agent's changes change the baseline too, so formatting never shows as an agent change, and lines inside its added lines stay part of its pending change.
+- If the formatter is missing, rejects the file (a syntax error) or times out, the buffer is saved as it is and a one-line notice says why. Your text is never lost and the save is never blocked. If you type while the formatter runs, its result is dropped and your buffer is saved as it is.
+- The tool is found once per folder and remembered for the space while Wingman runs.
+
 ## Settings
 
 The header's **⚙ Settings** opens:
@@ -338,6 +358,7 @@ The header's **⚙ Settings** opens:
 - **Inline edit command**: the command `ctrl-k` runs (see Inline edit), with **Default** to put the default back.
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
+- **Format on save**: `ctrl-s` (and the Save button) format the file with the repo's formatter first, then save. Off by default. Autosave never formats, because it saves while you are elsewhere and formatting moves text. See Format on save.
 - **Autosave**: save when Wingman loses focus (another pane, or another window), and when you switch files or spaces. On by default. Herdr has no blur event for mods, so focus is checked 4 times a second.
 - **Also save after typing stops for**: Focus change (no timer, save on focus change only), 1, 2, 3, 5 or 10 seconds. Focus change by default.
 - **Claude hook on <machine>** (a space on another machine only): its status, and Install and Remove (see Install).
@@ -351,6 +372,7 @@ Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 | `<git-dir>/wingman/` | `index.json`, `baselines/`, `capture.json`, `sums.json` (what each reviewed file had while it differed from `HEAD`), `checkpoints.json` (see Checkpoints), `snap.<pid>.index` while a snapshot runs (per repo) |
 | the repo's refs | `refs/wingman/checkpoints/<id>`, one tree per checkpoint (see Checkpoints) |
 | `~/.config/herdr-app/data/wingman/` | `events/` (from the hook and from Inline edit, removed once read: edits, and prompts of at most 64 KB for checkpoint titles), `inline-*.txt` (an inline edit's prompt, only with `{promptFile}`, removed after the run), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
+| the formatted file's folder | `.wingman-fmt-<random>.<ext>` while a format runs (see Format on save), removed when it ends |
 | the space's folder | `<folder>.code-workspace`, when you add a second repo and the folder isn't inside a repo |
 | `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which copy runs capture (see The capture controller), and its log |
 | another machine's `~/.config/herdr-app/data/wingman/` | with the Claude hook installed there: `wingman-hook.sh`, `wingman-install.json`, `events/` (removed once read), `feedback/` |
