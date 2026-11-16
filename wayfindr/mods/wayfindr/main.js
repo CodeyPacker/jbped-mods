@@ -1376,7 +1376,7 @@ export default class Wayfindr extends View {
     const layer = this.layerNow();
     return h_flex().id("wf-legend").w_full().flex_none().px(12).py(8).border_t(1).border_color(t.border).bg(t.chrome)
       .child(note ? div().text_size(12).text_color(t.muted).child(note)
-        : legend(t, this.typing ? [["enter", "back"], ["esc", "back"]] : coreHints(layer, this.keyFacts(layer))));
+        : legend(t, this.typing ? [["ctrl-enter", "save"], ["esc", "back"]] : coreHints(layer, this.keyFacts(layer))));
   }
 
   // Whether the Account's Provider can post reviews or replies (#27).
