@@ -475,7 +475,7 @@ export class GitActions {
     if (yes) this.put(space, g, cx); else { g.status = "done"; g.note = "Kept your message"; this.host.paint(cx); }
   }
 
-  // ---- drawing (inside renderChanges' 320 px column) ------------------------------------
+  // ---- drawing (inside renderChanges' column, 320 px or narrower: columns.js) ------------
 
   /** Every repo's sync rows, at the top of the Changes column. */
   syncRows(t, multi) {
@@ -493,7 +493,7 @@ export class GitActions {
       { id: "pull", labels: [i?.behind ? `Pull ↓${i.behind}` : "Pull", "Pull"], drop: Infinity },
       push === "push" ? { id: "push", labels: [i?.ahead ? `Push ↑${i.ahead}` : "Push", "Push"], drop: Infinity } : { id: "publish", labels: ["Publish branch", "Publish"], drop: Infinity },
     ].map((x) => ({ ...x, size: 11, pad: 20 }));
-    const fit = fitBar(304, items, busy ? 90 : 0, 6);
+    const fit = fitBar((h.chgLeftW || 320) - 16, items, busy ? 90 : 0, 6); // the column's width now (columns.js), less its padding
     const can = { fetch: !!fetchRemote(i), pull: !cantSync(i, "pull"), push: !cantSync(i, "push"), publish: !cantPublish(i) };
     const hot = (k) => (k === "push" && i?.ahead > 0 && can.push) || (k === "pull" && i?.behind > 0 && can.pull) || (k === "publish" && can.publish);
     const btn = (k) => h.button(`sync-${k}-${id}`, fit.get(k), hot(k) ? t.accent + "88" : t.raised, (cx) => this.sync(k, st, cx))

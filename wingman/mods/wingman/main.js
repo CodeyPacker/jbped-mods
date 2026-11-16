@@ -66,6 +66,7 @@ import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmTex
 import { isClaude } from "./sessionlog.js";
 import { GitActions, GIT_COMMANDS } from "./gitview.js"; // G6 in Changes: sync, branches, Discard change, Generate message
 import { noteAfterUndo } from "./hunkdiscard.js";
+import { layoutOf, WANT } from "./columns.js"; // the left column of Changes and Edit at any width
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
 const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
@@ -991,6 +992,7 @@ export default class Review extends View {
 
   async openFile(store, rel, cx, at = null) {
     [store, rel] = this.own(store, rel); // one identity per file, however it was reached (P1)
+    this.narrowLeft = false; // a narrow Edit view (columns.js) shows the file, not the column
     const key = `${store.root}|${rel}`, space = this.spaceId, rk = `${idOf(store)}|${rel}`;
     this.recent = [rk, ...this.recent.filter((k) => k !== rk)].slice(0, 30);
     // Neovim's Edit view is the tree alone: the file goes straight to Neovim, at its first change.
@@ -1968,10 +1970,10 @@ export default class Review extends View {
     }
     const f = r.f;
     if (what === "check") { if (this.unchecked.has(f.key)) this.unchecked.delete(f.key); else this.unchecked.add(f.key); this.paint(cx); return; }
-    if (!f.error) this.pick(f.key, cx); else { this.error = `${f.rel}: ${f.error}`; this.paint(cx); }
+    if (!f.error) { this.pick(f.key, cx); this.chgSide = "content"; } else { this.error = `${f.rel}: ${f.error}`; this.paint(cx); } // narrow (columns.js): the diff in the list's place
   }
 
-  renderChanges(t) {
+  renderChanges(t, cols) {
     const review = shared(REVIEW), st = this.commitStore(), multi = this.repos().length > 1;
     const checked = st ? this.checkedIn(st) : [], open = checked.filter((f) => (review?.[f.key] ?? 0) > 0).length;
     const box = (on) => div().w(14).h(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.border).bg(on ? t.accent : t.background)
@@ -2003,7 +2005,8 @@ export default class Review extends View {
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     if (!this.crumbBuilt) { this.crumbBuilt = true; crumb(`renderChanges: built ${rows.length} rows, building tree`, "changes"); }
     const gx = this.gitx, branches = !!gx?.branchOpen();
-    return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
+    this.chgLeftW = cols.leftW; // gitview fits the sync buttons to it
+    return v_flex().h_full().when(cols.single, (e) => e.flex_1().min_w(0)).when(!cols.single, (e) => e.w(cols.leftW).flex_none().border_r(1).border_color(t.border))
       .children(gx ? gx.syncRows(t, multi) : []) // G6: branch, upstream, ↑/↓, Fetch, Pull, Push per repo
       .when(branches, (e) => e.child(gx.branchPanel(t)))
       .when(!branches, (e) => e.child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
@@ -2036,6 +2039,12 @@ export default class Review extends View {
   /** ctrl-b: shows or hides the tree, switching to the Edit view first if needed. */
   toggleTree(cx) {
     if (this.mode !== "edit") { this.treeOn = true; return this.setMode("edit", cx); }
+    // Too narrow for both (columns.js): the column shows in the editor's place, and ctrl-b swaps them.
+    if (this.editCols(true).single) {
+      if (!this.treeOn) { this.treeOn = true; this.narrowLeft = true; } else this.narrowLeft = !this.narrowLeft;
+      if (this.narrowLeft) this.refreshTrees(cx);
+      return this.paint(cx);
+    }
     this.treeOn = !this.treeOn;
     if (this.treeOn) this.refreshTrees(cx);
     this.paint(cx);
@@ -4364,14 +4373,23 @@ export default class Review extends View {
   }
 
   /** The Edit tab's left column: the Explorer / Search / Agent files switch over the tree, the Search view or the agent's files. */
-  renderLeft(t, full = false) {
-    const on = this.search.left === "search" || this.search.left === "problems"; // the wider column
-    this.leftW = full ? this.px(this.paneW) : on ? 300 : 260; // problemsview fits its buttons to it
+  /** The Changes view's sides for the pane's width now (columns.js). */
+  changesCols() { return layoutOf(this.paneW == null ? 0 : this.px(this.paneW), WANT.changes, this.chgSide === "content" ? "content" : "left"); }
+
+  /** The Edit view's sides with the tree on (columns.js); `any`: whether one side shows at a time, whatever is picked. */
+  editCols(any = false) {
+    const wide = this.search.left === "search" || this.search.left === "problems"; // the wider column
+    return layoutOf(this.paneW == null ? 0 : this.px(this.paneW), wide ? WANT.editWide : WANT.edit, any || this.narrowLeft ? "left" : "content");
+  }
+
+  renderLeft(t, full = false, cols = null) {
+    const single = !full && !!cols?.single;
+    this.leftW = full ? this.px(this.paneW) : cols?.leftW ?? WANT.edit; // problemsview fits its buttons to it
     const tab = (id, label, here) => div().id(`left-${id}`).h(22).px(8).flex().items_center().rounded(4).text_size(11.5).cursor_pointer()
       .text_color(here ? t.foreground : t.muted).when(here, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
       .on_click((_e, cx) => this.setLeft(id, cx)).child(label);
     return v_flex().id("left-column").h_full().min_h(0)
-      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(this.leftW).flex_none().border_r(1).border_color(t.border))
+      .when(full || single, (e) => e.flex_1().min_w(0)).when(!full && !single, (e) => e.w(this.leftW).flex_none().border_r(1).border_color(t.border))
       .child(h_flex().h(30).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
         .children(this.leftTabs(this.leftW).map(([id, label]) => tab(id, label, this.search.left === id))))
       .child(this.search.left === "search" ? this.renderSearch(t) : this.search.left === "problems" ? this.problems.render(t) : this.search.left === "agent" ? this.agentFiles.render(t) : this.renderTree(t, full));
@@ -5573,6 +5591,8 @@ export default class Review extends View {
    */
   fileBar(f, vis) {
     const items = [], add = (id, labels, drop, size = 11, pad = 20, group) => items.push({ id, labels, drop, size, pad, group });
+    // Too narrow for the column beside it (columns.js): back to the list or the tree.
+    if (this.mode === "changes" ? !!this.cols?.single : this.mode === "edit" && !this.treeOnly() && this.editCols(true).single) add("back", ["‹ Files", "‹"], Infinity);
     if (vis.length > 1 && this.mode !== "changes") {
       const pos = `${vis.findIndex((x) => x.key === this.sel) + 1}/${vis.length}`;
       add("pos", [`${pos} · ${this.kl("prevFile")}/${this.kl("nextFile")}`, pos], 2, 10, 12);
@@ -5729,6 +5749,9 @@ export default class Review extends View {
     const strip = this.pb && this.mode === "edit" && this.cur ? this.problems.strip(f, this.cur.line) : null;
     const stripStale = !!(strip && strip.stale), stripErr = !!(strip && strip.severity === "error");
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
+    // The left column and the diff or editor beside it, or one at a time when narrow (columns.js).
+    const cols = this.mode === "changes" ? this.changesCols() : this.mode === "edit" && this.treeOn && !this.treeOnly() ? this.editCols() : { left: false, content: true, leftW: 0, single: false };
+    this.cols = cols;
     const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
     // An inline edit of this space; its target lines show selected while the box is open (ij.t, current lines).
     const ij = this.inlines?.get(this.spaceId) ?? null, it = ij && f && ij.key === f.key && ij.status !== "applying" ? ij.t : null;
@@ -5766,13 +5789,15 @@ export default class Review extends View {
       .when(this.mode === "review", (e) => e.children(this.agentFiles.reviewLine(t))) // edits only the session log saw
       .child(h_flex().flex_1().min_h(0)
       .when(this.treeOnly(), (e) => e.child(this.renderLeft(t, true)))
-      .when(this.mode === "edit" && this.treeOn && !this.treeOnly(), (e) => e.child(this.renderLeft(t)))
-      .when(this.mode === "changes", (e) => e.child(this.renderChanges(t)))
-      .when(!this.treeOnly(), (e) => e.child(v_flex().flex_1().min_w(0).h_full()
+      .when(this.mode === "edit" && this.treeOn && !this.treeOnly() && cols.left, (e) => e.child(this.renderLeft(t, false, cols)))
+      .when(this.mode === "changes" && cols.left, (e) => e.child(this.renderChanges(t, cols)))
+      .when(!this.treeOnly() && cols.content, (e) => e.child(v_flex().flex_1().min_w(0).h_full()
       // File tabs scroll sideways in their own area; the hint and file buttons stay pinned right,
       // fitted to the bar's width (fileBar: keys go first, then long labels, then whole buttons).
       .child(h_flex().id("file-bar").h(36).flex_none().px(8).gap(4).items_center().border_b(1).border_color(t.border)
         .on_size_change((size, cx) => { if (Math.abs((this.barW ?? 0) - size.width) > 0.5) { this.barW = size.width; this.paint(cx); } })
+        // One side at a time (columns.js): back to the list (Changes) or the tree (Edit).
+        .when(fb.has("back"), (e) => e.child(this.button("cols-back", fb.get("back"), t.raised, (cx) => { if (this.mode === "changes") this.chgSide = "left"; else { this.treeOn = true; this.narrowLeft = true; this.refreshTrees(cx); } this.paint(cx); }).flex_none().whitespace_nowrap()))
         .child(div().id("file-tabs").flex_1().min_w(0).h_full().relative().overflow_hidden()
           .on_size_change((size, cx) => { this.tabViewW = size.width; this.setTabOffset(this.tabOffset ?? 0); if (this.sel) this.showTab(this.sel); this.paint(cx); })
           .on_scroll_wheel((ev, cx) => this.tabWheel(ev, cx))
