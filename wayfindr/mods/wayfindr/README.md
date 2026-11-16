@@ -27,10 +27,16 @@ Every `minutes` (default 5), Wayfindr refreshes the Profile's Pull Requests and 
 
 ## Pull Request detail
 
-Click a Pull Request row to open it as an overlay over the list, against the right edge, 60% of Wayfindr's width to start. Drag its left edge to resize it, between 30% and 95%; the width is remembered. It shows what the Ticket panel shows: author, branch into target, reviewers and their state, dates, "Open in browser", the description, the changed files with their diffs, and the comments (file comments show their path and line). Files fold and unfold by their header, start unfolded when there are five or fewer, and show 300 lines before "Show more". Diffs use the terminal font. While it is open the list is dimmed and inert: click the dimmed list, or press Esc, to close it. The Review button is in the row and in the overlay's header.
+Click a Pull Request row to open it as an overlay over the list, against the right edge, 60% of Wayfindr's width to start. Drag its left edge to resize it, between 30% and 95%; the width is remembered. It shows what the Ticket panel shows: author, branch into target, reviewers and their state, dates, "Open in browser", the description, the changed files with their diffs, and the comments (file comments show their path and line). Files fold and unfold by their header and start unfolded when there are five or fewer. Each diff shows as numbered rows in the terminal font: hunk headers, then each line with its line number (the new file's, the old file's for a removed line), a +/− mark and a green or red tint for added and removed lines. Long lines scroll sideways. A file shows 500 rows before "Show N more lines". While it is open the list is dimmed and inert: click the dimmed list, or press Esc, to close it. The Review button is in the row and in the overlay's header.
+
+Files and diffs come from the PR's local clone when Wayfindr knows one: the Profile Repo for the PR's repo, else the one clone of it the clone search found. Wayfindr fetches the PR branch and the target there, and diffs the branch against their merge base; nothing is checked out. The summary line under Files then ends with "diffs from <clone>". A rename shows as a delete and an add. Without a clone, or when git fails (the dim line under the summary says why), the Provider's API gives them:
 
 - GitHub: one GraphQL request for the fields and comments, and the REST files endpoint for each file's patch (up to 300 files, 100 issue comments, 50 review threads).
 - Azure: the PR, its threads, the last iteration's changes, and both sides of each file (the merge base and the source commit), diffed by Wayfindr. Up to 50 files are diffed and 100 threads shown; a file over 3000 lines shows no diff.
+
+### Limits
+
+- A clone diff leaves the ref `refs/wayfindr/pr-<number>` in the clone, updated on each open. Remove it with `git update-ref -d refs/wayfindr/pr-<number>` in the clone.
 
 ## Move
 
