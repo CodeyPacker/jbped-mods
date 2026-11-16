@@ -1,7 +1,7 @@
 // D2/D3: a bar of buttons degrades in order as its width shrinks: key hints, then long labels,
 // then whole buttons by their drop order. A label is never cut: it's a shorter one or none.
 import assert from "node:assert";
-import { fitBar, fitHeader, hunkButtons, textW, withKey, LAST_DROP, settingsTabs, settingsHeight, SETTINGS_H } from "../mods/wingman/barfit.js";
+import { fitFindRow, findRowItems, replaceRowItems, fitBar, fitHeader, hunkButtons, textW, withKey, LAST_DROP, settingsTabs, settingsHeight, SETTINGS_H } from "../mods/wingman/barfit.js";
 
 const items = [
   { id: "pos", labels: ["1/3 · ctrl-shift-↑/ctrl-shift-↓", "1/3"], drop: 2, size: 10, pad: 12 },
@@ -96,4 +96,33 @@ assert.equal(settingsHeight(400), 440);
 assert.equal(settingsHeight(100), 360);
 assert.deepEqual(settingsTabs(false).map((x) => x.id), ["general", "editing", "inline", "problems"]);
 assert.deepEqual(settingsTabs(true).map((x) => x.id), ["general", "editing", "inline", "problems", "machine"]);
+// The find bar: nothing runs past the edge from 1000 px down to 300 px; the count and the option
+// toggles go before the arrows and close; the box shrinks from 240 to 100.
+{
+  const used = (r, items) => 16 + r.inputW + 12 + items.reduce((n, it) => (r.labels.has(it.id) ? n + textW(r.labels.get(it.id), it.size ?? 11) + (it.pad ?? 20) + 6 : n), 0);
+  const mk = () => findRowItems(["12 of 120", "12/120"], ["Replace  ctrl-h", "Replace", "⇄"]);
+  const rk = () => replaceRowItems(["All  ctrl-alt-enter", "All"], "$1, $2… insert groups");
+  assert.equal(fitFindRow(0, mk()).inputW, 240);
+  assert.equal(fitFindRow(1000, mk()).labels.get("find-mode"), "Replace  ctrl-h");
+  assert.equal(fitFindRow(1000, mk()).inputW, 240);
+  let seen = new Set();
+  for (let w = 1000; w >= 300; w -= 5) {
+    for (const mkItems of [mk, rk]) {
+      const items = mkItems(), r = fitFindRow(w, items);
+      assert.ok(used(r, items) <= w, `fits at ${w}`);
+      assert.ok(r.inputW >= 100 && r.inputW <= 240);
+      for (const id of ["find-prev", "find-next", "find-close", "replace-one", "replace-all"]) if (items.some((x) => x.id === id)) assert.ok(r.labels.has(id), `${id} stays at ${w}`);
+      if (mkItems === mk) {
+        // Order of going: count, regex, word, case, Replace; the arrows and close stay.
+        const order = ["count", "find-regex", "find-word", "find-cased", "find-mode"];
+        for (let k = 1; k < order.length; k++) if (r.labels.has(order[k - 1])) assert.ok(r.labels.has(order[k]), `${order[k - 1]} outlived ${order[k]} at ${w}`);
+        seen.add(order.filter((id) => r.labels.has(id)).length);
+      }
+    }
+  }
+  assert.ok(seen.has(5) && seen.has(2), "the full row at the wide end, and items gone by 300 px");
+  // 440 px (the reported width) fits with the arrows, close and the Replace toggle in view.
+  const r440 = fitFindRow(440, mk());
+  for (const id of ["find-prev", "find-next", "find-close"]) assert.ok(r440.labels.has(id));
+}
 console.log("barfit ok");

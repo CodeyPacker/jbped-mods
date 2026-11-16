@@ -74,6 +74,49 @@ export const SETTINGS_H = 620;
  */
 export const settingsHeight = (paneH) => (paneH > 0 ? Math.max(360, Math.min(SETTINGS_H, Math.round(paneH + 40))) : SETTINGS_H);
 
+// FIND_PAD: the bar's 16 px of padding plus 10 px for glyphs wider than textW thinks (seen on screen).
+const FIND_PAD = 26, FIND_GAP = 6, FIND_INPUT_MIN = 100, FIND_INPUT_MAX = 240;
+
+/**
+ * One row of the find bar (a text box then buttons, a spacer, and more buttons) in a bar `width`
+ * wide: which items show with which label (fitBar), and the box's width: 240 when there's room,
+ * down to 100. `items` as fitBar's. An unknown width (0) shows everything in full.
+ */
+export function fitFindRow(width, items) {
+  const labels = fitBar(width, items, FIND_PAD + FIND_INPUT_MIN + 2 * FIND_GAP, FIND_GAP);
+  if (!(width > 0)) return { labels, inputW: FIND_INPUT_MAX };
+  const used = items.reduce((n, it) => (labels.has(it.id) ? n + textW(labels.get(it.id), it.size ?? 11) + (it.pad ?? 20) + FIND_GAP : n), 0);
+  const room = width - FIND_PAD - used - 2 * FIND_GAP;
+  return { labels, inputW: Math.max(FIND_INPUT_MIN, Math.min(FIND_INPUT_MAX, Math.floor(room))) };
+}
+
+/**
+ * The find row's items: the match count (`counts`: [full, short]), the option toggles, the
+ * previous and next arrows, the Replace toggle (`replaceLabels`) and the close button. They go in
+ * this order as the bar narrows: count, toggles (regex first), Replace toggle. The arrows and close stay.
+ */
+export function findRowItems(counts, replaceLabels) {
+  return [
+    { id: "count", labels: counts, drop: 1, pad: Math.max(0, 70 - textW(counts[0])) },
+    { id: "find-regex", labels: [".*"], drop: 2, pad: 16 },
+    { id: "find-word", labels: ["W"], drop: 3, pad: 16 },
+    { id: "find-cased", labels: ["Aa"], drop: 4, pad: 16 },
+    { id: "find-mode", labels: replaceLabels, drop: 5, pad: 26 },
+    { id: "find-prev", labels: ["↑"], drop: Infinity, pad: 26 },
+    { id: "find-next", labels: ["↓"], drop: Infinity, pad: 26 },
+    { id: "find-close", labels: ["×"], drop: Infinity, pad: 26 },
+  ];
+}
+
+/** The replace row's items: the group hint goes first, then Replace and All shorten. */
+export function replaceRowItems(allLabels, hint) {
+  return [
+    ...(hint ? [{ id: "hint", labels: [hint], drop: 1, pad: 0 }] : []),
+    { id: "replace-one", labels: ["Replace"], drop: Infinity },
+    { id: "replace-all", labels: allLabels, drop: Infinity },
+  ];
+}
+
 /** "label  key" when there's a key, else the label. */
 export const withKey = (label, key) => (key ? `${label}  ${key}` : label);
 

@@ -104,6 +104,18 @@ export function discardWhat(f, i, pick = null) {
   return `change ${i + 1} of ${f.hunks.length} (${at})`;
 }
 
+/**
+ * Discard file on a file under review: the file is back as HEAD has it (or gone, when the agent
+ * created it), and that is the user's own edit, not the agent's work. `rf` is the review's file
+ * read again after the discard (store.load). Returns the baseline write that makes Review show
+ * nothing for it, or null when the file already equals its baseline.
+ */
+export function fileDiscardWrite(rf) {
+  const now = rf.Ctext ?? "";
+  if (rf.error || (rf.Btext ?? "") === now) return null;
+  return { target: "baseline", before: rf.Btext ?? "", after: now };
+}
+
 /** The note under the commit box once a discard is undone: its own "Discarded …" note goes; any other note stays. */
 export const noteAfterUndo = (note, discardNote) => (discardNote && note === discardNote ? null : note ?? null);
 
