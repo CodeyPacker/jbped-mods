@@ -14,7 +14,7 @@ import * as fs from "fs/promises";
 import { MAX_BATCH, MAX_TEXT as MAX_COMMENT, makeComment, checkText, addComment, editComment, deleteComment, clearComments, undoClear, relocateFile, spansOn, snippetOf, loadComments, updateComments } from "./comments.js";
 import { buildPrompt, chooseTarget, isWslArgv, promptProblem } from "./commentprompt.js";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
-import { Store, PlainRoot, norm, shows, MAX_TEXT } from "./store.js";
+import { Store, PlainRoot, norm, shows, swap, MAX_TEXT } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { hostPath } from "./capture.js";
@@ -23,14 +23,15 @@ import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
 import { viewShown } from "./panelview.js";
-import { listDir, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs } from "./fsx.js";
+import { listDir, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs, execOn } from "./fsx.js";
 import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
 import { openInNvim, openInEditor, EDITORS, editorName } from "./nvim.js";
 import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
-import { git, onWindows } from "./git.js";
+import { git, onWindows, ownerOf as gitOwner, toWsl, distroOf } from "./git.js";
+import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, plan as runPlan, exeFrom, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -44,7 +45,7 @@ import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces
 import { matchBracket, tokenSkip } from "./brackets.js";
 import { spans as spansOf } from "./spans.js";
 import { sync as syncPanels } from "./panels.js";
-import { addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
+import { addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, postEdit, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
 import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup.js";
 import { capSteps } from "./undocap.js";
 import { FILE_H, REPO_H, listRows, rowSizes, clickTarget, shownCommitted, neighbours, toUnload, sizeError, binaryError, CHANGES_CHARS } from "./changelist.js";
@@ -207,7 +208,7 @@ export default class Review extends View {
     if (props()?.role === CONTROLLER) return this.initController(cx);
     this.id = Math.random().toString(36).slice(2);
     this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
-    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, hideHerdrPanels: false };
+    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: INLINE_COMMAND, wordWrap: false, hideHerdrPanels: false };
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
@@ -227,6 +228,13 @@ export default class Review extends View {
         const c = String(await nextCommand()).replace(/^wingman\./, "");
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
+        else if (c === "inlineEdit" || c.startsWith("inlineEdit:")) {
+          // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
+          // "wingman.inlineEdit:<instruction>"`, which also runs it): every copy gets it, so the Edit
+          // panel's copy acts, or a pane copy when the layout has no Edit panel. ctrl-k itself goes
+          // to the copy that has the keyboard (key, runAction).
+          if (this.view === "edit" || (!this.view && !hasView("edit"))) this.openInline(cx, c.startsWith("inlineEdit:") ? c.slice("inlineEdit:".length) : null);
+        }
         else {
           // The diff's right-click menu: [the action whose focus rule applies, what it does].
           const menu = {
@@ -285,6 +293,7 @@ export default class Review extends View {
     this.captureTimers(cx);
     cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(1000, (cx) => this.anchorComments(cx));
+    cx.timer.every(1000, (cx) => { if (this.inlines.get(this.spaceId)?.status === "running") this.paint(cx); }); // the inline edit box's seconds
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Session log source (agentview.js): reads only while this copy shows Agent files or Review.
     this.agentFiles = new AgentFiles(this); cx.timer.every(5000, (cx) => this.agentFiles.tick(cx));
@@ -487,7 +496,7 @@ export default class Review extends View {
   close() {
     this.loop?.close();
     this.dropSleeper?.();
-    this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); this.chgScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, ...(this.searchInputs ?? [])]) i?.release();
+    this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); this.chgScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, this.inlineInput, ...(this.searchInputs ?? [])]) i?.release();
     // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
     // whenever the runtime drops the instance (a task still waiting would keep it, and all of this).
     for (const m of [this.views, this.tokens, this.trees, this.ftrees, this.loop?.captures]) m?.clear();
@@ -1331,7 +1340,11 @@ export default class Review extends View {
         this.handle.focus();
         const i = g.key?.indexOf("|") ?? -1, store = i > 0 && this.stores.find((st) => st.root === g.key.slice(0, i));
         if (g.search && this.view === "edit") this.showSearch(g.search.query, cx);
-        else if (store && this.view === "edit") cx.spawn(async (cx) => this.openFile(store, g.key.slice(i + 1), cx, g.at));
+        else if (store && this.view === "edit") {
+          // An inline edit asked for in Review (ctrl-k there) opens here, on the same lines.
+          const inline = g.inline ?? null;
+          cx.spawn(async (cx) => { await this.openFile(store, g.key.slice(i + 1), cx, g.at); if (inline && this.file()?.key === g.key) this.openInline(cx, inline.instruction ?? null, inline.span); });
+        }
         else if (store && this.visible().some((f) => f.key === g.key)) {
           this.pick(g.key, cx);
           const f = this.file(), line = g.at?.line ?? 0;
@@ -2874,9 +2887,9 @@ export default class Review extends View {
     if (entry) this.swapEdit(entry, this.history, cx);
   }
 
-  enqueue(job, cx) {
+  enqueue(job, cx, space = this.spaceId) {
     this.writing++;
-    const space = this.spaceId; // the job's space, which may no longer be shown when it ends (P7)
+    // `space`: the job's space (default the shown one), which may no longer be shown when it ends (P7).
     // Each job runs in its own spawned task: a handler's cx is dead after the handler
     // returns, so the queue must never hold one across an await.
     const prev = this.queue;
@@ -2942,6 +2955,226 @@ export default class Review extends View {
     if (!f.hunks[i]) return;
     this.current = i;
     this.openForm({ form: "prompt", terminal, file, where: this.where(f.hunks[i]) });
+  }
+
+  // ---- inline edit (ctrl-k, inlineedit.js) --------------------------------------
+  // An instruction about the selected lines (else the cursor's line) goes to a one-shot local
+  // command (Settings › Inline edit command; default `claude -p` with no tools). Its answer replaces
+  // those lines as a pending review change, as an agent's edit would: the review baseline keeps the
+  // old lines, the buffer and the file get the new ones. A job belongs to the space and file it was
+  // asked for (inlines: space -> job) and lands there, whatever is shown when the answer comes.
+
+  /** Opens the inline edit box on the selection, else the cursor's line (`span`: [first, last] given). An `instruction` runs at once. */
+  openInline(cx, instruction = null, span = null) {
+    const fail = (msg) => { this.error = msg; this.paint(cx); };
+    if (this.mode === "changes") return fail("Inline edit works in Edit: select lines there");
+    const f = this.file();
+    if (!f) return fail("Open a file to edit inline");
+    span ??= this.commentSpan(f);
+    if (!span) return fail("Put the cursor on a line, or select lines, to edit inline");
+    // Review is read-only: the Edit panel takes over, at the same lines.
+    if (this.view === "review") return this.handOff("edit", cx, { line: span[0], col: 0 }, f.key, { inline: { span, instruction } });
+    if (!this.view && this.mode === "review") this.setMode("edit", cx);
+    if (f.conflict) return fail("Pick Keep mine or Take agent's first");
+    if (!this.editable(f)) return fail("This file can't be edited");
+    if (f.store?.plain) return fail("Inline edit needs a file in a git repo: its answer is a change to review");
+    const busy = this.inlines.get(this.spaceId);
+    if (busy && (busy.status === "running" || busy.status === "applying")) { this.inlineInput.focus(); this.paint(cx); return; }
+    const t = inlineTarget(f.Ctext, span[0], span[1]), why = targetProblem(t);
+    if (why) return fail(why);
+    this.error = null; this.bar = null;
+    this.inlines.set(this.spaceId, { space: this.spaceId, key: f.key, rel: f.rel, path: f.path, store: f.store, t, status: "prompt", note: null, seq: 0 });
+    if (instruction != null) this.inlineInput.set_value(cleanInstruction(instruction));
+    else if (busy?.key !== f.key) this.inlineInput.set_value("");
+    this.inlineInput.focus(); this.paint(cx);
+    if (instruction != null) this.submitInline(cx);
+  }
+
+  /** Esc or ×: closes the box. A running edit is cancelled: its answer is ignored when it comes. */
+  closeInline(cx) {
+    const j = this.inlines.get(this.spaceId);
+    if (j?.status === "applying") return; // its writes are queued: it closes itself when they're done
+    if (j) { j.seq = -1; this.inlines.delete(this.spaceId); }
+    if (this.inBar === this.inlineInput) this.inBar = null;
+    this.handle.focus(); this.paint(cx);
+  }
+
+  /** Enter: sends the instruction with the lines as the buffer has them now (unsaved edits included). */
+  submitInline(cx) {
+    const j = this.inlines.get(this.spaceId);
+    if (!j || j.status === "running" || j.status === "applying") return;
+    const instruction = cleanInstruction(this.inlineInput.value());
+    if (!instruction) { j.status = "prompt"; j.note = "Type what to change, then Enter"; this.paint(cx); return; }
+    const f = this.files.find((x) => x.key === j.key);
+    const t = f && typeof f.Ctext === "string" ? relocate(f.Ctext, j.t) : null;
+    if (!t) { j.status = "error"; j.note = "Those lines changed: select them again"; this.paint(cx); return; }
+    const prompt = inlinePrompt({ path: j.rel, language: languageOf(j.rel), text: f.Ctext, a: t.a, b: t.b, instruction });
+    if (prompt.length > INLINE_MAX_PROMPT) { j.status = "error"; j.note = `Too much to send (${prompt.length} characters, at most ${INLINE_MAX_PROMPT}): select fewer lines`; this.paint(cx); return; }
+    const seq = ++this.inlineSeq;
+    Object.assign(j, { t, instruction, status: "running", note: null, seq, started: Date.now() });
+    this.paint(cx);
+    cx.spawn(async (cx) => this.runInline(j, seq, prompt, cx));
+  }
+
+  /** The job's own state is still the one asked for (not cancelled, not replaced). */
+  inlineLive(j, seq) { return j.seq === seq && this.inlines.get(j.space) === j; }
+
+  inlineFailed(j, msg, cx) { j.status = "error"; j.note = msg; this.paint(cx); }
+
+  /**
+   * Where the command runs for a repo (git.js decides the same for git): another machine runs it
+   * there; Windows runs it through WSL for a repo WSL owns, or when no native .exe is on PATH.
+   */
+  async inlineWhere(store, name) {
+    const on = store.on ?? null, cwd = store.root;
+    if (on) return { how: "remote", on, cwd, timeout: INLINE_MS };
+    if (!onWindows()) return { how: "sh", cwd, timeout: INLINE_MS };
+    const owner = await gitOwner(cwd);
+    let nativeExe = null;
+    if (owner !== "wsl") {
+      if (/^[A-Za-z]:[\\/].*\.exe$/i.test(name)) nativeExe = name;
+      else { const w = await exec("where", [name]).catch(() => null); nativeExe = w?.code === 0 ? exeFrom(w.stdout) : null; }
+    }
+    return { how: owner !== "wsl" && nativeExe ? "native" : "wsl", windows: true, owner, nativeExe, cwd, wslCwd: toWsl(cwd), distro: distroOf(cwd), timeout: INLINE_MS };
+  }
+
+  /** Runs the command (a task of its own) and applies its answer, unless the job was cancelled meanwhile. */
+  async runInline(j, seq, prompt, cx) {
+    const template = String(this.settings.inlineCommand ?? "").trim() || INLINE_COMMAND;
+    const name = commandWords(template)[0] ?? "the command";
+    let tmp = null, r, started = Date.now();
+    try {
+      const where = await this.inlineWhere(j.store, name);
+      // {promptFile}: the prompt in a temp file under data/wingman, removed afterwards.
+      if (usesFile(template)) {
+        if (where.on) throw new Error("{promptFile} works only for files on this computer: use {prompt}");
+        const dir = `${appHome()}/data/wingman`;
+        await fs.mkdir(dir, { recursive: true }).catch(() => {});
+        tmp = `${dir}/inline-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}.txt`;
+        await writeTextFile(tmp, prompt, null);
+      }
+      const p = runPlan(expandCommand(template, { prompt, promptFile: tmp && (where.how === "wsl" ? toWsl(tmp) : tmp) }), where);
+      started = Date.now();
+      r = await (p.opts.on ? execOn(p.cmd, p.args, p.opts) : exec(p.cmd, p.args, p.opts));
+    } catch (e) { r = e instanceof Error ? e : new Error(String(e?.message ?? e)); }
+    finally { if (tmp) await fs.unlink(tmp).catch(() => {}); }
+    const elapsed = Date.now() - started, live = this.inlineLive(j, seq);
+    log(`inline edit ${j.rel} lines ${j.t.a + 1}-${j.t.b + 1}: ${r instanceof Error ? `error ${r.message}` : `exit ${r.code}, ${r.stdout.length} chars`} in ${elapsed} ms${live ? "" : " (cancelled)"}`);
+    if (!live) return;
+    const why = runFailure(r, { name, elapsed, timeout: INLINE_MS });
+    if (why) return this.inlineFailed(j, why, cx);
+    const answer = cleanAnswer(r.stdout);
+    if (!answer) return this.inlineFailed(j, `${name} gave no answer`, cx);
+    this.applyInline(j, answer, cx);
+  }
+
+  /**
+   * Puts the answer in place of the job's lines, in the job's own space (shown or kept): checked
+   * against the buffer as it is now, which must still hold those lines. A file under review: memory
+   * first, then the file (and the baseline, when unsaved edits changed it) through the write queue,
+   * like a save. A file not under review yet: the file is written, then an event like the Claude
+   * hook's puts it under review with the old text as its baseline (journal.postEdit).
+   */
+  applyInline(j, answer, cx) {
+    const space = j.space, s = this.stateOf(space), on = j.store.on ?? null;
+    if (!s) return this.inlineFailed(j, "The space is gone", cx);
+    const i = (s.files ?? []).findIndex((x) => x.key === j.key && !x.lazy), g = i >= 0 ? s.files[i] : null;
+    if (!g) return this.inlineOnDisk(j, answer, cx);
+    if (g.error || typeof g.Ctext !== "string") return this.inlineFailed(j, "The file can't be edited now", cx);
+    if (g.conflict) return this.inlineFailed(j, "Settle the merge first (Keep mine or Take agent's)", cx);
+    const t = relocate(g.Ctext, j.t);
+    if (!t) return this.inlineFailed(j, "Those lines changed while it ran: the answer was dropped", cx);
+    const next = replaceLines(g.Ctext, t.a, t.b, answer);
+    if (next === g.Ctext) return this.inlineFailed(j, "The answer is the same as the lines: nothing changed", cx);
+    const C = splitLines(next), lang = languageOf(g.rel);
+    const newTok = g.newTok ? [...g.newTok.slice(0, t.a), ...highlightLines(answer, lang), ...g.newTok.slice(t.b + 1)] : g.newTok;
+    let state, job;
+    if (!g.plain) {
+      // Under review: only the current text changes, so the new lines show as a pending change.
+      state = { ...g, Ctext: next, C, newTok, hunks: changedRanges(g.Btext, next), edited: true, diskC: next, diskB: g.Btext };
+      const writes = this.saveWrites({ ...g, Ctext: next });
+      const notes = writes.map((w) => this.editNote(g, w)).filter(Boolean);
+      job = async () => { for (const w of writes) await g.store.apply(state, w); await this.sendEditNotes(notes); };
+    } else {
+      // Not under review: memory and disk take the new text now; Review picks the file up once the
+      // leader has applied the event (the reload then shows the change against the old text).
+      state = { ...g, Ctext: next, Btext: next, C, B: C, newTok, oldTok: newTok, diskC: next, diskB: next, edited: true };
+      job = async () => { await swap(g.path, g.diskC, next, on); await postEdit({ path: g.path, original: g.Ctext, space, on }); };
+    }
+    s.files[i] = state;
+    j.status = "applying";
+    this.inlineWrite(j, job, !g.plain, cx);
+    if (this.spaceId === space && this.sel === j.key) {
+      this.cur = { line: t.a, col: 0 }; this.anchor = null; this.selA = this.selB = null;
+      const h = state.hunks.findIndex((x) => t.a >= x.n && t.a < x.n + Math.max(1, x.nc));
+      if (h >= 0) this.current = h;
+      this.settle(); this.showCursor(); this.retokenize(cx);
+    }
+    this.paint(cx);
+  }
+
+  /** The job's file isn't loaded in its space (closed, or its view let go): the answer goes to the file on disk. */
+  async inlineOnDisk(j, answer, cx) {
+    const on = j.store.on ?? null;
+    try {
+      j.status = "applying"; this.paint(cx);
+      const text = await readTextFile(j.path, { on });
+      if (text == null) return this.inlineFailed(j, "The file is gone", cx);
+      const t = relocate(text, j.t);
+      if (!t) return this.inlineFailed(j, "Those lines changed while it ran: the answer was dropped", cx);
+      const next = replaceLines(text, t.a, t.b, answer);
+      if (next === text) return this.inlineFailed(j, "The answer is the same as the lines: nothing changed", cx);
+      const reviewed = !!(await j.store.index())[j.rel];
+      this.inlineWrite(j, async () => { await swap(j.path, text, next, on); if (!reviewed) await postEdit({ path: j.path, original: text, space: j.space, on }); }, reviewed, cx);
+    } catch (e) { this.inlineFailed(j, String(e.message ?? e), cx); }
+  }
+
+  /**
+   * Queues the job's writes in its space. When they're done the box closes; for a file that wasn't
+   * under review, once the review index has it (the leader applies events every half second), and
+   * the space's view reloads to show the change.
+   */
+  inlineWrite(j, write, reviewed, cx) {
+    const space = j.space;
+    this.enqueue(async () => {
+      try { await write(); j.wrote = true; }
+      catch (e) { j.wrote = false; j.why = String(e.message ?? e); throw e; }
+    }, cx, space);
+    cx.spawn(async (cx) => {
+      for (let n = 0; j.wrote === undefined && n < 600; n++) await cx.sleep(100);
+      if (j.wrote === false) return this.inlineFailed(j, `Not written: ${j.why}`, cx);
+      if (!reviewed) {
+        let found = false;
+        for (let n = 0; !found && n < 60; n++) { await cx.sleep(250); found = !!(await j.store.index().catch(() => ({})))[j.rel]; }
+        const s = this.stateOf(space);
+        if (s) (s.deferred ??= new Set()).add("*");
+        if (this.spaceId === space && !this.writing) cx.spawn(async (cx) => this.drain(cx));
+        if (!found) return this.inlineFailed(j, "Written, but Review didn't pick the file up: is a Wingman copy capturing?", cx);
+      }
+      if (this.inlines.get(space) === j) this.inlines.delete(space);
+      if (this.spaceId === space && this.inBar === this.inlineInput) { this.inBar = null; this.handle.focus(); }
+      log(`inline edit ${j.rel}: applied as a pending change`);
+      this.paint(cx);
+    });
+  }
+
+  /** The inline edit box over the editor: the lines it's for, the instruction, and its state. */
+  inlineBar(j, t) {
+    const f = this.files.find((x) => x.key === j.key), here = this.sel === j.key;
+    const span = j.t.a === j.t.b ? `line ${j.t.a + 1}` : `lines ${j.t.a + 1}-${j.t.b + 1}`;
+    const where = here ? span : `${base(j.rel)}, ${span}`;
+    const running = j.status === "running", applying = j.status === "applying";
+    const secs = running ? Math.max(0, Math.floor((Date.now() - (j.started ?? Date.now())) / 1000)) : 0;
+    const state = running ? `Editing… ${secs} s` : applying ? "Applying…" : j.note ?? "";
+    const bad = j.status === "error";
+    return v_flex().id("inline-bar").flex_none().px(8).py(5).gap(4).border_b(1).border_color(t.border).bg(t.accent + "14").text_size(12)
+      .child(h_flex().gap(6).items_center()
+        .child(div().flex_none().whitespace_nowrap().text_color(t.muted).child(`Inline edit · ${where}`))
+        .child(div().flex_1().min_w(0).when(running || applying, (e) => e.opacity(0.6)).child(Input.new(this.inlineInput)))
+        .when(!running && !applying, (e) => e.child(this.button("inline-run", "Edit  ⏎", t.accent + "55", (cx) => this.submitInline(cx)).flex_none().whitespace_nowrap()))
+        .when(running, (e) => e.child(this.button("inline-cancel", "Cancel  Esc", t.ansi1 + "40", (cx) => this.closeInline(cx)).flex_none().whitespace_nowrap()))
+        .when(!running && !applying, (e) => e.child(this.button("inline-close", "×", t.raised, (cx) => this.closeInline(cx)).flex_none())))
+      .when(!!state || !f, (e) => e.child(div().text_size(11).truncate().text_color(bad ? t.ansi1 : t.muted).child(state || `${j.rel} isn't open`)));
   }
 
   // ---- review comments (comments.js, commentprompt.js) ------------------------
@@ -3183,7 +3416,7 @@ export default class Review extends View {
   openSettings() {
     // A space on another machine adds the "Claude hook on <machine>" section.
     const machine = this.machine();
-    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 870 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 990 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -3545,10 +3778,15 @@ export default class Review extends View {
     this.pathInput = InputState.new({ placeholder: "A folder on that machine, e.g. /home/me/repo" });
     this.pathInput.on("submit", (_e, cx) => this.addPath(cx));
     this.qo = null; this.recent = []; // Quick Open: null, or { sel, items }; recent: file keys, newest first
+    // Inline edit (ctrl-k): the instruction box; Enter runs it. Its jobs are kept per space (inlines).
+    this.inlineInput = InputState.new({ placeholder: "Describe the change, e.g. use async/await" });
+    this.inlineInput.on("submit", (_e, cx) => this.submitInline(cx));
+    this.inlineInput.on("change", (_e, cx) => { const j = this.inlines.get(this.spaceId); if (j?.note && j.status !== "running") { j.note = null; this.paint(cx); } });
+    this.inlines = new Map(); this.inlineSeq = 0;
     this.initSearch();
     this.quickInput.on("change", (_e, cx) => { this.rankQuick(); this.paint(cx); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
-    for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput]) {
+    for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.inlineInput]) {
       i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
     }
@@ -4162,7 +4400,7 @@ export default class Review extends View {
   /** What has the keyboard, for allowedIn (keymap.js): a box (by kind), Search's results, the tree, else the editor. */
   focusKind() {
     const b = this.inBar;
-    if (b) return b === this.quickInput ? "quick" : b === this.commitInput ? "commit" : b === this.pathInput ? "path"
+    if (b) return b === this.quickInput ? "quick" : b === this.commitInput ? "commit" : b === this.pathInput ? "path" : b === this.inlineInput ? "inline"
       : b === this.treeInput ? "treeName" : this.searchInputs?.includes(b) ? "search" : "find";
     return this.searchFocus ? "results" : this.treeFocus ? "tree" : "editor";
   }
@@ -4199,7 +4437,7 @@ export default class Review extends View {
       quickOpen: () => this.openQuick(cx), toggleView: () => this.setMode(this.nextView(), cx),
       toggleTree: () => this.toggleTree(cx), openInVSCode: () => this.toVSCode(cx), toggleWrap: () => this.toggleWrap(cx),
       openInNvim: () => { if (f) this.toNvim(f, this.cur?.line ?? f.hunks[this.current]?.n ?? 0, cx); },
-      save: () => this.save(cx), undo: () => this.undo(cx), redo: () => this.redoEdit(cx),
+      save: () => this.save(cx), undo: () => this.undo(cx), redo: () => this.redoEdit(cx), inlineEdit: () => this.openInline(cx),
       selectAll: () => this.clip("all", cx), copy: () => this.clip("copy", cx), cut: () => this.clip("cut", cx), paste: () => this.clip("paste", cx),
       moveLineUp: () => this.lineOp("moveUp", cx), moveLineDown: () => this.lineOp("moveDown", cx),
       copyLineUp: () => this.lineOp("copyUp", cx), copyLineDown: () => this.lineOp("copyDown", cx),
@@ -4242,6 +4480,8 @@ export default class Review extends View {
     }
     if (this.commitInput && this.inBar === this.commitInput) return; // the commit message box types its own keys
     if (this.inBar === this.pathInput) { if (k === "escape") { this.ws = null; this.inBar = null; this.handle.focus(); this.paint(cx); done(); } return; }
+    // The inline edit box: Esc closes it (and cancels a running edit); Enter (submit) runs it.
+    if (this.inlineInput && this.inBar === this.inlineInput) { if (k === "escape") { this.closeInline(cx); done(); } return; }
     // The tree's name box: Esc cancels; Enter (submit) does it; every other key types.
     if (this.treeInput && this.inBar === this.treeInput) { if (k === "escape") { this.endTreeEdit(cx); done(); } return; }
     // A Search box has the keyboard (searchKey); then the results, after Down or a click (resultsKey).
@@ -4293,7 +4533,13 @@ export default class Review extends View {
         const v = this.extInput.value(); this.extTyped = v;
         cx.timer.after(500, (cx) => { if (this.extTyped === v && v !== (this.st?.externalCommand ?? "")) this.setSetting({ externalCommand: v }, cx); });
       });
-      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.paint(cx); });
+      // The inline edit command, saved the same way.
+      this.ieInput = InputState.new({ placeholder: INLINE_COMMAND });
+      this.ieInput.on("change", (_e, cx) => {
+        const v = this.ieInput.value(); this.ieTyped = v;
+        cx.timer.after(500, (cx) => { if (this.ieTyped === v && v !== (this.st?.inlineCommand ?? "")) this.setSetting({ inlineCommand: v }, cx); });
+      });
+      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.ieInput.set_value?.(this.st.inlineCommand ?? INLINE_COMMAND); this.paint(cx); });
       if (this.form.machine) this.hookAction(null, cx);
       return;
     }
@@ -4636,6 +4882,8 @@ export default class Review extends View {
     // The labels stay short; the selection bar shows when they act on selected lines.
     const selChanges = hasSel && this.picks(f, sel).any && this.mode !== "changes";
     const items = [
+      // Edit only (Review is read-only; ctrl-k there hands over to Edit).
+      ...(this.mode === "edit" && this.editable(f) && !f.store?.plain ? [{ cmd: "inlineEdit", label: "Inline edit…", key: this.kl("inlineEdit") }] : []),
       { cmd: "prompt", label: "Ask agent now", key: this.kl("comment") },
       ...(this.mode !== "changes" ? [{ cmd: "addComment", label: "Add review comment", key: this.kl("addComment") }] : []),
       ...((inHunk && this.mode !== "changes") || selChanges ? [
@@ -4803,6 +5051,12 @@ export default class Review extends View {
           .when(st.externalEditor === "custom", (e) => e
             .child(Input.new(this.extInput))
             .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))))
+        .child(v_flex().gap(6).pt(4)
+          .child(h_flex().gap(8).items_center()
+            .child(div().flex_1().text_size(12).text_color(t.muted).child("Inline edit command"))
+            .when((st.inlineCommand ?? INLINE_COMMAND) !== INLINE_COMMAND, (e) => e.child(this.button("ie-default", "Default", t.raised, (cx) => { this.ieInput.set_value?.(INLINE_COMMAND); this.setSetting({ inlineCommand: INLINE_COMMAND }, cx); }).flex_none())))
+          .child(Input.new(this.ieInput))
+          .child(div().text_size(11).text_color(t.dim).child('Runs once per edit, where the repo\'s git runs (WSL for a WSL repo). {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')))
         .when(!!this.form.machine, (e) => e.child(this.hookSection(t))));
   }
 
@@ -4976,6 +5230,9 @@ export default class Review extends View {
     this.cmtSpans = f && ncomments ? spansOn(this.comments(), f.key) : []; // read by row()
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
+    // An inline edit of this space; its target lines show selected while the box is open (ij.t, current lines).
+    const ij = this.inlines?.get(this.spaceId) ?? null, it = ij && f && ij.key === f.key && ij.status !== "applying" ? ij.t : null;
+    const inTarget = (r) => !!it && r.side === "new" && r.line >= it.a && r.line <= it.b;
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_size_change((size, cx) => { if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
       // Sizes come back in screen px, the app's zoom included (w(100) measures 120 at zoom 1.2), and
@@ -5039,6 +5296,7 @@ export default class Review extends View {
         .when(fb.has("vscode"), (e) => e.child(this.button("vscode", fb.get("vscode"), t.raised, (cx) => this.toVSCode(cx)).flex_none().whitespace_nowrap())))
       .when(!(this.mode === "edit" && this.treeOn) && !!(this.ws || (this.wsBusy && this.wsBusySpace === this.spaceId)), (e) => e.child(this.workspacePanel(t)))
       .when(!!f && !!this.bar, (e) => e.child(this.findBar(f, t)))
+      .when(!!ij && this.mode === "edit", (e) => e.child(this.inlineBar(ij, t)))
       .when(!!f?.conflict, (e) => e.child(h_flex().px(12).py(6).gap(8).items_center().bg(t.ansi3 + "22").text_size(12)
         .child(div().flex_1().child(f?.conflict?.theirs ? "The agent changed the same lines you're editing." : "The file was deleted while you were editing it."))
         .child(this.button("ours", "Keep mine", t.raised, (cx) => this.resolve("ours", cx)))
@@ -5056,7 +5314,7 @@ export default class Review extends View {
             // The list calls this twice a frame: once with [0, 1) to measure a row, then with
             // the visible range. Only the second says which row is on top.
             if (!(range.start === 0 && range.end === 1 && rows.length > 1)) this.drawnTop = range.start;
-            return rows.slice(range.start, range.end).map((r, k) => this.row(r, f, t, lsel && range.start + k >= lsel[0] && range.start + k <= lsel[1])); })
+            return rows.slice(range.start, range.end).map((r, k) => this.row(r, f, t, (lsel && range.start + k >= lsel[0] && range.start + k <= lsel[1]) || inTarget(r))); })
           .w_full().h(this.viewRows() * ROW)
           .track_scroll(this.scroll))
         // Input layer over the rows (under the scrollbar and the selection bar): every click,

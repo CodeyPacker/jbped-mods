@@ -7,7 +7,7 @@ A Herdr pane that shows the code changes coding agents make, Cursor-style: whole
 - **Any agent.** When an agent in a space starts working, the mod snapshots every repo of the space's workspace at once (`snapshot.ps1` / `snapshot.sh`). Files that change while it works become reviewable, each with what was on disk before as its baseline (git's own line-ending rules give it back exactly). Your real git index, stash and branch are never touched. A text file over 1 MB isn't reviewed (Herdr doesn't read files that large): it's skipped and logged, and the other files are captured as usual.
 - **Claude Code**, through its hooks (`hooks/wingman-hook.sh`). Every Edit/Write is reported with the file's exact content before the edit, so the review covers every repo Claude edits, not just the one it started in.
 
-When you reject a change, the agent that made it gets a short factual note on its next tool call or prompt: what was rejected and that the original lines are back. This keeps its picture of the file right. Turn it off in **Settings**. **Comment last rejection** (`ctrl-r`) sends your own comment with it. **Ask** (`ctrl-m`) sends an instruction about a change or the selected lines, such as "refactor this into a helper". It's typed into the agent's terminal as your message, waiting until the agent isn't mid-turn.
+When you reject a change, the agent that made it gets a short factual note on its next tool call or prompt: what was rejected and that the original lines are back. This keeps its picture of the file right. Turn it off in **Settings**. **Comment last rejection** (`ctrl-r`) sends your own comment with it. **Ask** (`ctrl-m`) sends an instruction about a change or the selected lines, such as "refactor this into a helper". It's typed into the agent's terminal as your message, waiting until the agent isn't mid-turn. **Inline edit** (`ctrl-k`) doesn't go through the agent: a one-shot local command rewrites the selected lines, and the result shows as a change to review (see Inline edit).
 
 **Review comments** collect notes to send as one prompt. Add one with a change's **Comment** button in Review, **+ Comment** or `alt-m` on the cursor's line or the selection in Edit, or the right-click menu (**Add review comment**, **Reject and add review comment…**, which rejects the change and quotes it). The header's **Comments N** (`alt-shift-m`) lists the space's comments: jump to one, edit, delete, **Clear all**, **Copy prompt**, and **Send to agent**, which types them into the agent's terminal as your message with `hc send` (paste and Enter) and clears the list; **Undo clear** puts the last sent or cleared batch back until you add a comment. Send goes to the agent that made the commented changes when they all name the same live one, else the space's only agent, else it asks which; a working agent asks first. Comments are kept per space in `data/wingman/comments/` and follow their code when the file changes; one whose lines can't be found again is marked "moved or changed". At most 50 comments per space and 2,000 characters per comment; control characters are dropped.
 
@@ -179,8 +179,9 @@ Wingman finds a space's repos from its terminals' folders and from the files the
 | File tree (Edit view) | `ctrl-b` |
 | Rename / delete the selected file or folder (file tree) | `f2` / `delete`, while the tree has the keyboard (see File operations) |
 | Select lines | click a line, or click and drag; Shift+click or `shift-up` / `shift-down` to extend; click inside the selection or `escape` to clear. |
-| Menu for a line or change | right-click: Ask agent now, Add review comment, Reject, Reject with comment, Reject and add review comment, Accept (on the selected lines when there are any). Right-click never changes the selection. |
+| Menu for a line or change | right-click: Inline edit… (Edit), Ask agent now, Add review comment, Reject, Reject with comment, Reject and add review comment, Accept (on the selected lines when there are any). Right-click never changes the selection. |
 | Ask the agent now about the selected lines, else the current change | `ctrl-m` (or the change's Ask button) |
+| Inline edit: rewrite the selected lines, else the cursor's line (else the current change), from an instruction | `ctrl-k` (or Inline edit… in Edit's right-click menu); from Review it opens in Edit |
 | Add a review comment on the selection, else the cursor's line, else the current change | `alt-m` (or the change's Comment button, or + Comment in Edit) |
 | Review comments: list, jump, edit, delete, send to the agent | `alt-shift-m` (or the header's Comments N) |
 | Quick Open | `ctrl-p`: find a file by name across the space's repos (fuzzy, as in VS Code). `name:12` or `name:12:5` opens it at that line; `:12` goes to a line in the current file. With no query it lists recent and changed files. Up and down choose, Tab fills in the chosen path (then add `:line`), Enter opens, Esc closes. |
@@ -264,6 +265,26 @@ Line operations act on the cursor's line or every line a text selection covers, 
 
 A key sent this way acts only where the same key pressed in Wingman would: never on the file while a box has the keyboard (find, Quick Open, Search, the commit message, a tree name box) or while the tree has it. Every line operation is also a command for other keys: `wingman.moveLineUp`, `wingman.moveLineDown`, `wingman.copyLineUp`, `wingman.copyLineDown`, `wingman.deleteLine`, `wingman.joinLines` and `wingman.toggleComment`.
 
+### Inline edit
+
+`ctrl-k` in Edit opens a box above the file for the selected lines (a text selection covers the lines it touches), else the cursor's line, else the current change. Type an instruction ("use async/await") and press Enter. The lines are sent, as the buffer has them (unsaved edits included), with five lines of context on each side, the file's path in its repo and its language, to **Settings › Inline edit command**, which runs once without a terminal or the agent. The box shows "Editing… N s" with **Cancel** (or Esc): the answer of a cancelled edit is ignored. The command keeps running until it ends or its 120 s are up.
+
+The answer replaces exactly those lines, as a pending change: the review baseline keeps the old lines, the buffer and the file get the new ones, and the change shows with Reject, Accept and undo like an agent's. A file that isn't under review yet is put under review the way the Claude hook does it (an event in `data/wingman/events/`, applied by the capture leader with the hook's), with the text before the edit as its baseline. The file is saved with the edit, unsaved edits elsewhere in it included; those count as yours, not as part of the change. The answer goes to the file and space it was asked for, even when another file or space is shown by then.
+
+Nothing changes when the command isn't found, exits with an error, answers nothing, or runs out of time, or when the lines changed in the buffer while it ran: the box says which in one line. One code fence around the whole answer is removed. The instruction is one line of at most 2,000 characters, with control characters dropped. At most 400 lines go in one edit (about 28,000 characters of prompt). Files outside a git repo aren't edited inline, since there's no review to show the change in.
+
+The default command is Claude Code's headless mode, with nothing it can act with:
+
+```
+claude -p --output-format text --tools "" --permission-mode dontAsk --strict-mcp-config --disable-slash-commands --no-session-persistence --settings {"disableAllHooks":true} {prompt}
+```
+
+`--tools ""` takes away every built-in tool (no file reads or edits, no shell), `--permission-mode dontAsk` denies anything that would ask, `--strict-mcp-config` loads no MCP servers, `--disable-slash-commands` no skills, `disableAllHooks` keeps your hooks out of these calls, and `--no-session-persistence` keeps no transcript. It answers in about 4 to 5 seconds. The command is a template: words split at spaces, `"quotes"` keep spaces (`""` is an empty argument), `{prompt}` is the whole prompt as one argument and `{promptFile}` the path of a temp file holding it (`data/wingman/inline-*.txt`, removed afterwards; this computer's files only); with neither, the prompt goes last. It runs as an argument list: no shell reads the template, the instruction or the code. **Default** in Settings puts the default back. Nothing is sent anywhere else, and Wingman itself makes no network calls for it.
+
+Where it runs follows the repo's git (see Which git runs): on Linux and macOS through `sh -lc` with `~/.local/bin` added to `PATH` (where Claude Code installs), on another machine there, and on Windows through `wsl.exe` for a repo WSL owns. For other repos on Windows, a native `claude.exe` on `PATH` runs directly, and without one WSL's `claude` does. The command runs in the repo's top folder, so Claude Code reads that repo's `CLAUDE.md`.
+
+`herdr-app do "wingman.inlineEdit:<instruction>"` (or that string as an action in `keys.json`) opens the box with the instruction and runs it. The Edit panel's copy acts on it, or a pane copy when the layout has no Edit panel.
+
 Comment, Accept and Reject act on the lines a text selection covers. Clicking the line numbers still selects whole lines. Not supported: input methods that compose characters (Chinese, Japanese, Korean), and wide characters or emoji, which put the cursor in the wrong column.
 
 ## Search
@@ -300,6 +321,7 @@ The header's **⚙ Settings** opens:
 - **Auto-close brackets and quotes**: the bracket and quote rules under Editing. On by default.
 - **Auto-close tags**: the tag rules under Editing. On by default.
 - **External editor**: VS Code (default), Cursor, Windsurf, Zed, Sublime Text, or a custom command with `{path}`, `{line}` and `{col}`. VS Code, Cursor and Windsurf open WSL files through Remote - WSL. On Windows a `.cmd` launcher runs through cmd.exe, which refuses paths containing `& | < > ^ % ! " , ; =`.
+- **Inline edit command**: the command `ctrl-k` runs (see Inline edit), with **Default** to put the default back.
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
 - **Autosave**: save when Wingman loses focus (another pane, or another window), and when you switch files or spaces. On by default. Herdr has no blur event for mods, so focus is checked 4 times a second.
@@ -313,7 +335,7 @@ Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 | Where | What |
 |---|---|
 | `<git-dir>/wingman/` | `index.json`, `baselines/`, `capture.json`, `sums.json` (what each reviewed file had while it differed from `HEAD`), `snap.<pid>.index` while a snapshot runs (per repo) |
-| `~/.config/herdr-app/data/wingman/` | `events/` (from the hook, removed once read), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
+| `~/.config/herdr-app/data/wingman/` | `events/` (from the hook and from Inline edit, removed once read), `inline-*.txt` (an inline edit's prompt, only with `{promptFile}`, removed after the run), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
 | the space's folder | `<folder>.code-workspace`, when you add a second repo and the folder isn't inside a repo |
 | `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which copy runs capture (see The capture controller), and its log |
 | another machine's `~/.config/herdr-app/data/wingman/` | with the Claude hook installed there: `wingman-hook.sh`, `wingman-install.json`, `events/` (removed once read), `feedback/` |

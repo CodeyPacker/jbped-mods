@@ -35,6 +35,7 @@ export const ACTIONS = [
   { id: "copy", label: "Copy", group: "Editing", scope: "edit", keys: ["ctrl-c"] },
   { id: "cut", label: "Cut", group: "Editing", scope: "edit", keys: ["ctrl-x"] },
   { id: "paste", label: "Paste", group: "Editing", scope: "edit", keys: ["ctrl-v"] },
+  { id: "inlineEdit", label: "Inline edit: rewrite the selected lines, else the cursor's line, from an instruction", group: "Editing", scope: "pane", keys: ["ctrl-k"] },
   // Lines
   { id: "moveLineUp", label: "Move lines up", group: "Lines", scope: "edit", keys: ["alt-up"] },
   { id: "moveLineDown", label: "Move lines down", group: "Lines", scope: "edit", keys: ["alt-down"] },
