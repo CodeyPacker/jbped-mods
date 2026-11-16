@@ -141,6 +141,7 @@ try {
   list = cpList(repo);
   assert.equal(list.length, 3);
   assert.equal(list[2].kind, "restore"); assert.equal(list[2].prompt, "Before restore to 14:02");
+  assert.deepEqual([...list[2].files].sort(), ["a.txt", "b.txt", "n.txt", "sub/c.txt"], "its files: the ones the restore changed");
   const fwd = turnRows([{ key: st.root, name: "r", data: { list } }], "s1")[0];
   assert.equal(fwd.kind, "restore");
   const plan2 = await planRestore(fwd.parts.map((p) => ({ store: st, key: p.key, name: p.name, entry: p.entry })));

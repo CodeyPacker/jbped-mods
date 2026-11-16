@@ -4653,10 +4653,11 @@ export default class Review extends View {
     go?.();
   }
 
-  /** Opens a checkpoint's file: in the Review panel (which hands it to Edit when it has nothing to review), else a pane copy's Edit. */
+  /** Opens a checkpoint's file and closes the dialog: in the Review panel (which hands it to Edit when it has nothing to review), else a pane copy's Edit. */
   cpOpenFile(f) {
     const r = this.cp.repos.find((x) => x.key === f.key);
-    if (!r) return;
+    if (!r || this.cp.busy) return;
+    closeOverlay(this.form.overlay); // as the comments dialog's Jump: the file shows behind it
     const at = { line: 0, col: 0 }, key = `${r.store.root}|${f.rel}`;
     if (hasView("review")) { showView("review"); setShared(GOTO, { view: "review", space: this.form.space, key, at, open: true, stamp: Date.now() }); return; }
     if (hasView("edit")) { showView("edit"); setShared(GOTO, { view: "edit", space: this.form.space, key, at, stamp: Date.now() }); return; }
@@ -4745,7 +4746,7 @@ export default class Review extends View {
   renderCheckpoints() {
     const t = theme(), cp = this.cp ?? { rows: [], repos: [] }, { overlay } = this.form, rows = cp.rows ?? [], sel = this.cpRow();
     const multi = cp.repos.length > 1, mono = settings().font_family ?? "JetBrains Mono";
-    const who = (row) => (row.kind === "restore" ? "Before restore" : row.agent ? agentLabel(agents().find((a) => a.address === row.agent) ?? { address: row.agent }) : "Agent");
+    const who = (row) => (row.kind === "restore" ? "Wingman" : row.agent ? agentLabel(agents().find((a) => a.address === row.agent) ?? { address: row.agent }) : "Agent");
     const files = (n) => `${n} file${n === 1 ? "" : "s"}`;
     const row = (r) => {
       const on = r.id === cp.sel, branches = [...new Set(r.parts.map((p) => p.entry.branch).filter(Boolean))];
@@ -4757,12 +4758,12 @@ export default class Review extends View {
           .child(div().w(64).flex_none().whitespace_nowrap().text_color(t.dim).child(files(r.count)))
           .child(div().flex_1().min_w(0).truncate().text_color(r.prompt ? t.foreground : t.dim).child(r.prompt ?? (r.kind === "restore" ? "" : "no prompt seen"))))
         .when(on, (e) => e
-          .child(div().text_size(11).text_color(t.dim).child(`${branches.length ? `On ${branches.join(", ")}` : "No branch"}${multi ? ` · ${r.parts.map((p) => p.name).join(", ")}` : ""}${r.kind === "restore" ? " · the files as they were just before a restore" : ""}`))
+          .child(div().text_size(11).text_color(t.dim).child(`${branches.length ? `On ${branches.join(", ")}` : "No branch"}${multi ? ` · ${r.parts.map((p) => p.name).join(", ")}` : ""}${r.kind === "restore" ? " · the files as they were just before a restore: restoring this goes forward again" : ""}`))
           .child(v_flex().gap(1).children([
             ...r.files.slice(0, 200).map((f, i) => div().id(`cp-f-${i}`).h(18).flex().items_center().px(4).rounded(3).cursor_pointer().font_family(mono).text_size(11.5)
               .hover((s) => s.bg(t.raised)).on_click((_e, cx) => { this.cpOpenFile(f); this.paint(cx); }).child(div().min_w(0).truncate().child(multi ? `${f.name}/${f.rel}` : f.rel))),
             ...(r.count > Math.min(200, r.files.length) ? [div().text_size(11).text_color(t.dim).child(`… ${r.count - Math.min(200, r.files.length)} more`)] : []),
-            ...(!r.count ? [div().text_size(11).text_color(t.dim).child(r.kind === "restore" ? "Restoring this goes forward again, to the files as they were before that restore." : "No files changed in this turn (yet).")] : []),
+            ...(!r.count ? [div().text_size(11).text_color(t.dim).child("No files changed in this turn (yet).")] : []),
           ]))
           .child(h_flex().gap(6).items_center().pt(2)
             .child(this.button("cp-restore", "Restore to before this turn", t.ansi3 + "55", (cx) => this.cpAsk(cx)).flex_none().whitespace_nowrap())

@@ -188,9 +188,9 @@ export class Checkpoints {
    * Records a checkpoint of `tree` (a tree id from snapshot.sh): its ref first, then the list entry.
    * Pruned entries' refs go after the list is written. Returns the entry.
    */
-  async record({ tree, branch = null, agent = null, space = null, turn = null, prompt = null, kind = "turn", at = Date.now() }) {
+  async record({ tree, branch = null, agent = null, space = null, turn = null, prompt = null, kind = "turn", at = Date.now(), files = [] }) {
     if (!/^[0-9a-f]{40,64}$/.test(tree ?? "")) throw new Error(`not a tree id: ${tree}`);
-    const id = newId(at), entry = { id, turn: turn ?? id, tree, at, branch, agent, space, files: [], count: 0, ...(prompt ? { prompt } : {}), ...(kind !== "turn" ? { kind } : {}) };
+    const id = newId(at), entry = { id, turn: turn ?? id, tree, at, branch, agent, space, files: files.slice(0, MAX_FILES), count: files.length, ...(prompt ? { prompt } : {}), ...(kind !== "turn" ? { kind } : {}) };
     const r = await this.store.git(["update-ref", `${REF}${id}`, tree]);
     if (r.code !== 0) throw new Error(`checkpoint ref: ${(r.stderr || r.stdout).trim()}`);
     let pruned = [];
@@ -278,7 +278,8 @@ export async function applyRestore(plan, { held = () => [], space = null, when =
   const turn = newId(at), before = [];
   for (const p of plan.parts) {
     if (!p.files.length) continue;
-    const e = await new Checkpoints(p.store).record({ tree: p.now, branch: await p.store.branch(), space, turn, prompt: `Before restore to ${when}`.trim(), kind: "restore", at });
+    // Its files: the ones this restore changes, which restoring it puts forward again.
+    const e = await new Checkpoints(p.store).record({ tree: p.now, branch: await p.store.branch(), space, turn, prompt: `Before restore to ${when}`.trim(), kind: "restore", at, files: p.files.map((f) => f.rel) });
     before.push(e.id);
   }
   const restored = [], failed = [];
