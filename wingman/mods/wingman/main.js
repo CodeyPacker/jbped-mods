@@ -841,6 +841,7 @@ export default class Review extends View {
   settle() {
     crumb("settle enter", "changes", 8000);
     const vis = this.visible();
+    if (this.restoreSel && vis.some((f) => f.key === this.restoreSel)) { this.sel = this.restoreSel; this.restoreSel = null; this.current = 0; } // see undo
     if (!vis.some((f) => f.key === this.sel)) {
       const at = this.files.findIndex((f) => f.key === this.sel);
       // Changes never picks a committed row by itself: with no uncommitted files nothing is picked.
@@ -2907,6 +2908,7 @@ export default class Review extends View {
 
   pick(key, cx) {
     if (!this.visible().some((f) => f.key === key)) return;
+    this.restoreSel = null;
     if (this.mode === "edit") this.revealInTree(key, cx);
     if (key !== this.sel) {
       const old = this.file();
@@ -2974,6 +2976,18 @@ export default class Review extends View {
       await entry.snaps[0].store.undo(entry.writes);
       for (const m of entry.feedback) await this.noteToClaude(m, () => withdrawFeedback(m.terminal, m.text, { on: m.on }));
     }, cx);
+    if (this.mode === "changes") {
+      // A discard that emptied a file took it off the list: it is back once the writes are, and it is the one selected then.
+      const space = this.spaceId, key = entry.snaps[0].key, queued = this.queue;
+      this.restoreSel = key;
+      cx.spawn(async (cx) => {
+        await queued;
+        if (this.spaceId !== space) return;
+        await this.loadChanges(cx);
+        if (this.restoreSel === key) this.restoreSel = null;
+        this.paint(cx);
+      });
+    }
   }
 
   /**
