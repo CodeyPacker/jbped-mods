@@ -1,7 +1,7 @@
 // D2/D3: a bar of buttons degrades in order as its width shrinks: key hints, then long labels,
 // then whole buttons by their drop order. A label is never cut: it's a shorter one or none.
 import assert from "node:assert";
-import { fitBar, fitHeader, hunkButtons, textW, withKey, LAST_DROP } from "../mods/wingman/barfit.js";
+import { fitBar, fitHeader, hunkButtons, textW, withKey, LAST_DROP, settingsTabs, settingsHeight, SETTINGS_H } from "../mods/wingman/barfit.js";
 
 const items = [
   { id: "pos", labels: ["1/3 · ctrl-shift-↑/ctrl-shift-↓", "1/3"], drop: 2, size: 10, pad: 12 },
@@ -87,4 +87,13 @@ assert.equal(hunkButtons(undefined, 58, 6).w, 110);
   // Not measured yet: everything in full.
   assert.equal(fitHeader(0, header(2)).narrow, false);
 }
+// X7: the Settings dialog fits an 820 px window at zoom 1.2 (its height is element px), less when
+// the pane shows the window is shorter; its sections, Machine only for a space on another machine.
+assert.ok(SETTINGS_H * 1.2 <= 820 - 40);
+assert.equal(settingsHeight(null), SETTINGS_H);
+assert.equal(settingsHeight(900), SETTINGS_H);
+assert.equal(settingsHeight(400), 440);
+assert.equal(settingsHeight(100), 360);
+assert.deepEqual(settingsTabs(false).map((x) => x.id), ["general", "editing", "inline", "problems"]);
+assert.deepEqual(settingsTabs(true).map((x) => x.id), ["general", "editing", "inline", "problems", "machine"]);
 console.log("barfit ok");

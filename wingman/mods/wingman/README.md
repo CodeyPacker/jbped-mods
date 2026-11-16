@@ -112,7 +112,7 @@ This adds the hooks to `~/.claude/settings.json` and creates `~/.config/herdr-ap
 
 The installer keeps your other hooks and writes `settings.json.bak-herdr-wingman` first. Running it again changes nothing. It needs `python3` to edit the JSON. The hook itself is plain `sh`.
 
-**Another machine** (a space on a Herdr machine reached over ssh, or a WSL machine of this PC): open a space there, then **⚙ Settings** › **Claude hook on <machine>** › **Install**. Nothing is needed on the machine but `sh`. It makes, on that machine:
+**Another machine** (a space on a Herdr machine reached over ssh, or a WSL machine of this PC): open a space there, then **⚙ Settings** › **Machine** › **Claude hook on <machine>** › **Install**. Nothing is needed on the machine but `sh`. It makes, on that machine:
 
 1. The folder `~/.config/herdr-app/data/wingman/` (or `$HERDR_WINGMAN_DIR` when that's set there), with `events/` and `feedback/`. The hook does nothing on a machine without this folder.
 2. `wingman-hook.sh` in that folder, a copy of this mod's hook. Claude runs it as `sh '<path>'`, so it needs no execute bit.
@@ -142,7 +142,7 @@ Herdr's own layouts (`layout:<name>` in `installed.json`) are copied once to `<n
 
 Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/` and `refs/wingman/` refs (see Checkpoints).
 
-On another machine: **⚙ Settings** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
+On another machine: **⚙ Settings** › **Machine** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
 
 ## Use
 
@@ -387,7 +387,7 @@ How it runs:
 
 ## Settings
 
-The header's **⚙ Settings** opens:
+The header's **⚙ Settings** (or the narrow header's ⚙; command `wingman.openSettings`) opens a dialog in sections, each short enough for an 820 px window at zoom 1.2 (a section scrolls in a smaller window): **General** (the notes, the session log, Herdr's buttons, the editor, the external editor), **Editing** (brackets, tags, wrap, autosave, Format on save), **Inline edit** (its command), **Problems** and, for a space on another machine, **Machine**. Commands for keys and tests: `wingman.settingsTab:general`, `:editing`, `:inline`, `:problems`, `:machine`. The settings:
 
 - **Auto note on rejections**: tell the agent which of its changes you rejected. On by default.
 - **Note on my edits**: when you save, tell the agent that changed the file which lines you edited, so it reads the file again before its next change. On by default. The note is delivered with the agent's next tool call or prompt, and a newer save replaces a note it hasn't read yet.
@@ -397,7 +397,7 @@ The header's **⚙ Settings** opens:
 - **Inline edit command**: the command `ctrl-k` runs (see Inline edit), with **Default** to put the default back.
 - **Problems**: run the project's checkers and mark what they report (see Problems). On by default.
 - **Check after each agent turn**: Check when an agent of the space finishes a turn. Off by default.
-- **Problems command** (per repo of the shown space, with a repo choice when there are several): your own checker and how its output reads (see Problems). The dialog scrolls: these rows are at its end.
+- **Problems command** (per repo of the shown space, with a repo choice when there are several): your own checker and how its output reads (see Problems).
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
 - **Format on save**: `ctrl-s` (and the Save button) format the file with the repo's formatter first, then save. Off by default. Autosave never formats, because it saves while you are elsewhere and formatting moves text. See Format on save.

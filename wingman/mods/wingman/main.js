@@ -59,7 +59,7 @@ import { toLighten, HEAVY_VIEWS } from "./retain.js";
 import { CaptureLoop, ACTIVE, CAPTURE_ERRORS, CONTROLLER, spaceOfAgent } from "./captureloop.js";
 import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
-import { fitBar, fitHeader, hunkButtons, withKey, LAST_DROP } from "./barfit.js";
+import { fitBar, fitHeader, hunkButtons, withKey, LAST_DROP, settingsTabs, settingsHeight } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
 import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
@@ -3503,7 +3503,7 @@ export default class Review extends View {
     const machine = this.machine();
     // The space's repos, for the Problems command (kept per repo).
     const repos = this.repos().map((st) => ({ id: idOf(st), name: this.repoName(st) }));
-    openOverlay({ mod: "wingman", props: { form: "settings", repos, ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 990 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", repos, ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: settingsHeight(this.paneH == null ? null : this.px(this.paneH)) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -4729,6 +4729,13 @@ export default class Review extends View {
       });
       cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.ieInput.set_value?.(this.st.inlineCommand ?? INLINE_COMMAND); this.pcInput.set_value?.(this.st.problemsCommands?.[this.pcRepo]?.command ?? ""); this.paint(cx); });
       if (this.form.machine) this.hookAction(null, cx);
+      // Its sections as commands, for keys and tests: wingman.settingsTab:general | editing | inline | problems | machine.
+      cx.spawn(async (cx) => {
+        for (;;) {
+          const c = String(await nextCommand()).replace(/^wingman\./, "");
+          if (c.startsWith("settingsTab:")) { this.setTab = c.slice("settingsTab:".length); this.paint(cx); }
+        }
+      });
       return;
     }
     if (this.form.form === "comment") return this.initCommentForm(cx);
@@ -5413,51 +5420,65 @@ export default class Review extends View {
       .child(div().w(34).h(18).flex_none().rounded(9).p(2).bg(on ? t.accent : t.raised)
         .child(div().size(14).rounded(7).bg(t.foreground).when(on, (e) => e.ml(16))))
       .child(v_flex().flex_1().min_w(0).child(div().text_size(13).child(label)).child(div().text_size(11).text_color(t.dim).child(hint))); // the hint wraps instead of running past the dialog
-    return v_flex().id("wingman-settings").track_focus(this.formHandle)
-      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
-      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground).overflow_y_scrollbar() // Problems rows make it taller than most windows
-      .child(h_flex().items_center().gap(8).child(div().flex_1().text_size(15).font_semibold().child("Settings"))
-        .child(this.button("open-keys", "Keyboard shortcuts…", t.raised, () => { closeOverlay(overlay); openOverlay({ mod: "wingman", props: { form: "keys" }, kind: "dialog", width: 700, height: 620 }); }))
-        .child(div().text_size(11).text_color(t.dim).child("Esc")))
-      .when(!st, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading…")))
-      .when(!!st, (e) => e
-        .child(toggle("set-note", "Auto note on rejections", "Tell the agent which of its changes you rejected.", st.autoNote, (cx) => this.setSetting({ autoNote: !st.autoNote }, cx)))
-        .child(toggle("set-editnote", "Note on my edits", "Tell the agent which lines of its files you changed.", st.editNote, (cx) => this.setSetting({ editNote: !st.editNote }, cx)))
-        .child(toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)))
-        .child(toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)))
-        .child(toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)))
-        .child(toggle("set-sessionlog", "Read the agent's session log", "List the files Claude read and edited (Edit › Agent files) from its own log under ~/.claude/projects, outside the repo.", st.sessionLog ?? true, (cx) => this.setSetting({ sessionLog: !(st.sessionLog ?? true) }, cx)))
-        .child(toggle("set-hidepanels", "Hide Herdr's Files and Changes buttons", "Takes them out of the tab bar. Wingman's own Review, Edit and Changes stay. Turn off to put them back.", st.hideHerdrPanels ?? false, (cx) => this.setSetting({ hideHerdrPanels: !(st.hideHerdrPanels ?? false) }, cx)))
-        .child(toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)))
-        .child(v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
-          .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
-          .child(h_flex().gap(4).children([0, 1, 2, 3, 5, 10].map((n) => div().id(`delay-${n}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
-            .bg(st.autosaveDelay === n ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
-            .on_click((_e, cx) => { if (st.autosave) this.setSetting({ autosaveDelay: n }, cx); })
-            .child(n ? `${n}s` : "Focus change")))))
-        .child(toggle("set-format", "Format on save", "Run the repo's Prettier (or CSharpier for C#) on Ctrl+S and Alt+Shift+F. Autosave never formats: it would move text while you are elsewhere.", st.formatOnSave ?? false, (cx) => this.setSetting({ formatOnSave: !(st.formatOnSave ?? false) }, cx)))
-        .child(v_flex().gap(6).pt(4)
+    // The rows are split into sections (settingsTabs), each short enough for an 820 px window at zoom
+    // 1.2 without scrolling; a section still scrolls when the window is smaller than that.
+    const tabs = settingsTabs(!!this.form.machine), cur = tabs.some((x) => x.id === this.setTab) ? this.setTab : tabs[0].id;
+    const section = !st ? [] : {
+      general: () => [
+        toggle("set-note", "Auto note on rejections", "Tell the agent which of its changes you rejected.", st.autoNote, (cx) => this.setSetting({ autoNote: !st.autoNote }, cx)),
+        toggle("set-editnote", "Note on my edits", "Tell the agent which lines of its files you changed.", st.editNote, (cx) => this.setSetting({ editNote: !st.editNote }, cx)),
+        toggle("set-sessionlog", "Read the agent's session log", "List the files Claude read and edited (Edit › Agent files) from its own log under ~/.claude/projects, outside the repo.", st.sessionLog ?? true, (cx) => this.setSetting({ sessionLog: !(st.sessionLog ?? true) }, cx)),
+        toggle("set-hidepanels", "Hide Herdr's Files and Changes buttons", "Takes them out of the tab bar. Wingman's own Review, Edit and Changes stay. Turn off to put them back.", st.hideHerdrPanels ?? false, (cx) => this.setSetting({ hideHerdrPanels: !(st.hideHerdrPanels ?? false) }, cx)),
+        v_flex().gap(6).pt(4)
           .child(div().text_size(12).text_color(t.muted).child("Editor"))
           .child(h_flex().gap(4).children([["wingman", "Wingman"], ["nvim", "Neovim"]].map(([v, label]) => div().id(`editor-${v}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
             .bg((st.editor ?? "wingman") === v ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => this.setSetting({ editor: v }, cx)).child(label))))
-          .child(div().text_size(11).text_color(t.dim).child("Neovim: clicking a line, Open in Neovim, or a file in the tree opens it in a Neovim pane beside Wingman.")))
-        .child(v_flex().gap(6).pt(4)
+          .child(div().text_size(11).text_color(t.dim).child("Neovim: clicking a line, Open in Neovim, or a file in the tree opens it in a Neovim pane beside Wingman.")),
+        v_flex().gap(6).pt(4)
           .child(div().text_size(12).text_color(t.muted).child("External editor (Open in external editor, and the file row's last button)"))
           .child(h_flex().gap(4).flex_wrap().children(Object.entries(EDITORS).map(([v, ed]) => div().id(`ext-${v}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
             .bg((st.externalEditor ?? "code") === v ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => this.setSetting({ externalEditor: v }, cx)).child(ed.name))))
           .when(st.externalEditor === "custom", (e) => e
             .child(Input.new(this.extInput))
-            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))))
-        .child(v_flex().gap(6).pt(4)
+            .child(div().text_size(11).text_color(t.dim).child('{path}, {line} and {col} are filled in; "quotes" keep spaces. Example: idea --line {line} --column {col} {path}'))),
+      ],
+      editing: () => [
+        toggle("set-pairs", "Auto-close brackets and quotes", "Typing ( [ { \" ' ` adds the closer; Backspace in an empty pair removes both.", st.autoPairs ?? true, (cx) => this.setSetting({ autoPairs: !(st.autoPairs ?? true) }, cx)),
+        toggle("set-tags", "Auto-close tags", "In HTML, XML, JSX and Vue files, typing > adds the closing tag and </ completes the open one.", st.autoTags ?? true, (cx) => this.setSetting({ autoTags: !(st.autoTags ?? true) }, cx)),
+        toggle("set-wrap", "Wrap long lines", "Long lines continue on the next screen row instead of scrolling sideways. Alt+Z by default.", st.wordWrap ?? false, (cx) => this.setSetting({ wordWrap: !(st.wordWrap ?? false) }, cx)),
+        toggle("set-autosave", "Autosave", "Save on focus loss and file switch. Where you and the agent change the same lines, the agent's win.", st.autosave, (cx) => this.setSetting({ autosave: !st.autosave }, cx)),
+        v_flex().gap(6).when(!st.autosave, (e) => e.opacity(0.4))
+          .child(div().text_size(12).text_color(t.muted).child("Also save after typing stops for"))
+          .child(h_flex().gap(4).children([0, 1, 2, 3, 5, 10].map((n) => div().id(`delay-${n}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
+            .bg(st.autosaveDelay === n ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
+            .on_click((_e, cx) => { if (st.autosave) this.setSetting({ autosaveDelay: n }, cx); })
+            .child(n ? `${n}s` : "Focus change")))),
+        toggle("set-format", "Format on save", "Run the repo's Prettier (or CSharpier for C#) on Ctrl+S and Alt+Shift+F. Autosave never formats: it would move text while you are elsewhere.", st.formatOnSave ?? false, (cx) => this.setSetting({ formatOnSave: !(st.formatOnSave ?? false) }, cx)),
+      ],
+      inline: () => [
+        v_flex().gap(6).pt(4)
           .child(h_flex().gap(8).items_center()
             .child(div().flex_1().text_size(12).text_color(t.muted).child("Inline edit command"))
             .when((st.inlineCommand ?? INLINE_COMMAND) !== INLINE_COMMAND, (e) => e.child(this.button("ie-default", "Default", t.raised, (cx) => { this.ieInput.set_value?.(INLINE_COMMAND); this.setSetting({ inlineCommand: INLINE_COMMAND }, cx); }).flex_none())))
           .child(Input.new(this.ieInput))
-          .child(div().text_size(11).text_color(t.dim).child('Runs once per edit, where the repo\'s git runs (WSL for a WSL repo). {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')))
-        .child(this.problemsSettings(t, toggle))
-        .when(!!this.form.machine, (e) => e.child(this.hookSection(t))));
+          .child(div().text_size(11).text_color(t.dim).child('Runs once per edit where the repo\'s tools live (WSL for a WSL repo), with your shell\'s PATH. {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')),
+      ],
+      problems: () => [this.problemsSettings(t, toggle)],
+      machine: () => [this.hookSection(t)],
+    }[cur]();
+    return v_flex().id("wingman-settings").track_focus(this.formHandle)
+      .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
+      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().gap(8).child(div().flex_1().text_size(15).font_semibold().child("Settings"))
+        .child(this.button("open-keys", "Keyboard shortcuts…", t.raised, () => { closeOverlay(overlay); openOverlay({ mod: "wingman", props: { form: "keys" }, kind: "dialog", width: 700, height: 620 }); }))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(h_flex().flex_none().gap(2).p(2).rounded(6).bg(t.raised).children(tabs.map((x) =>
+        div().id(`set-tab-${x.id}`).h(24).px(10).flex().items_center().rounded(4).text_size(12).cursor_pointer()
+          .when(cur === x.id, (e) => e.bg(t.selected)).on_click((_e, cx) => { this.setTab = x.id; this.paint(cx); }).child(x.label))))
+      .when(!st, (e) => e.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .when(!!st, (e) => e.child(v_flex().id(`set-section-${cur}`).flex_1().min_h(0).gap(10).overflow_y_scrollbar().children(section)));
   }
 
   /** Settings: Problems on or off, Check after each agent turn, and the shown space's repos' Problems command. */
@@ -5672,7 +5693,7 @@ export default class Review extends View {
     const ij = this.inlines?.get(this.spaceId) ?? null, it = ij && f && ij.key === f.key && ij.status !== "applying" ? ij.t : null;
     const inTarget = (r) => !!it && r.side === "new" && r.line >= it.a && r.line <= it.b;
     return v_flex().id("review").relative().size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_size_change((size, cx) => { if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
+      .on_size_change((size, cx) => { this.paneH = size.height; if (Math.abs((this.paneW ?? 0) - size.width) > 0.5) { this.paneW = size.width; this.paint(cx); } })
       // Sizes come back in screen px, the app's zoom included (w(100) measures 120 at zoom 1.2), and
       // the bars are laid out in element px: this 100 px probe gives the ratio (px()).
       .child(div().id("unit-probe").absolute().top(0).left(0).w(100).h(0)

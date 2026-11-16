@@ -58,6 +58,22 @@ export function fitHeader(width, items, { panel = true, subtitle = 80 } = {}) {
   return { labels: fitBar(width, items, fixed, HEADER_GAP), narrow: true, fixed };
 }
 
+/** The Settings dialog's sections (main.js renderSettings); Machine only for a space on another machine. */
+export const settingsTabs = (machine) => [
+  { id: "general", label: "General" }, { id: "editing", label: "Editing" }, { id: "inline", label: "Inline edit" }, { id: "problems", label: "Problems" },
+  ...(machine ? [{ id: "machine", label: "Machine" }] : []),
+];
+
+/** The Settings dialog's height (element px): fits an 820 px window at zoom 1.2. */
+export const SETTINGS_H = 620;
+
+/**
+ * The Settings dialog's height for a pane `paneH` element px tall (null: not measured). The window is
+ * at least the pane's height plus the bars around it, so a short pane caps the dialog; a section
+ * that doesn't fit then scrolls inside it.
+ */
+export const settingsHeight = (paneH) => (paneH > 0 ? Math.max(360, Math.min(SETTINGS_H, Math.round(paneH + 40))) : SETTINGS_H);
+
 /** "label  key" when there's a key, else the label. */
 export const withKey = (label, key) => (key ? `${label}  ${key}` : label);
 

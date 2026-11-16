@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 // Kinds: reloads reach every copy; a dialog's, the tree menu's and "focus" are each copy's own; the rest is one copy's.
 assert.equal(kindOf("settings"), "all");
 assert.equal(kindOf("hook"), "all");
-for (const c of ["focus", "treeRename", "treeNewFile", "cpNext", "cpRestore", "cpConfirm"]) assert.equal(kindOf(c), "self", c);
+for (const c of ["focus", "treeRename", "treeNewFile", "cpNext", "cpRestore", "cpConfirm", "settingsTab"]) assert.equal(kindOf(c), "self", c);
 for (const c of ["checkpoints", "addComment", "commentList", "openSettings", "checkProblems", "problemsShow", "inlineEdit", "prompt", "rejectReason", "rejectComment", "clear"]) assert.equal(kindOf(c), "one", c);
 for (const a of ACTIONS) assert.equal(kindOf(a.id), "one", `every key action is one copy's: ${a.id}`);
 assert.equal(nameOf("inlineEdit:use async/await: now"), "inlineEdit");

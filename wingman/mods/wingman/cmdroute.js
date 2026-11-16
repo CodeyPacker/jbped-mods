@@ -6,7 +6,7 @@
 //   the command bump a shared stamp, and every copy reloads on its tick (main.js SETTINGS_REV).
 // - "one": every other command. The copies that got it wait SETTLE_MS for each other, then only the
 //   highest ranked acts (rank, winner). A copy that can't do it itself hands it on (main.js claim).
-// - "self": a dialog's own commands (cp*), tree menu commands (only the copy that opened the menu
+// - "self": a dialog's own commands (cp*, settingsTab), tree menu commands (only the copy that opened the menu
 //   holds its item) and "focus" (sent to one copy by Herdr): each copy decides as before.
 // Pure: no Herdr imports.
 
@@ -23,7 +23,7 @@ const ALL = new Set(["settings", "hook"]);
 export function kindOf(c) {
   const name = String(c ?? "");
   if (ALL.has(name)) return "all";
-  if (name === "focus" || /^tree[A-Z]/.test(name) || /^cp[A-Z]/.test(name)) return "self";
+  if (name === "focus" || /^tree[A-Z]/.test(name) || /^cp[A-Z]/.test(name) || name === "settingsTab") return "self";
   return "one";
 }
 
