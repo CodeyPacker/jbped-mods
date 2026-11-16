@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveTemplate, templateErrors, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, spaceTarget, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfindr/launch.js";
+import { resolveTemplate, templateErrors, reviewPaneSpot, DEFAULT_REVIEW, agentArgv, slug, ticketFolder, ticketPrefix, reviewFolder, launchSpaceName, reviewSpaceName, launchPrompt, reviewPrompt, spaceArgv, spaceTarget, parseScript, DEFAULT_LAUNCH, EXISTS_SH, LAUNCH_SH, REVIEW_SH, SCAN_SH } from "../mods/wayfindr/launch.js";
 import { makeLaunchWorktrees, makeReviewWorktree, existingWorktrees, listClones, cloneOrigin, placementFor } from "../mods/wayfindr/flow.js";
 import { identityOf, parseWranglr } from "../mods/wayfindr/wranglr.js";
 import { addRepo } from "../mods/wayfindr/settings.js";
@@ -18,6 +18,42 @@ test("templates resolve global, then Board or repo, field by field", () => {
   assert.ok(templateErrors({ agent: "a b" }, "t").length);
   assert.deepEqual(templateErrors({ agent: "claude", model: "opus" }, "t"), []);
   assert.ok(parseConfig(JSON.stringify({ templates: { launch: { agent: "x;y" } }, profiles: { p: {} } }), "linux").errors.some((e) => /templates\.launch\.agent/.test(e)));
+});
+
+test("a Review template's pane field resolves by layer and must be a boolean (#30)", () => {
+  assert.equal(resolveTemplate(DEFAULT_REVIEW).pane, undefined); // unset: the pane opens
+  assert.equal(resolveTemplate(DEFAULT_REVIEW, { pane: false }).pane, false);
+  assert.equal(resolveTemplate(DEFAULT_REVIEW, { pane: false }, { pane: true }).pane, true);
+  assert.equal(resolveTemplate(DEFAULT_REVIEW, { pane: false }, { model: "opus" }).pane, false);
+  assert.deepEqual(templateErrors({ pane: false }, "t"), []);
+  assert.deepEqual(templateErrors({ pane: true }, "t"), []);
+  assert.deepEqual(templateErrors({ pane: "no" }, "t"), ["t.pane: true or false"]);
+  assert.deepEqual(templateErrors({ pane: 0 }, "t"), ["t.pane: true or false"]);
+  const cfg = (review, repoReview) => parseConfig(JSON.stringify({ templates: { review }, profiles: { p: { repos: [{ id: "r", path: "/r", review: repoReview }] } } }), "linux").errors;
+  assert.ok(cfg({ pane: "off" }).some((e) => /templates\.review\.pane/.test(e)));
+  assert.ok(cfg(undefined, { pane: 1 }).some((e) => /repos\[0\]\.review\.pane/.test(e)));
+  assert.deepEqual(cfg({ pane: false }, { pane: true }), []);
+});
+
+test("reviewPaneSpot finds the space's first terminal pane and any Wayfindr pane (#30)", () => {
+  const spaces = [
+    { id: "s1", name: "other", tabs: [{ id: "t1" }] },
+    { id: "s2", name: "PR repo#7 Fix", tabs: [{ id: "t2" }, { id: "t3" }] },
+  ];
+  const panes = [
+    { pane: "p1", terminal: "a1", tab: "t1" },
+    { pane: "p2", terminal: null, mod: "files", tab: "t2" },
+    { pane: "p3", terminal: "a3", tab: "t2" },
+    { pane: "p4", terminal: "a4", tab: "t3" },
+  ];
+  assert.equal(reviewPaneSpot(spaces, panes, "missing"), null);
+  assert.deepEqual(reviewPaneSpot(spaces, panes, "PR repo#7 Fix"), { terminal: "p3", wayfindr: false });
+  assert.deepEqual(reviewPaneSpot(spaces, [...panes, { pane: "p5", terminal: null, mod: "wayfindr", tab: "t3" }], "PR repo#7 Fix"), { terminal: "p3", wayfindr: true });
+  // A Wayfindr pane in another space doesn't count.
+  assert.deepEqual(reviewPaneSpot(spaces, [...panes, { pane: "p6", terminal: null, mod: "wayfindr", tab: "t1" }], "PR repo#7 Fix"), { terminal: "p3", wayfindr: false });
+  // The space is there but its terminal isn't yet.
+  assert.deepEqual(reviewPaneSpot(spaces, [], "PR repo#7 Fix"), { terminal: null, wayfindr: false });
+  assert.deepEqual(reviewPaneSpot(null, null, "x"), null);
 });
 
 test("ticket folder and branch names are safe", () => {

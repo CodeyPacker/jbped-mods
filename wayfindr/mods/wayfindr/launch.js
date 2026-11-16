@@ -13,12 +13,13 @@ export const DEFAULT_REVIEW = {
 
 const AGENT = /^[A-Za-z0-9._-]+$/;
 
-// A template: { agent, model?, args?, prompt? }. Later layers override earlier ones, field by field.
+// A template: { agent, model?, args?, prompt?, pane? }. Later layers override earlier ones, field by field.
+// pane (Review only, #30): false keeps Review from opening the Pull Request pane beside the agent; default on.
 export function resolveTemplate(base, ...layers) {
   const out = { ...base };
   for (const l of layers) {
     if (!l || typeof l !== "object") continue;
-    for (const k of ["agent", "model", "args", "prompt"]) if (l[k] != null) out[k] = l[k];
+    for (const k of ["agent", "model", "args", "prompt", "pane"]) if (l[k] != null) out[k] = l[k];
   }
   return out;
 }
@@ -32,7 +33,19 @@ export function templateErrors(t, where) {
   if (t.model != null && !(typeof t.model === "string" && /^[A-Za-z0-9._:\[\]-]+$/.test(t.model))) e.push(`${where}.model: a model name, e.g. "opus"`);
   if (t.args != null && !(Array.isArray(t.args) && t.args.every((a) => typeof a === "string"))) e.push(`${where}.args: a list of strings`);
   if (t.prompt != null && typeof t.prompt !== "string") e.push(`${where}.prompt: text`);
+  if (t.pane != null && typeof t.pane !== "boolean") e.push(`${where}.pane: true or false`);
   return e;
+}
+
+// Where Review's Pull Request pane goes (#30), from spaces() and panes(): null while the space named `name`
+// doesn't exist yet, else { terminal: the first terminal pane's id in its tabs (null when none yet), wayfindr:
+// whether a Wayfindr pane is already there (one per space: panes() doesn't show props) }.
+export function reviewPaneSpot(spaceList, paneList, name) {
+  const space = (spaceList ?? []).find((s) => s.name === name);
+  if (!space) return null;
+  const tabs = new Set((space.tabs ?? []).map((x) => x.id));
+  const mine = (paneList ?? []).filter((p) => tabs.has(p.tab));
+  return { terminal: mine.find((p) => p.terminal != null)?.pane ?? null, wayfindr: mine.some((p) => p.mod === "wayfindr") };
 }
 
 // The agent's argv: the program, --model, then any extra args.
