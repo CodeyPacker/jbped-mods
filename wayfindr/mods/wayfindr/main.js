@@ -882,7 +882,7 @@ export default class Wayfindr extends View {
   // Compare-and-swap on the text read before, as the viewed marks; on a conflict, read again and write once more.
   async writePrComments(c) {
     if (c.list.length === 0) {
-      try { await fs.rm(c.file, { force: true }); c.text = null; return; } catch { /* no rm here: write an empty list */ }
+      try { await fs.unlink(c.file); c.text = null; return; } catch { /* already gone, or no unlink here: write an empty list */ }
     }
     const text = JSON.stringify(c.list, null, 2);
     await fs.mkdir(commentsDir(), { recursive: true });
