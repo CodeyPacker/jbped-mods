@@ -60,6 +60,7 @@ import { AgentFiles } from "./agentview.js"; // session log source: Agent files 
 import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
 import { isClaude } from "./sessionlog.js";
+import { GitActions, GIT_COMMANDS } from "./gitview.js"; // G6 in Changes: sync, branches, Discard change, Generate message
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
 const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
@@ -239,6 +240,7 @@ export default class Review extends View {
         else if (c === "checkProblems") { if (this.problems.owner()) this.problems.checkNow(cx); }
         else if (/^problems[A-Z]/.test(c)) this.problems.command(c, cx);
         else if (c === "openSettings") { if (this.problems.owner()) this.openSettings(); }
+        else if (GIT_COMMANDS.test(c)) this.gitx?.command(c, cx); // G6: the shown Changes copy acts (gitview.command)
         else if (c === "inlineEdit" || c.startsWith("inlineEdit:")) {
           // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
           // "wingman.inlineEdit:<instruction>"`, which also runs it): every copy gets it, so the Edit
@@ -512,6 +514,7 @@ export default class Review extends View {
   close() {
     this.loop?.close();
     this.dropSleeper?.();
+    this.gitx?.release();
     this.scroll?.release(); this.searchScroll?.release(); this.treeScroll?.release(); this.chgScroll?.release(); for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.treeInput, this.inlineInput, ...(this.searchInputs ?? [])]) i?.release();
     // The copy is going: its texts, highlighting, undo steps and file lists are let go now, not
     // whenever the runtime drops the instance (a task still waiting would keep it, and all of this).
@@ -1426,6 +1429,9 @@ export default class Review extends View {
     this.commitInput.on("focus", () => { this.inBar = this.commitInput; this.treeFocus = false; });
     this.commitInput.on("blur", () => { if (this.inBar === this.commitInput) this.inBar = null; });
     cx.timer.every(2000, (cx) => { if (!this.refreshing) cx.spawn(async (cx) => this.refreshChanges(cx)); });
+    // G6: each repo's sync row, the branch list, Discard change, Generate message (gitview.js).
+    this.gitx = new GitActions(this, { log });
+    cx.timer.every(1000, (cx) => { if (this.gitx.running()) this.paint(cx); }); // "Pushing…", "Writing a message… N s"
   }
 
   /** Review publishes its open change count per file, for the Changes view's tags. */
@@ -1536,6 +1542,7 @@ export default class Review extends View {
       crumb(`loadChanges: committed set (${committed.length}), before settle+notify`, "changes");
       this.settle(); this.paint(cx);
       crumb("loadChanges: after committed settle+notify", "changes");
+      await this.gitx?.afterLoad(cx); // each repo's branch, upstream and ↑/↓ (local refs)
     } catch (e) { crumb(`loadChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); loadFailed(this, space, String(e.message ?? e)); this.paint(cx); }
     finally { this.loadingChanges = false; crumb("loadChanges exit", "changes"); }
   }
@@ -1818,6 +1825,7 @@ export default class Review extends View {
       if (moved()) return;
       if (stale) { crumb("refreshChanges: before loadChanges", "changes"); await this.loadChanges(cx); crumb("refreshChanges: after loadChanges", "changes"); }
       else if (loadOk(this)) this.paint(cx);
+      if (!moved()) await this.gitx?.tick(cx); // ↑/↓ reread from local refs every 30 s (never a fetch)
     } catch (e) { crumb(`refreshChanges threw ${String(e?.message ?? e).slice(0, 80)}`, "changes"); loadFailed(this, space, String(e.message ?? e)); this.paint(cx); }
     finally { this.refreshing = false; if (remote) this.changesAt = Date.now(); crumb("refreshChanges exit", "changes"); }
   }
@@ -1931,8 +1939,11 @@ export default class Review extends View {
     const adds = this.files.reduce((n, f) => n + (f.add ?? 0), 0), dels = this.files.reduce((n, f) => n + (f.del ?? 0), 0);
     const all = this.files.length > 0 && this.files.every((f) => !this.unchecked.has(f.key));
     if (!this.crumbBuilt) { this.crumbBuilt = true; crumb(`renderChanges: built ${rows.length} rows, building tree`, "changes"); }
+    const gx = this.gitx, branches = !!gx?.branchOpen();
     return v_flex().w(320).flex_none().h_full().border_r(1).border_color(t.border)
-      .child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
+      .children(gx ? gx.syncRows(t, multi) : []) // G6: branch, upstream, ↑/↓, Fetch, Pull, Push per repo
+      .when(branches, (e) => e.child(gx.branchPanel(t)))
+      .when(!branches, (e) => e.child(h_flex().h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().id("chk-all").cursor_pointer().on_click((_e, cx) => { if (all) for (const f of this.files) this.unchecked.add(f.key); else this.unchecked.clear(); this.paint(cx); }).child(box(all)))
         .child(div().flex_1().text_size(12).text_color(t.muted).child(`${this.files.length} changed file${this.files.length === 1 ? "" : "s"}`))
         .when(adds + dels > 0, (e) => e.child(h_flex().flex_none().gap(4).text_size(11)
@@ -1947,11 +1958,12 @@ export default class Review extends View {
           .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => { if (!this.crumbRange) { this.crumbRange = true; crumb(`virtual list: first range ${range.start}-${range.end} of ${rows.length}`, "changes"); } return rows.slice(range.start, range.end).map(row); })
             .w_full().h(Math.max(FILE_H, (this.chgH ?? 300) - 4)).track_scroll(this.chgScroll)
             .on_item_click((key, cx) => this.clickChange(key, cx)))
-          .child(Scrollbar.vertical("chg-rows").viewport_from_layout().absolute().inset_0())))
+          .child(Scrollbar.vertical("chg-rows").viewport_from_layout().absolute().inset_0()))))
       .child(v_flex().flex_none().p(8).gap(6).border_t(1).border_color(t.border)
         .when(multi && !!st, (e) => e.child(h_flex().gap(4).flex_wrap().children(this.repos().filter((s) => this.files.some((f) => f.store === s)).map((s) =>
           div().id(`repo-${s.root}`).h(22).px(8).flex().items_center().rounded(5).text_size(11).cursor_pointer()
             .bg(s === st ? t.accent + "77" : t.raised).on_click((_e, cx) => { this.commitRoot = s.root; this.paint(cx); }).child(base(s.root))))))
+        .when(!!gx, (e) => e.child(gx.genRow(t))) // G6: Generate commit message
         .child(Textarea.new(this.commitInput).h(72).px(8).py(6).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(12))
         .when(open > 0, (e) => e.child(div().text_size(11).text_color(t.ansi3).child(`${open} checked file${open === 1 ? " has" : "s have"} changes still to review`)))
         .when(!!this.commitNote, (e) => e.child(div().text_size(11).text_color(t.dim).child(this.commitNote)))
@@ -2733,7 +2745,7 @@ export default class Review extends View {
     const f = this.file(), x = ev.local_position?.x ?? -1, y = ev.local_position?.y ?? -1, i = this.rowAt(y);
     if (!f || i < 0) return;
     const r = this.rowsOf(f)[i];
-    if (r.kind === "@") return this.mode === "changes" ? undefined : this.rowButton(r.hunk, x, cx);
+    if (r.kind === "@") return this.mode === "changes" ? this.gitx?.hunkClick(r.hunk, x, GUTTER, BTN_GAP, cx) : this.rowButton(r.hunk, x, cx);
     // The text: place the cursor, select words or lines, or start a text drag (Q42).
     if (x >= GUTTER && this.editable(f)) return this.textDown(f, r, x, y, ev, cx);
     this.anchor = null; // the line numbers: line selection, as before
@@ -5245,6 +5257,8 @@ export default class Review extends View {
         ...(inHunk && !selChanges ? [{ cmd: "rejectComment", label: "Reject and add review comment…", key: "" }] : []),
         { cmd: "accept", label: "Accept", key: this.kl("accept") },
       ] : []),
+      // G6: Changes discards the change (or the selected changed lines) under the pointer, after asking.
+      ...(this.mode === "changes" && (inHunk || (hasSel && this.picks(f, sel).any)) && !f.committed ? [{ cmd: "discardChange", label: hasSel && this.picks(f, sel).any ? "Discard selected lines…" : "Discard change…", key: "" }] : []),
       ...(this.lastReject ? [{ cmd: "reason", label: "Comment last rejection", key: this.kl("reason") }] : []),
       ...(hasSel ? [{ cmd: "clear", label: "Clear selection", key: "Esc" }] : []),
     ];
@@ -5535,6 +5549,7 @@ export default class Review extends View {
   }
 
   row(r, f, t, selected = false) {
+    if (r.kind === "@" && this.mode === "changes" && this.gitx) return this.gitx.hunkRow(r, f, t, ROW, GUTTER, BTN_GAP); // G6: Discard change
     if (r.kind === "@" && this.mode === "changes") {
       return h_flex().w_full().h(ROW).flex_none().items_center().bg(t.raised)
         .child(div().w(GUTTER).flex_none())
@@ -5698,6 +5713,7 @@ export default class Review extends View {
       .when(!(this.mode === "edit" && this.treeOn) && !!(this.ws || (this.wsBusy && this.wsBusySpace === this.spaceId)), (e) => e.child(this.workspacePanel(t)))
       .when(!!f && !!this.bar, (e) => e.child(this.findBar(f, t)))
       .when(!!ij && this.mode === "edit", (e) => e.child(this.inlineBar(ij, t)))
+      .when(this.mode === "changes" && !!this.gitx?.askBar(t), (e) => e.child(this.gitx.askBar(t))) // G6: Discard change's question
       .when(!!f?.conflict, (e) => e.child(h_flex().px(12).py(6).gap(8).items_center().bg(t.ansi3 + "22").text_size(12)
         .child(div().flex_1().child(f?.conflict?.theirs ? "The agent changed the same lines you're editing." : "The file was deleted while you were editing it."))
         .child(this.button("ours", "Keep mine", t.raised, (cx) => this.resolve("ours", cx)))
