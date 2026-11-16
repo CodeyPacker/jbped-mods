@@ -1,5 +1,8 @@
 {
   "global": {
-    "ctrl-shift-g": { "command": "layout.toggle", "args": { "id": "wayfindr" } }
+    "ctrl-shift-g": "mod.open:wayfindr"
+  },
+  "mod:wayfindr": {
+    "ctrl-shift-g": "wayfindr.close"
   }
 }

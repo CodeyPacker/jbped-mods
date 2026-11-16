@@ -13,17 +13,42 @@ Your Boards (kanban) and Pull Requests from GitHub and Azure DevOps, in their ow
 
    Give it no `size`: it takes the row's remaining width. Keep the ids `wayfindr`, `main` and `panel`: the palette, the key and the tab bar use them.
 3. Install the `tabs-plus` share from this repo (its README) and point the layout's `tabs` block at it. It shows a Wayfindr button for the block, and hides the terminals and the side panel while Wayfindr is shown. Without it there is no button and Wayfindr shows beside the terminals. The palette entries still work.
-4. Merge this share's `keys.json` into `~/.config/herdr-app/keys.json`: it binds `ctrl-shift-g` to `layout.toggle` for the `wayfindr` block. Pick another key if that one is taken.
+4. Merge this share's `keys.json` into `~/.config/herdr-app/keys.json`: it binds `ctrl-shift-g` to `mod.open:wayfindr` (show Wayfindr and give it the keyboard) and, in a `mod:wayfindr` section, to `wayfindr.close` (hide it while it holds the keyboard). Pick another key if that one is taken, in both places.
 5. Create `~/.config/herdr-app/data/wayfindr.json` (below).
 6. Sign in where the runner runs commands: `gh auth login`, the per-Profile `az login` that Wayfindr shows (below), or export the token variable for a PAT or ClickUp Account.
 
 ## Use
 
-Tab bar: the Wayfindr button. Palette: `Wayfindr: Open`, `Wayfindr: Toggle`, `Wayfindr: Close`, `Wayfindr: Switch Profile`, `Wayfindr: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfindr shows one Profile at a time, and switching saves it as `activeProfile` in `wayfindr.json` (rewritten as formatted JSON), so it holds across restarts. Open covers the whole work area: the terminals and the side panel are hidden. Close, Esc or the key gives them back, with the side panel as the space had it. Going to another space, by a click, a key or a Launch or Review that opens one, closes Wayfindr. Wayfindr remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfindr saves them through az into `data/wayfindr-images/` in the herdr-app folder, and deletes ones saved over 30 days ago (a Ticket shown again saves them again). Click another card to switch it, or the Board outside the cards to close it. Arrow keys move between cards (left and right skip empty Columns, Home and End jump in a Column), Enter opens the card, and while the detail panel is open it follows the arrows. Esc closes the detail panel, then a second Esc closes Wayfindr. Toggle (`ctrl-shift-g` with this share's `keys.json`) shows Wayfindr, or hides it when shown.
+Tab bar: the Wayfindr button. Palette: `Wayfindr: Open`, `Wayfindr: Toggle`, `Wayfindr: Close`, `Wayfindr: Switch Profile`, `Wayfindr: Refresh`. With two or more Profiles, the header shows a switcher for them. Wayfindr shows one Profile at a time, and switching saves it as `activeProfile` in `wayfindr.json` (rewritten as formatted JSON), so it holds across restarts. Open covers the whole work area: the terminals and the side panel are hidden. Close, Esc or the key gives them back, with the side panel as the space had it. Going to another space, by a click, a key or a Launch or Review that opens one, closes Wayfindr. Wayfindr remembers its view (Board, Pull Requests or Settings), Board and Mine choice in every space and across restarts. Click a card to open its detail panel on the right (fields, description, linked Pull Requests, comments). Azure images in the text and attached images show in the panel. Wayfindr saves them through az into `data/wayfindr-images/` in the herdr-app folder, and deletes ones saved over 30 days ago (a Ticket shown again saves them again). Click another card to switch it, or the Board outside the cards to close it. Keys are below, under Keys.
 
 ### Background checks
 
 Every `minutes` (default 5), Wayfindr refreshes the Profile's Pull Requests and followed Boards, whether it is shown or hidden. It posts a toast for each Pull Request that newly asks for your review and each Ticket newly assigned to you, up to five of each, plus one toast counting the rest. Clicking a toast opens Wayfindr, and if you open it within two minutes it lands on the Pull Requests view or the Board the toast came from. There is no toast for your own Pull Requests or for items on screen at that moment. An Account that needs a sign-in gets one toast per session. The first check after a start compares with the last saved data, so items that arrived while Herdr was closed are announced once. Settings has a "Background checks" tick per Profile. `minutes` is set in the file.
+
+## Keys
+
+The keys follow CodeyPacker's mods (`run`, `jump`, `branch`) and Dockr, so they are the same letters you use there. `ctrl-shift-g` (or the palette's `Wayfindr: Toggle`) shows Wayfindr and gives it the keyboard, and pressed again while Wayfindr holds the keyboard it hides Wayfindr and gives a terminal the keyboard. While Wayfindr holds the keyboard its border is the accent color, every Pull Request row has a letter, and a legend at the bottom shows the few keys that apply now. `?` lists every key that works now. A click outside Wayfindr hands the keyboard back. In a text box letters type: `esc` leaves the box and keeps a comment draft (a title edit is cancelled), `ctrl-enter` saves it.
+
+| Key | Action |
+|---|---|
+| `j` / `k`, `down` / `up`, `ctrl-n` / `ctrl-p` | move |
+| `g` / `G` (`home` / `end`) | first / last |
+| `enter` | open |
+| `r` | refresh (the view, or refetch the open Pull Request) |
+| `q` | close this layer; at the top, hide Wayfindr |
+| `esc` | as `q`, and leaves a text box |
+| `?` | every key that works now |
+| `b` / `p` | Board / Pull Requests view |
+| `o` / `y` | open the selected card or Pull Request in the browser / copy its URL |
+
+- **Board:** `h` / `l` (and `left` / `right`) previous and next Column with cards, `j` / `k` the card in the Column, `H` / `L` (and `shift-left` / `shift-right`) move the card one Column, `s` Launch, `enter` opens the detail panel, which then follows the cursor.
+- **Detail panel:** the Board's keys, plus `c` the comment box, `e` edit the title, `m` the Move to list (`j` / `k`, `enter` moves there, `q` closes it). With the Launch card open: `enter` launches, `q` closes the card.
+- **Pull Requests:** a cursor over every row (Mine, then Needs my review), a row's letter opens it, `s` Review. The list does not scroll to follow the cursor.
+- **Pull Request overlay and pane:** `j` / `k` next and previous file (`k` from the first file is the Overview), `g` Overview, `G` last file, `v` viewed, `c` Checks (the Overview), `p` Post review, `f` fullscreen and `s` Review (overlay only), `r` refetch, `q` closes the overlay (nothing in a pane: its header closes it).
+- **Post review:** `p` or `enter` asks to post when the review is ready, `q` back to the Overview. Then `y` posts, `n` or `q` cancels.
+- **Settings:** `q` or `esc` goes back to the last view. Its boxes take letters.
+- The legend and the `?` list come from `keys.js`, the same function that decides what a key does, so they never name a key that does nothing.
+- `kit/` is CodeyPacker's shared kit (MIT): the letter badges and the legend.
 
 ## Pull Request detail
 
@@ -31,7 +56,7 @@ Click a Pull Request row to open it as an overlay over the list, against the rig
 
 The rail starts with "N of M viewed" ("All M viewed" when done) and an "Overview" row, then the files in two groups: "Code", then "Tests, docs and generated" (test folders and `.test`/`.spec` files, docs and markdown, lock files, minified, snapshot and build output). Each file row shows its status letter, folder and name, `+added −deleted`, and an accent badge with its review thread count. Click a row to show that file. Click its first cell, or press `v` on the shown file, or use the "Viewed" / "Unviewed" button over its diff, to mark it viewed: the cell turns into a green check. Viewed marks are saved per PR under Herdr's home in `data/wayfindr/viewed/<repo>-pr-<n>.json`, with the PR's head commit: a new push clears them. Without a head commit they last until Wayfindr reloads.
 
-Keys while the overlay is open: `down` and `up` move through the Overview and the rail's files, `home` goes to the Overview, `v` marks the shown file viewed or not, `p` opens Post review, `f` toggles fullscreen, Esc closes the overlay (an open comment box, the review screen's confirm, then the review screen go first).
+The overlay's keys are under Keys.
 
 The Overview shows what the Ticket panel shows: author, branch into target, reviewers and their state, dates, "Open in browser", the description, the files summary line, and the comments. A file shows its diff with its review threads under the lines they are on: the first comment, then the replies indented. A resolved thread folds to one dim line, "Resolved · author: first line"; click it to open it, and "Fold" folds it again. Comments not on a file, and threads that can't go under a shown row (on no line, outdated, or on a line or file the diff doesn't show), stay in the Overview's Comments with their path and line. Each diff shows as numbered rows in the terminal font: hunk headers, then each line with its line number (the new file's, the old file's for a removed line), a +/− mark and a green or red tint for added and removed lines. Long lines scroll sideways. A file shows 500 rows before "Show N more lines". While it is open the list is dimmed and inert: click the dimmed list, or press Esc, to close it. The Review button is in the row and in the overlay's header.
 

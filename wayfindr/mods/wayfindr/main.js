@@ -1,12 +1,13 @@
 // Wayfindr: one Profile's Boards and Pull Requests, in its own "wayfindr" block in the layout's
 // "work-body" row. tabs-plus hides the terminals and the side panel while it shows.
-// Esc closes the Ticket detail panel, then closes Wayfindr.
+// Keys as CodeyPacker's mods and Dockr have them (keys.js): ctrl-shift-g shows Wayfindr and takes the keyboard,
+// j/k move, enter opens, q closes a layer, ? lists every key, and a legend shows the few that apply now.
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup, Scrollbar } from "gpui-base";
 import * as fs from "fs/promises";
-import { run, layout, props, panes, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
+import { run, layout, props, panes, focused, closeOverlay, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
@@ -22,6 +23,11 @@ import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due, POLL_MS } from "./cache.js";
 import { PR_CACHE_DIR, prCacheFile, parsePrCache, serializePrCache, detailStale, prunePrKeys } from "./prcache.js";
+import { keyAction, keyHints, coreHints, RESERVED } from "./keys.js";
+import { assignLetters, letterBadge, navigateByLetter } from "./kit/letters.js";
+import { legend } from "./kit/legend.js";
+
+const REQUEST = "wayfindr.request"; // the key's popup copy asks the main copy for the keyboard (D8)
 
 const VIEW_KEY = "wayfindr.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
@@ -189,13 +195,15 @@ function cloneChooser(id, review, t, inert = false) {
 // `review`: { state, start, choose, cancel } from reviewActions.
 // `select`: { selected, onClick, inert }, the row opens the Pull Request panel; inert while the overlay's
 // scrim covers the list (hit testing has no occlusion, so the row's hover is left off instead).
-function prRow(pr, t, review = null, select = null) {
+// `badge`: the row's letter (D7), drawn before its title while Wayfindr holds the keyboard, else null.
+function prRow(pr, t, review = null, select = null, badge = null) {
   const inert = Boolean(select?.inert);
   return h_flex().id(`wf-pr-${pr.key}`).gap(12).px(12).py(8).items_center().border_t(1).border_color(t.border)
     .when(Boolean(select?.selected), (el) => el.bg(t.selected))
     .when(Boolean(select) && !inert, (el) => el.cursor_pointer()
       .hover((s) => s.bg(select.selected ? t.selected : t.hover))
       .on_mouse_down("left", stop).on_click((_e, cx) => select.onClick(cx)))
+    .when(Boolean(badge), (el) => el.child(badge))
     .child(v_flex().flex_1().min_w(0).gap(4)
       .child(h_flex().gap(8).items_center().min_w(0)
         .when(pr.checks != null && pr.checks !== "none" && pr.checks in CHECK_MARK, (el) => el.child(div().flex_none().text_size(11).text_color(checkColor(pr.checks, t)).child(CHECK_MARK[pr.checks])))
@@ -258,6 +266,27 @@ function skeletonPr(t) {
 export default class Wayfindr extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
+    // Opened by its key (mod.open, D8): this popup copy shows the block, asks the main copy for the keyboard
+    // through shared state, and closes. A hidden block hears no commands; mod.open always runs.
+    this.passing = props()?.overlay != null;
+    if (this.passing) {
+      if (!isShown(layout(), (n) => n.content?.mod === "wayfindr")) run("layout.show", { id: "wayfindr" });
+      setShared(REQUEST, { n: Date.now(), kind: "keys" });
+      closeOverlay(props().overlay);
+      return;
+    }
+    // Keys (keys.js, D9). `kb`: Wayfindr holds the keyboard, asked of the handle at each render.
+    this.kb = false;
+    this.gone = false; // the keyboard left: a press outside, or a close
+    this.heldAt = 0; // when Wayfindr last drew holding the keyboard
+    this.gotFocus = false; // Herdr's "focus" command arrived during grabKeys
+    this.help = false; // the "?" list is shown
+    this.typed = ""; // letters typed toward a Pull Request row's hint
+    this.prCursor = null; // the selected Pull Request row's key (D6)
+    this.moveCursor = 0; // the Move list's highlighted Column
+    this.note = null; // { text, until }: shown in the legend's place, as "Copied"
+    this.lastView = "board"; // where Settings goes back to
+    this.seenRequest = shared(REQUEST)?.n ?? 0;
     // A pane copy (#30): Review's pane beside the agent, opened with pane.split props { pr: { account, pr } }.
     // It shows only that Pull Request: no views, no list, no Boards, no toasts.
     const pp = props()?.pr;
@@ -338,13 +367,14 @@ export default class Wayfindr extends View {
     let drawn = 0;
     cx.timer.every(2_000, (cx) => {
       const was = this.hidden;
+      this.takeRequest(cx);
       if (this.watch(cx) && (was || Date.now() - drawn >= 60_000)) { drawn = Date.now(); cx.notify(); }
     });
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
-        if (c === "focus") this.handle.focus();
-        else if (c === "close") this.close_();
+        if (c === "focus") { this.gotFocus = true; this.gone = false; this.handle.focus(); }
+        else if (c === "close") this.close_(cx);
         else if (c === "refresh") this.reload(cx);
         else if (c === "profile") await this.nextProfile(cx);
         cx.notify();
@@ -362,7 +392,7 @@ export default class Wayfindr extends View {
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
-        if (c === "focus") this.handle.focus();
+        if (c === "focus") { this.gone = false; this.handle.focus(); }
         else if (c === "refresh" && this.profile) this.fetchPr(cx, { force: true }); // Refresh always refetches (#31)
         cx.notify();
       }
@@ -394,8 +424,58 @@ export default class Wayfindr extends View {
     }
   }
 
-  // Hidden from now: the next show is noticed at once (it refreshes).
-  close_() { if (this.paneFor) return; run("layout.hide", { id: "wayfindr" }); this.hidden = true; }
+  // Hidden from now: the next show is noticed at once (it refreshes). The terminals come back, and the keyboard
+  // goes to one of them (D8): pane.go steps, 100 ms apart, until a terminal pane is focused.
+  close_(cx) {
+    if (this.paneFor) return;
+    run("layout.hide", { id: "wayfindr" });
+    this.hidden = true; this.gone = true; this.heldAt = 0; this.help = false; this.typed = "";
+    if (!cx) return;
+    cx.spawn(async (cx) => {
+      const dirs = ["right", "left", "down", "up"];
+      for (let i = 0; i < 6; i++) {
+        await cx.sleep(100);
+        if (this.terminalFocused()) return;
+        run("pane.go", { direction: dirs[i % dirs.length] });
+      }
+    });
+  }
+
+  // A terminal pane has the keyboard: focused() names a pane that panes() lists as focused.
+  terminalFocused() {
+    const f = focused();
+    return Boolean(f?.pane) && panes().some((p) => p.pane === f.pane && p.focused);
+  }
+
+  // The key's request (D8), from the popup copy through shared state.
+  takeRequest(cx) {
+    const req = shared(REQUEST);
+    if (!req?.n || req.n === this.seenRequest) return;
+    this.seenRequest = req.n;
+    if (req.kind === "keys") this.keysCommand(cx);
+  }
+
+  // The key (ctrl-shift-g): holding the keyboard a moment ago, it hides Wayfindr; else it takes the keyboard.
+  // Wayfindr's own key section (mod:wayfindr) hides it while it holds the keyboard; this covers that section missing,
+  // when the key's popup has just taken the keyboard off Wayfindr.
+  keysCommand(cx) {
+    if (Date.now() - this.heldAt < 1500) return this.close_(cx);
+    cx.spawn(async (cx) => { await this.grabKeys(cx); });
+  }
+
+  // Only Herdr moves the keyboard off a terminal, with pane.go, one step at a time: step until "focus" arrives.
+  async grabKeys(cx) {
+    if (this.grabbing) return;
+    this.grabbing = true;
+    this.gotFocus = false;
+    const dirs = ["right", "left", "down", "up"];
+    try {
+      for (let i = 0; i < 8 && !this.gotFocus; i++) {
+        run("pane.go", { direction: dirs[i % dirs.length] });
+        await cx.sleep(80); // lets the "focus" command arrive before the next step
+      }
+    } finally { this.grabbing = false; cx.notify(); }
+  }
 
   shownNow() { return Boolean(this.paneFor) || isShown(layout(), (n) => n.content?.mod === "wayfindr"); }
 
@@ -450,17 +530,17 @@ export default class Wayfindr extends View {
     return byColumn(b.trackedStatuses?.length ? trackColumns(data, b.trackedStatuses) : data, { mine });
   }
 
-  // Arrow keys move between cards and Columns (#20). Enter opens the card, and while the detail panel
-  // is open it follows the cursor. True when the key was used.
-  boardKey(key, cx, shift = false) {
+  // The Board's cursor keys (#20, keys.js): next/prev in a Column, colPrev/colNext to the next Column with cards,
+  // first/last in a Column, open the card. While the detail panel is open it follows the cursor.
+  // moveLeft/moveRight move the card under the cursor one Column over (#15). True when the action was used.
+  boardAct(action, cx) {
     const b = this.board, data = b && this.boards[b.id]?.data;
     if (this.view !== "board" || !data) return false;
     const cols = this.columnsOf(b, data);
     if (!cols.length) return false;
     let c = this.cursor?.board === b.id ? { ...this.cursor } : null;
-    // Shift with left or right moves the card under the cursor one Column over (#15).
-    if (c && shift && (key === "left" || key === "right")) {
-      const tk = cols[c.col]?.tickets[c.row], to = cols[c.col + (key === "left" ? -1 : 1)];
+    if (c && (action === "moveLeft" || action === "moveRight")) {
+      const tk = cols[c.col]?.tickets[c.row], to = cols[c.col + (action === "moveLeft" ? -1 : 1)];
       // GitHub's "No Status" is not a target. The cursor follows the card only when the Move started.
       if (tk && to && to.column.id !== NO_COLUMN && this.canMove(b) && this.moveCard(b, tk, to.column.id, cx)) {
         const now = this.columnsOf(b, this.boards[b.id].data);
@@ -470,27 +550,36 @@ export default class Wayfindr extends View {
       return true;
     }
     if (!c) {
-      if (!["left", "right", "up", "down", "enter"].includes(key)) return false;
+      if (action === "moveLeft" || action === "moveRight") return false;
       const first = Math.max(0, cols.findIndex((x) => x.tickets.length));
       c = { board: b.id, col: first, row: 0 };
-    } else if (key === "left" || key === "right") {
-      // To the next Column that has cards, keeping the row where it can.
-      const step = key === "left" ? -1 : 1;
+    } else if (action === "colPrev" || action === "colNext") {
+      const step = action === "colPrev" ? -1 : 1;
       let i = c.col + step;
       while (i >= 0 && i < cols.length && !cols[i].tickets.length) i += step;
       if (i < 0 || i >= cols.length) return true;
       c.col = i; c.row = Math.min(c.row, cols[i].tickets.length - 1);
-    } else if (key === "up") c.row = Math.max(0, c.row - 1);
-    else if (key === "down") c.row = Math.min(cols[c.col].tickets.length - 1, c.row + 1);
-    else if (key === "home") c.row = 0;
-    else if (key === "end") c.row = Math.max(0, cols[c.col].tickets.length - 1);
-    else if (key !== "enter") return false;
+    } else if (action === "prev") c.row = Math.max(0, c.row - 1);
+    else if (action === "next") c.row = Math.min(cols[c.col].tickets.length - 1, c.row + 1);
+    else if (action === "first") c.row = 0;
+    else if (action === "last") c.row = Math.max(0, cols[c.col].tickets.length - 1);
+    else if (action !== "open") return false;
     c.col = Math.min(c.col, cols.length - 1);
     c.row = Math.max(0, Math.min(c.row, cols[c.col].tickets.length - 1));
     this.cursor = c;
     const tk = cols[c.col].tickets[c.row];
-    if (tk && (key === "enter" || this.selected)) this.openTicket(b, tk, cx);
+    if (tk && (action === "open" || this.selected)) this.openTicket(b, tk, cx);
     return true;
+  }
+
+  // The card under the Board's cursor (the open one while the detail panel shows): { b, tk } or null.
+  cursorCard() {
+    const b = this.board, data = b && this.boards[b.id]?.data;
+    if (!data) return null;
+    if (this.selected?.boardId === b.id) return { b, tk: this.selected.summary };
+    const c = this.cursor?.board === b.id ? this.cursor : null;
+    const tk = c ? this.columnsOf(b, data)[c.col]?.tickets[c.row] : null;
+    return tk ? { b, tk } : null;
   }
 
   // Wranglr's worktree rule from its config file; null when Wranglr isn't set up or the file isn't readable.
@@ -761,6 +850,7 @@ export default class Wayfindr extends View {
       this.prOpen = {}; this.prBox.set_value(""); this.prSummary.set_value(""); this.prConfirm = null;
     }
     this.selectedPr = { account: accountId, pr };
+    this.prCursor = pr.key; // the list's cursor stays on this row when the overlay closes (D6)
     this.handle.focus(); // the row's click stops the root's, which would focus: Esc needs it
     // The cached copy shows at once; fetchPr refetches only when detailStale says the PR moved or the copy is old (#31).
     if (this.prDetails[pr.key]?.status !== "loading") this.fetchPr(cx);
@@ -1052,25 +1142,235 @@ export default class Wayfindr extends View {
     return [...g.code, ...g.side];
   }
 
-  // Keys while the Pull Request overlay is open (D5): down and up through the Overview and the rail's files,
-  // home to the Overview, v marks the shown file viewed, p opens Post review (#27), f toggles fullscreen (#29). True when the key was used.
-  // The Post review screen isn't in the rail's order: down from it goes to the first file, up to the Overview.
-  prKey(key, cx, mods = {}) {
+  // The overlay's file keys (D5): next and previous through the rail's order (previous from the first file is
+  // the Overview), first is the Overview, last the last file. The Post review screen isn't in the order: next
+  // from it goes to the first file, previous to the Overview.
+  prFile(action) {
     const sel = this.selectedPr;
-    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v", "p", "f"].includes(key)) return false;
-    const k = sel.pr.key, d = this.prDetails[k]?.data;
-    if (key === "f") { if (this.paneFor) return false; this.toggleFull(); return true; }
-    if (key === "p") {
-      if (!this.canWritePr(sel.account, "postReview")) return false;
-      this.prShown[k] = REVIEW_SCREEN;
-      return true;
+    if (!sel) return;
+    const k = sel.pr.key, order = this.railOrder(this.prDetails[k]?.data).map((f) => f.path);
+    const cur = this.prShown[k] ?? null, i = cur == null ? -1 : order.indexOf(cur);
+    if (action === "first") this.prShown[k] = null;
+    else if (action === "last") { if (order.length) this.prShown[k] = order[order.length - 1]; }
+    else if (action === "next") { if (i + 1 < order.length) this.prShown[k] = order[i + 1]; }
+    else if (action === "prev") this.prShown[k] = i <= 0 ? null : order[i - 1];
+  }
+
+  // The Pull Request list's rows in draw order (D6): Mine, then Needs my review, each by Account then repo, as
+  // prsView draws them. Each with its letter (D7): [{ account, pr, hint }].
+  prListRows() {
+    const p = this.profile, lists = this.prs?.data;
+    if (!p || !lists) return [];
+    const ok = lists.filter((l) => !l.error && this.signIn?.[l.account]?.ok !== false);
+    const rows = [];
+    for (const field of ["mine", "needsReview"]) {
+      for (const l of ok) for (const g of byRepo(l[field] ?? [])) for (const pr of g.prs) rows.push({ account: l.account, pr });
     }
-    const order = this.railOrder(d).map((f) => f.path), cur = this.prShown[k] ?? null, i = cur == null ? -1 : order.indexOf(cur);
-    if (key === "home") this.prShown[k] = null;
-    else if (key === "down") { if (i + 1 < order.length) this.prShown[k] = order[i + 1]; }
-    else if (key === "up") this.prShown[k] = i <= 0 ? null : order[i - 1];
-    else if (cur != null && cur !== REVIEW_SCREEN) this.toggleViewed(k, cur, cx);
-    return true;
+    const hints = assignLetters(rows.length, RESERVED);
+    rows.forEach((r, i) => { r.hint = hints[i]; });
+    return rows;
+  }
+
+  // Which keys apply (keys.js): the top layer now. `withHelp` false gives the layer under the "?" list.
+  layerNow(withHelp = true) {
+    if (withHelp && this.help) return "help";
+    const pane = Boolean(this.paneFor);
+    if (!pane && this.view === "settings") return "settings";
+    if (pane || this.view === "prs") {
+      const sel = this.selectedPr, k = sel?.pr.key;
+      if (!k) return "prs";
+      if (this.prConfirm === k) return "confirm";
+      if (this.prShown[k] === REVIEW_SCREEN && this.canWritePr(sel.account, "postReview")) return "review";
+      return "pr";
+    }
+    if (this.moveOpen) return "move";
+    if (this.selected && this.launch?.key === this.selected.summary.key && this.tickets[this.launch.key]?.data) return "launch";
+    if (this.selected) return "ticket";
+    return "board";
+  }
+
+  // What keyAction needs to know in `layer`.
+  keyFacts(layer) {
+    const p = this.profile;
+    if (!p) return {};
+    if (layer === "board" || layer === "ticket") {
+      const b = this.board, data = b && this.boards[b.id]?.data;
+      const hasRows = Boolean(data) && this.columnsOf(b, data).some((c) => c.tickets.length > 0);
+      const cc = this.cursorCard(), tk = cc?.tk, full = tk ? this.tickets[tk.key]?.data : null;
+      const open = layer === "ticket" && Boolean(full);
+      return { hasRows, url: Boolean(full?.url ?? tk?.url), canLaunch: Boolean(tk), canMove: Boolean(tk) && this.canMove(b),
+        canUpdate: open && this.canUpdate(b), canComment: open && this.canUpdate(b) };
+    }
+    if (layer === "prs") {
+      const rows = this.prListRows(), cur = rows.find((r) => r.pr.key === this.prCursor);
+      return { hasRows: rows.length > 0, url: Boolean(cur?.pr.url), canReview: Boolean(cur) };
+    }
+    if (layer === "pr" || layer === "review") {
+      const sel = this.selectedPr, k = sel.pr.key, d = this.prDetails[k]?.data, shown = this.prShown[k] ?? null;
+      const writable = this.canWritePr(sel.account, "postReview");
+      // In "review", canPost is what wakes the Post button: the review is ready and nothing is posting.
+      let ready = writable;
+      if (layer === "review") {
+        const mine = Boolean(d?.me && d.author?.id === d.me.id), verdicts = verdictsFor(mine);
+        const event = verdicts.some((v) => v.event === this.prVerdict[k]) ? this.prVerdict[k] : "comment";
+        ready = Boolean(d) && canPost(this.prComments[k]?.list ?? [], event, this.prSummary.value()) && this.prPosting?.status !== "busy";
+      }
+      return { pane: Boolean(this.paneFor), full: this.prFull, url: Boolean((d ?? sel.pr).url), canReview: true, canPost: ready,
+        hasFile: shown != null && shown !== REVIEW_SCREEN };
+    }
+    return {};
+  }
+
+  // Every key (D5): Esc as the ladder always had it, then nothing while a text box has the keyboard; then a
+  // letter toward a Pull Request row in the list, then keyAction. Handled keys stop here.
+  onKey(e, cx) {
+    if (e.key === "escape") {
+      this.typed = "";
+      const pane = Boolean(this.paneFor), prOn = pane || this.view === "prs", pk = this.selectedPr?.pr.key;
+      // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
+      if (this.typing === "pr" || (prOn && pk && this.prOpen[pk])) {
+        if (pk) this.closePrBox(pk); // the comment box: cancelled, before anything else (D5)
+        this.typing = false; this.handle.focus();
+      } else if (this.typing) {
+        if (this.typing === "title") this.editing = null;
+        this.typing = false;
+        this.handle.focus();
+      } else this.closeStep(cx);
+      cx.stop_propagation(); cx.notify(); return;
+    }
+    if (this.typing) return; // keys in a text box are for the text
+    if (!this.handle.is_focused()) return; // a Settings box or another element has the keyboard
+    const layer = this.layerNow(), m = e.modifiers ?? {};
+    // A Pull Request row's letter (D7), as Dockr's panelKey: only letters no key of the list uses.
+    if (layer === "prs" && /^[a-z]$/.test(e.key) && !m.shift && !m.control && !m.alt && !m.platform && !RESERVED.includes(e.key)) {
+      const rows = this.prListRows();
+      const state = { at: Math.max(0, rows.findIndex((r) => r.pr.key === this.prCursor)), typed: this.typed };
+      const nav = navigateByLetter(state, e, rows);
+      this.typed = state.typed;
+      if (nav === "hit") { const r = rows[state.at]; this.prCursor = r.pr.key; this.openPr(r.account, r.pr, cx); }
+      if (nav === "hit" || nav === "done") { cx.stop_propagation(); cx.notify(); return; }
+    }
+    this.typed = "";
+    const a = keyAction(layer, e.keystroke, this.keyFacts(layer));
+    if (!a) return;
+    cx.stop_propagation();
+    this.doKey(layer, a.action, cx);
+    cx.notify();
+  }
+
+  // One step back (Esc and q, D4): the top layer closes; at the top, Wayfindr hides.
+  closeStep(cx) {
+    const layer = this.layerNow(), k = this.selectedPr?.pr.key;
+    if (layer === "help") this.help = false;
+    else if (layer === "settings") this.showView(this.lastView === "settings" ? "board" : this.lastView, cx);
+    else if (layer === "move") this.moveOpen = null;
+    else if (layer === "launch") this.launch = null;
+    else if (layer === "confirm") this.prConfirm = null;
+    else if (layer === "review") { this.prShown[k] = null; this.prConfirm = null; } // back to the Overview (D7)
+    else if (layer === "pr") { if (!this.paneFor) this.closePr(); } // the pane copy (#30): nothing after its detail steps
+    else if (layer === "ticket") this.closeTicket();
+    else this.close_(cx);
+  }
+
+  // "Copied" in the legend's place for 2 s.
+  flash(text, cx) {
+    this.note = { text, until: Date.now() + 2000 };
+    cx.spawn(async (cx) => { await cx.sleep(2050); cx.notify(); });
+  }
+
+  // What a key's action does (D10).
+  doKey(layer, action, cx) {
+    const sel = this.selectedPr, k = sel?.pr.key;
+    const nav = action === "next" || action === "prev" || action === "first" || action === "last" || action === "open";
+    if (action === "help") { this.help = true; return; }
+    if (action === "hide") { this.help = false; return; }
+    if (action === "close" || action === "back" || action === "no") return this.closeStep(cx);
+    if (action === "refresh") return layer === "pr" || layer === "review" ? this.fetchPr(cx, { force: true }) : this.reload(cx);
+    if (action === "viewBoard" || action === "viewPrs") { this.showView(action === "viewBoard" ? "board" : "prs", cx); return; }
+    if (layer === "board" || layer === "ticket") {
+      if (nav || ["colPrev", "colNext", "moveLeft", "moveRight"].includes(action)) { this.boardAct(action, cx); return; }
+      const cc = this.cursorCard();
+      if (!cc) return;
+      const { b, tk } = cc, full = this.tickets[tk.key]?.data;
+      if (action === "browser" || action === "copy") {
+        const url = full?.url ?? tk.url;
+        if (!url) return;
+        if (action === "browser") cx.open_url(url); else { cx.write_to_clipboard(url); this.flash("Copied", cx); }
+      } else if (action === "launch") {
+        if (this.selected?.summary.key !== tk.key) this.openTicket(b, tk, cx);
+        this.openLaunch(full ?? tk, cx);
+      } else if (action === "comment") this.commentBox.focus();
+      else if (action === "edit") this.startEdit(tk, (full ?? tk).title);
+      else if (action === "move") {
+        const cols = this.moveCols(b, tk), cur = cols.findIndex((c) => c.here);
+        this.moveOpen = tk.key; this.moveCursor = Math.max(0, cur);
+      }
+      return;
+    }
+    if (layer === "move") {
+      const cc = this.cursorCard();
+      if (!cc) return;
+      const cols = this.moveCols(cc.b, cc.tk), n = cols.length;
+      if (action === "next") this.moveCursor = Math.min(n - 1, this.moveCursor + 1);
+      else if (action === "prev") this.moveCursor = Math.max(0, this.moveCursor - 1);
+      else if (action === "first") this.moveCursor = 0;
+      else if (action === "last") this.moveCursor = Math.max(0, n - 1);
+      else if (action === "pick") {
+        const c = cols[this.moveCursor];
+        this.moveOpen = null;
+        if (c && !c.here) this.moveCard(cc.b, cc.tk, c.id, cx);
+      }
+      return;
+    }
+    if (layer === "launch") {
+      const key = this.launch?.key, tk = key && this.tickets[key]?.data;
+      if (action === "start" && tk) this.startLaunch(tk, cx);
+      return;
+    }
+    if (layer === "prs") {
+      const rows = this.prListRows(), at = rows.findIndex((r) => r.pr.key === this.prCursor), cur = rows[at];
+      if (nav && rows.length) {
+        const i = action === "first" ? 0 : action === "last" ? rows.length - 1
+          : action === "next" ? Math.min(rows.length - 1, at + 1) : action === "prev" ? Math.max(0, at - 1) : Math.max(0, at);
+        this.prCursor = rows[i].pr.key;
+        if (action === "open") this.openPr(rows[i].account, rows[i].pr, cx);
+      } else if (cur && (action === "browser" || action === "copy") && cur.pr.url) {
+        if (action === "browser") cx.open_url(cur.pr.url); else { cx.write_to_clipboard(cur.pr.url); this.flash("Copied", cx); }
+      } else if (cur && action === "review") this.reviewActions(cur.account, cur.pr).start(cx);
+      return;
+    }
+    if (!sel) return;
+    if (nav) { this.prFile(action); return; }
+    const d = this.prDetails[k]?.data, url = (d ?? sel.pr).url;
+    if (action === "viewed") { const cur = this.prShown[k]; if (cur && cur !== REVIEW_SCREEN) this.toggleViewed(k, cur, cx); }
+    else if (action === "checks") this.prShown[k] = null;
+    else if (action === "post") this.prShown[k] = REVIEW_SCREEN;
+    else if (action === "full") this.toggleFull();
+    else if (action === "browser" && url) cx.open_url(url);
+    else if (action === "copy" && url) { cx.write_to_clipboard(url); this.flash("Copied", cx); }
+    else if (action === "review") this.reviewActions(sel.account, sel.pr).start(cx);
+    else if (action === "ask") { this.prConfirm = k; if (this.prPosting?.key === k) this.prPosting = null; }
+    else if (action === "yes") this.sendPrReview(cx);
+  }
+
+  // The legend at Wayfindr's foot while it holds the keyboard (D9): the few keys that apply now, the text
+  // box's two while typing, every key in two columns after "?", or "Copied" for 2 s.
+  keysFooter(t) {
+    if (this.help && !this.typing) {
+      const all = keyHints(this.layerNow(false), this.keyFacts(this.layerNow(false)));
+      const rows = [...all.filter(([k]) => k !== "?"), ["?, q, esc", "hide this list"]];
+      const half = Math.ceil(rows.length / 2);
+      const col = (list) => v_flex().flex_1().min_w(0).gap(3).children(list.map(([k, what]) => h_flex().w_full().h(18).gap(8).items_center().text_size(11)
+        .child(div().w(64).flex_none().font_semibold().text_color(t.accent).child(k))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(what))));
+      return h_flex().id("wf-keys").w_full().flex_none().px(12).py(10).gap(14).items_start().border_t(1).border_color(t.border).bg(t.raised)
+        .child(col(rows.slice(0, half))).child(col(rows.slice(half)));
+    }
+    const note = this.note && this.note.until > Date.now() ? this.note.text : null;
+    const layer = this.layerNow();
+    return h_flex().id("wf-legend").w_full().flex_none().px(12).py(8).border_t(1).border_color(t.border).bg(t.chrome)
+      .child(note ? div().text_size(12).text_color(t.muted).child(note)
+        : legend(t, this.typing ? [["enter", "back"], ["esc", "back"]] : coreHints(layer, this.keyFacts(layer))));
   }
 
   // Whether the Account's Provider can post reviews or replies (#27).
@@ -1135,6 +1435,7 @@ export default class Wayfindr extends View {
   // ---- Settings (#17): edits wayfindr.json. Each change is written at once, in order.
 
   openSettings(cx) {
+    if (this.view !== "settings") this.lastView = this.view;
     this.view = "settings"; save(VIEW_KEY, "settings");
     this.settingsError = null;
     this.ensureInputs();
@@ -1645,7 +1946,7 @@ export default class Wayfindr extends View {
       .child(h_flex().gap(2).items_center()
         .child(iconButton("wf-settings", "settings", t, (cx) => { this.openSettings(cx); cx.notify(); }, { on: this.view === "settings" }))
         .child(iconButton("wf-refresh", "refresh", t, (cx) => this.reload(cx)))
-        .child(iconButton("wf-close", "close", t, () => this.close_())));
+        .child(iconButton("wf-close", "close", t, (cx) => this.close_(cx))));
   }
 
   message(t, title, lines) {
@@ -1752,22 +2053,29 @@ export default class Wayfindr extends View {
     return true;
   }
 
+  // The Move list's Columns for a card: [{ id, name, here }], `here` its current one. GitHub's "No Status" is not
+  // a target: it shows only as the card's current Column.
+  moveCols(b, sum) {
+    const data = this.boards[b.id]?.data;
+    if (!data) return [];
+    const all = this.columnsOf(b, data), cur = all.find((x) => x.tickets.some((tk) => tk.key === sum.key))?.column.id;
+    return all.map((x) => x.column).filter((c) => c.id !== NO_COLUMN || c.id === cur).map((c) => ({ id: c.id, name: c.name, here: c.id === cur }));
+  }
+
   moveRow(t, b, sum) {
     const data = this.boards[b.id]?.data;
     if (!data || !this.canMove(b)) return null;
-    const cur = this.columnsOf(b, data).find((x) => x.tickets.some((tk) => tk.key === sum.key))?.column.id;
-    // GitHub's "No Status" is not a target: it shows only as the card's current Column.
-    const cols = this.columnsOf(b, data).map((x) => x.column).filter((c) => c.id !== NO_COLUMN || c.id === cur);
+    const cols = this.moveCols(b, sum);
     const m = this.moving?.key === sum.key ? this.moving : null;
     const open = this.moveOpen === sum.key;
-    const name = cols.find((c) => c.id === cur)?.name ?? "—";
+    const name = cols.find((c) => c.here)?.name ?? "—";
     const trigger = button("wf-move-trigger", h_flex().gap(6).items_center().child(name).child(svg("mods/workspace-chrome/chevron-down.svg").size(12)), t,
-      (cx) => { this.moveOpen = open ? null : sum.key; cx.notify(); }, { on: open });
-    // The current Column shows selected and is not a target.
+      (cx) => { this.moveOpen = open ? null : sum.key; this.moveCursor = Math.max(0, cols.findIndex((c) => c.here)); cx.notify(); }, { on: open });
+    // The current Column shows selected and is not a target. The key cursor (j/k) has an accent border.
     const list = v_flex().id("wf-move-list").min_w(180).p(4).rounded(6).bg(t.popover).border_1().border_color(t.border).on_mouse_down("left", stop).on_scroll_wheel(stop)
-      .children(cols.map((c) => {
-        const here = c.id === cur;
-        return h_flex().id(`wf-move-${c.id}`).px(10).h(26).items_center().rounded(4).text_size(12)
+      .children(cols.map((c, i) => {
+        const here = c.here, keyed = this.kb && i === this.moveCursor;
+        return h_flex().id(`wf-move-${c.id}`).px(10).h(26).items_center().rounded(4).text_size(12).border_1().border_color(keyed ? t.accent : t.popover)
           .text_color(here ? t.foreground : t.muted).when(here, (el) => el.bg(t.selected))
           .when(!here, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { this.moveOpen = null; this.moveCard(b, sum, c.id, cx); cx.notify(); }))
@@ -1886,7 +2194,7 @@ export default class Wayfindr extends View {
     // A second Launch selects the space it made (D18), found by the Ticket's id: a title edit renames the Ticket.
     const name = launchSpaceName(tk);
     const open = spaces().find((x) => x.name?.startsWith(`${tk.id} `) || x.name === name);
-    if (open) { run("space.select", { id: open.id }); this.launch = null; this.close_(); return; }
+    if (open) { run("space.select", { id: open.id }); this.launch = null; this.close_(cx); return; }
     const repos = this.launchRepos().filter((r) => L.selected.includes(r.id));
     let argv;
     const tpl = this.launchTemplate();
@@ -1904,7 +2212,7 @@ export default class Wayfindr extends View {
         const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, argv);
         run("space.new", { name, ...target, task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
-        this.close_(); // the space is what you came for
+        this.close_(cx); // the space is what you came for
       } catch (e) {
         L.status = "error"; L.error = `Launch failed: ${e.message ?? e}`;
       }
@@ -2011,7 +2319,7 @@ export default class Wayfindr extends View {
       // The pane too, unless the space has a Wayfindr pane already (#30).
       const repo = this.profile?.repos.find((r) => r.prRepo && sameRepo(r.prRepo, pr.repo));
       if (resolveTemplate(DEFAULT_REVIEW, this.state.templates?.review, repo?.review).pane !== false) this.openReviewPane(name, accountId, pr, cx);
-      this.close_(); return;
+      this.close_(cx); return;
     }
     // The Profile as the Review started: a reload during an await must not mix in another's.
     const p = this.profile;
@@ -2057,7 +2365,7 @@ export default class Wayfindr extends View {
         const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, agentArgv(tpl));
         run("space.new", { name, ...target, task: reviewPrompt(pr, info, made.path, tpl) });
         if (tpl.pane !== false) this.openReviewPane(name, accountId, pr, cx);
-        this.close_();
+        this.close_(cx);
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
         else delete this.reviews[pr.key];
@@ -2216,6 +2524,10 @@ export default class Wayfindr extends View {
     const ok = lists.filter((l) => !l.error && !signedOut(l.account));
     const accounts = new Map(p.accounts.map((a) => [a.id, a]));
     const note = (text, color = t.dim) => div().text_size(12).text_color(color).child(text);
+    // The key cursor and letters (D6, D7): the cursor starts on the first row. No scroll handle follows it.
+    const rows = this.prListRows(), hintOf = new Map(rows.map((r) => [r.pr.key, r.hint]));
+    if (rows.length && !rows.some((r) => r.pr.key === this.prCursor)) this.prCursor = rows[0].pr.key;
+    const keyed = this.kb && !this.selectedPr;
     const section = (title, field) => {
       const total = ok.reduce((n, l) => n + l[field].length, 0);
       const groups = ok.filter((l) => l[field].length > 0).flatMap((l) => {
@@ -2225,7 +2537,8 @@ export default class Wayfindr extends View {
           ...byRepo(l[field]).map((g) => v_flex().rounded(8).bg(t.surface).border_1().border_color(t.border).overflow_hidden()
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
             .children(g.prs.map((pr) => prRow(pr, t, this.reviewActions(l.account, pr),
-              { selected: this.selectedPr?.pr.key === pr.key, inert, onClick: (cx) => this.openPr(l.account, pr, cx) })))),
+              { selected: this.selectedPr?.pr.key === pr.key || (keyed && this.prCursor === pr.key), inert, onClick: (cx) => this.openPr(l.account, pr, cx) },
+              keyed && hintOf.has(pr.key) ? letterBadge(t, hintOf.get(pr.key), this.typed, this.prCursor === pr.key) : null)))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
       });
@@ -2655,48 +2968,35 @@ export default class Wayfindr extends View {
   }
 
   render(cx) {
+    if (this.passing) return div();
     if (this.hidden && !this.paneFor) this.watch(cx); // just shown: refresh in the background
+    if (!this.paneFor) this.takeRequest(cx);
     const t = theme();
-    const pane = Boolean(this.paneFor), prOn = pane || this.view === "prs";
-    const root = v_flex().id("wf-root").size_full().bg(t.background)
+    const pane = Boolean(this.paneFor);
+    // The handle still answers "focused" in the render after a press elsewhere or a close, so `gone` says so (D9).
+    this.kb = (this.handle.is_focused() && !this.gone) || Boolean(this.typing);
+    if (this.kb) this.heldAt = Date.now();
+    const root = v_flex().id("wf-root").size_full().bg(t.background).border_1().border_color(this.kb ? t.accent : t.border)
       .track_focus(this.handle)
       // A press anywhere in Wayfindr closes the Move dropdown; its trigger and list stop their own.
-      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.prDrag = null; this.railDrag = null; if (this.moveOpen) { this.moveOpen = null; cx.notify(); } })
+      .on_mouse_down("left", (_e, cx) => { this.handle.focus(); this.gone = false; this.prDrag = null; this.railDrag = null; if (this.moveOpen) { this.moveOpen = null; } cx.notify(); })
       // The Pull Request overlay's edge drag: moves over Wayfindr resize it, the release keeps it.
       .on_mouse_move((e, cx) => this.prDragMove(e, cx))
       .on_mouse_up("left", (_e, cx) => this.prDragEnd(cx))
-      .on_key_down((e, cx) => {
-        if (e.key === "escape") {
-          // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
-          const pk = this.selectedPr?.pr.key;
-          if (this.typing === "pr" || (prOn && pk && this.prOpen[pk])) {
-            if (pk) this.closePrBox(pk); // the comment box: cancelled, before anything else (D5)
-            this.typing = false; this.handle.focus();
-          } else if (this.typing) {
-            if (this.typing === "title") this.editing = null;
-            this.typing = false;
-            this.handle.focus();
-          } else if (this.moveOpen) this.moveOpen = null;
-          else if (prOn && pk && this.prConfirm === pk) this.prConfirm = null;
-          else if (prOn && pk && this.prShown[pk] === REVIEW_SCREEN) this.prShown[pk] = null; // back to the Overview (D7)
-          else if (pane) { /* the pane copy (#30): nothing after its detail steps */ }
-          else if (this.view === "prs" && this.selectedPr) this.closePr();
-          else if (this.selected) this.closeTicket(); else this.close_();
-          cx.notify(); return;
-        }
-        if (this.typing) return; // keys in a text box are for the text
-        if (prOn && this.selectedPr && this.prKey(e.key, cx, e.modifiers ?? {})) { cx.stop_propagation(); cx.notify(); return; }
-        if (!pane && this.boardKey(e.key, cx, Boolean(e.modifiers?.shift))) { cx.stop_propagation(); cx.notify(); }
-      });
+      .on_key_down((e, cx) => this.onKey(e, cx))
+      // A press outside: the keyboard has gone, so no letters, legend or accent border (not in the pane copy).
+      .when(!pane, (el) => el.on_mouse_down_out((_e, cx) => { if (!this.gone) { this.gone = true; this.help = false; this.typed = ""; cx.notify(); } }));
+    const footer = this.kb ? this.keysFooter(t) : null;
     // The pane copy (#30): only the Pull Request, at full size. A config that won't load says so instead.
     if (pane) {
       const s = this.state;
       if (s.status === "missing") return root.child(this.message(t, "No configuration yet", [`Open Wayfindr's Settings to add a profile (${s.path}).`]));
       if (s.status === "invalid") return root.child(this.message(t, "The configuration has problems", [s.path, ...s.errors]));
-      return root.child(this.prContent(t));
+      return root.child(v_flex().id("wf-pane-body").flex_1().min_h(0).child(this.prContent(t))).when(Boolean(footer), (el) => el.child(footer));
     }
     return root
       .child(this.header(t))
-      .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)));
+      .child(v_flex().id("wf-body").flex_1().min_h(0).child(this.body(t)))
+      .when(Boolean(footer), (el) => el.child(footer));
   }
 }
