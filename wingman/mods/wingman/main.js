@@ -33,7 +33,7 @@ import { PAIRS, typed, inEmptyPair, betweenBrackets } from "./pairs.js";
 import { tagKind, closingTag, completeClose, betweenTags } from "./tags.js";
 import { segments, segmentOf } from "./wrap.js";
 import { git, onWindows, toWsl } from "./git.js";
-import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
+import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, whereLabel, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
 import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
 import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
@@ -3125,9 +3125,9 @@ export default class Review extends View {
   async runInline(j, seq, prompt, cx) {
     const template = String(this.settings.inlineCommand ?? "").trim() || INLINE_COMMAND;
     const name = commandWords(template)[0] ?? "the command";
-    let tmp = null, r, started = Date.now();
+    let tmp = null, r, started = Date.now(), where = null;
     try {
-      const where = await this.inlineWhere(j.store, name);
+      where = await this.inlineWhere(j.store, name);
       // {promptFile}: the prompt in a temp file under data/wingman, removed afterwards.
       if (usesFile(template)) {
         if (where.on) throw new Error("{promptFile} works only for files on this computer: use {prompt}");
@@ -3144,7 +3144,7 @@ export default class Review extends View {
     const elapsed = Date.now() - started, live = this.inlineLive(j, seq);
     log(`inline edit ${j.rel} lines ${j.t.a + 1}-${j.t.b + 1}: ${r instanceof Error ? `error ${r.message}` : `exit ${r.code}, ${r.stdout.length} chars`} in ${elapsed} ms${live ? "" : " (cancelled)"}`);
     if (!live) return;
-    const why = runFailure(r, { name, elapsed, timeout: INLINE_MS });
+    const why = runFailure(r, { name, elapsed, timeout: INLINE_MS, where: whereLabel(where) });
     if (why) return this.inlineFailed(j, why, cx);
     const answer = cleanAnswer(r.stdout);
     if (!answer) return this.inlineFailed(j, `${name} gave no answer`, cx);

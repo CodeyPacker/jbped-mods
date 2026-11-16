@@ -15,7 +15,7 @@ import { readInfo, runSync, counts, cantSync, cantPublish, fetchArgs, pullArgs, 
 import { nameProblem, checkArgs, LIST, parseBranches, switchArgs, createArgs, unsavedIn, unsavedMessage, ago } from "./branches.js";
 import { cantDiscard, discardText, reviewWrites, discardQuestion, discardWhat } from "./hunkdiscard.js";
 import { buildPrompt, cleanMessage, parseSubjects, newFileDiff, SUBJECT_ARGS, diffArgs } from "./commitmsg.js";
-import { expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
+import { expand as expandCommand, usesFile, failure as runFailure, whereLabel, words as commandWords, DEFAULT_COMMAND, TIMEOUT_MS } from "./inlineedit.js";
 import { plan as runPlan } from "./toolpath.js";
 import { READ } from "./changes.js";
 import { idOf } from "./remote.js";
@@ -431,7 +431,7 @@ export class GitActions {
       const [diff, subj] = await Promise.all([this.diffOf(st, files, !!head), head ? h.git(st, [...READ, ...SUBJECT_ARGS]) : null]);
       const prompt = buildPrompt({ repo: h.repoName(st), files: files.map((f) => ({ rel: f.rel, letter: f.letter, add: f.add, del: f.del, binary: f.error === "binary file" })), diff, subjects: subj?.code === 0 ? parseSubjects(subj.stdout) : [] });
       // The inline edit command's runner, as runInline uses it: where (this computer, WSL, the machine), {promptFile}.
-      const where = await h.inlineWhere(st, job.name);
+      const where = job.where = await h.inlineWhere(st, job.name);
       if (usesFile(template)) {
         if (where.on) throw new Error("{promptFile} works only for files on this computer: use {prompt}");
         const dir = `${appHome()}/data/wingman`;
@@ -447,7 +447,7 @@ export class GitActions {
     } catch (e) { r = e instanceof Error ? e : new Error(String(e?.message ?? e)); this.log(`commit message: ${r.message}`); }
     finally { if (tmp) await fs.unlink(tmp).catch(() => {}); }
     if (!live()) return;
-    const why = runFailure(r, { name: job.name, elapsed: ms, timeout: TIMEOUT_MS });
+    const why = runFailure(r, { name: job.name, elapsed: ms, timeout: TIMEOUT_MS, where: whereLabel(job.where) });
     const draft = why ? null : cleanMessage(r.stdout);
     if (!draft) { Object.assign(job, { status: "error", note: why ?? `${job.name} gave no answer` }); h.paint(cx); return; }
     job.draft = draft; job.ms = ms;
