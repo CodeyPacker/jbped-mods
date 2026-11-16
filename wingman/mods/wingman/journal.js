@@ -14,6 +14,10 @@ import { writeText, removeFile, readOn, execOn } from "./fsx.js";
 import { REMOTE, remotePath, rootId, addressOn, idOn, mapLimit } from "./remote.js";
 import { DIR_SH } from "./hooksetup.js";
 import { noteSession } from "./sessionlog.js";
+import { notePrompt } from "./checkpoints.js";
+
+/** A UserPromptSubmit event (hook "prompt"): its prompt's first line titles the turn's checkpoint, nothing is reviewed. */
+const isPrompt = (event) => event?.hook_event_name === "UserPromptSubmit" && typeof event.prompt === "string";
 
 export const reviewDir = () => `${appHome()}/data/wingman`;
 const SPACES = () => `${reviewDir()}/spaces.json`;
@@ -85,15 +89,18 @@ export class Journal {
         if (text) {
           const { terminal, event } = JSON.parse(text);
           noteSession(terminal, event); // the session log's name for this Claude (sessionlog.js)
-          const space = terminals().find((t) => t.address === terminal)?.labels?.["herdr.space"] ?? null;
-          const r = await this.apply(event, terminal);
-          this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${r?.added ? "added" : r ? "already reviewed" : "not in a repo"}`);
-          if (r && space) spaces.push([space, r.root]);
-          if (r?.added) adopted++;
-          // Claude's own folder belongs to the space too, even before it edits there.
-          const cwd = hostPath(event.cwd);
-          const home = cwd && (await this.storeFor(cwd));
-          if (home && space) spaces.push([space, home.root]);
+          if (isPrompt(event)) { notePrompt(terminal, event.prompt); this.log(`hook ${terminal} prompt`); }
+          else {
+            const space = terminals().find((t) => t.address === terminal)?.labels?.["herdr.space"] ?? null;
+            const r = await this.apply(event, terminal);
+            this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${r?.added ? "added" : r ? "already reviewed" : "not in a repo"}`);
+            if (r && space) spaces.push([space, r.root]);
+            if (r?.added) adopted++;
+            // Claude's own folder belongs to the space too, even before it edits there.
+            const cwd = hostPath(event.cwd);
+            const home = cwd && (await this.storeFor(cwd));
+            if (home && space) spaces.push([space, home.root]);
+          }
         }
       } catch (e) {
         // Keep the event for a retry (a file may be mid-write); drop it after 3 failures.
@@ -141,14 +148,17 @@ export class Journal {
         if (texts[i].text) {
           const { terminal: id, event } = JSON.parse(texts[i].text), terminal = addressOn(on, id);
           noteSession(terminal, event);
-          const space = agents().find((a) => a.address === terminal)?.space ?? null;
-          const res = await this.apply(event, terminal, on);
-          this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${res?.added ? "added" : res ? "already reviewed" : "not in a repo"}`);
-          if (res && space) spaces.push([space, res.root]);
-          if (res?.added) adopted++;
-          const cwd = remotePath(event?.cwd);
-          const home = cwd && (await this.storeFor(cwd, on));
-          if (home && space) spaces.push([space, home.root]);
+          if (isPrompt(event)) { notePrompt(terminal, event.prompt); this.log(`hook ${terminal} prompt`); }
+          else {
+            const space = agents().find((a) => a.address === terminal)?.space ?? null;
+            const res = await this.apply(event, terminal, on);
+            this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${res?.added ? "added" : res ? "already reviewed" : "not in a repo"}`);
+            if (res && space) spaces.push([space, res.root]);
+            if (res?.added) adopted++;
+            const cwd = remotePath(event?.cwd);
+            const home = cwd && (await this.storeFor(cwd, on));
+            if (home && space) spaces.push([space, home.root]);
+          }
         }
       } catch (e) {
         const n = (this.failures.get(key) ?? 0) + 1;

@@ -60,18 +60,29 @@ export function applyPlan(c, p) {
 export async function capturePass(c, starting = false, log = () => {}) {
   const remote = !!c.capture.store?.on;
   const st = await c.capture.state();
+  // G4: each snapshot that starts a working period (or follows a branch switch in one) is also kept
+  // as a checkpoint (capture.checkpoint), its id in capture.json (`cp`); every pass after notes the
+  // files the turn changed so far (capture.turnFiles).
   if (!st.tree) {
-    if (c.active) { const tree = await c.capture.snapshot(); await c.capture.setState({ tree, since: Date.now(), branch: await c.capture.store.branch() }); c.last = tree; log(`snapshot ${tree}`); }
+    if (c.active) {
+      const tree = await c.capture.snapshot(), since = Date.now(), branch = await c.capture.store.branch();
+      const cp = (await c.capture.checkpoint?.(tree, branch, c, since)) ?? null;
+      await c.capture.setState({ tree, since, branch, ...(cp ? { cp } : {}) }); c.last = tree; log(`snapshot ${tree}`);
+    }
     else c.after = false;
   } else if (!starting) {
     const now = await c.capture.snapshot();
     const branch = st.branch != null && now !== st.tree ? await c.capture.store.branch() : st.branch;
     if (branch !== st.branch) {
-      if (c.active) await c.capture.setState({ tree: now, since: Date.now(), branch });
+      if (c.active) {
+        const since = Date.now(), cp = (await c.capture.checkpoint?.(now, branch, c, since)) ?? null;
+        await c.capture.setState({ tree: now, since, branch, ...(cp ? { cp } : {}) });
+      }
       log(`${c.capture.store.root}: now on ${branch} (snapshot on ${st.branch}): nothing adopted, ${c.active ? `snapshot ${now}` : "done"}`);
     } else if (!(remote && now === c.last)) {
       const added = await c.capture.adopt(st.tree, now, c.by, c.space);
       if (added) log(`adopted ${added} files${remote ? ` on ${c.capture.store.on}` : ""}`);
+      await c.capture.turnFiles?.(st.cp, st.tree, now, c, st.since ?? 0);
     }
     c.last = now;
     if (!c.active) { await c.capture.setState({ tree: null }); c.after = false; }

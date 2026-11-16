@@ -54,6 +54,8 @@ import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
 import { fitBar, hunkButtons, withKey } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
+import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
+import { isClaude } from "./sessionlog.js";
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
 const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
@@ -240,6 +242,8 @@ export default class Review extends View {
             settings: [null, async () => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.setKeymap(await loadKeys()); }],
             // The settings popup installed or removed the Claude hook on a machine: look again now.
             hook: [null, () => { forgetHook(); for (const j of this.loop.journals?.values() ?? []) j.at = 0; }],
+            // G4: the checkpoints dialog, from the Review copy only (one dialog however many copies show).
+            checkpoints: [null, () => { if (this.mode === "review") this.openCheckpoints(cx); }],
           }[c];
           // Every action (a key keys.json sends as wingman.<action>, e.g. "alt-up": "wingman.moveLineUp",
           // or the menu's reject, accept, reason) goes through the same focus rule as its key (act).
@@ -285,6 +289,7 @@ export default class Review extends View {
     this.captureTimers(cx);
     cx.timer.every(STATS_MS, () => this.logStats());
     cx.timer.every(1000, (cx) => this.anchorComments(cx));
+    this.cpCounts = new Map(); cx.timer.every(3000, (cx) => this.countCheckpoints(cx)); // G4: the header's Checkpoints N, per space
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Session log source (agentview.js): reads only while this copy shows Agent files or Review.
     this.agentFiles = new AgentFiles(this); cx.timer.every(5000, (cx) => this.agentFiles.tick(cx));
@@ -1338,6 +1343,8 @@ export default class Review extends View {
           // Changes: a row still loading goes to the line once its hunks are in (loadRow).
           if (f?.lazy && g.at) this.gotoLine = { key: f.key, line }; else this.toLine(f, line);
         }
+        // G4: a checkpoint's file with nothing to review here opens in Edit.
+        else if (store && g.open && this.view === "review") this.handOff("edit", cx, g.at, g.key);
         this.paint(cx);
       }
     }
@@ -3076,6 +3083,46 @@ export default class Review extends View {
     openOverlay({ mod: "wingman", props: { form: "comment", space: draft.space, draft }, kind: "dialog", width: 560, height: 300 });
   }
 
+  // ---- G4: checkpoints (checkpoints.js) ---------------------------------------------------------
+  // The capture leader keeps one per agent turn and repo. The header's Checkpoints N opens the list
+  // for the shown space (a dialog copy, form "checkpoints"), where a turn's files show and Restore runs.
+
+  /** The shown space's git repos, as the checkpoints dialog takes them. */
+  cpRepos() { return this.stores.filter((st) => !st.plain).map((st) => ({ root: st.root, gitDir: st.gitDir, on: st.on ?? null, name: this.repoName(st) })); }
+
+  /**
+   * The header's Checkpoints count: the shown space's turns. Every 3 s while Review shows; a repo on
+   * another machine is read at most every REMOTE.reconcileMs (a call there each time).
+   */
+  countCheckpoints(cx) {
+    const space = this.spaceId, stores = this.stores.filter((st) => !st.plain);
+    if (this.cpCounting || !space || this.mode !== "review" || !stores.length) return;
+    this.cpCounting = true;
+    cx.spawn(async (cx) => {
+      try {
+        const repos = [];
+        for (const st of stores) {
+          if (!st.on || Date.now() - (st.cpAt ?? 0) >= REMOTE.reconcileMs) {
+            st.cpAt = Date.now();
+            st.cpData = parseCheckpoints(await st.read(`${st.dir}/checkpoints.json`).catch(() => null));
+          }
+          repos.push({ key: idOf(st), name: "", data: st.cpData });
+        }
+        const n = turnRows(repos, space).length;
+        if (this.cpCounts.get(space) !== n) { this.cpCounts.set(space, n); this.paint(cx); }
+      } catch (e) { log(`checkpoints count: ${e.message ?? e}`); }
+      finally { this.cpCounting = false; }
+    });
+  }
+
+  /** The header's Checkpoints N and the command wingman.checkpoints: the checkpoints dialog for the shown space. */
+  openCheckpoints(cx) {
+    if (!this.spaceId) return;
+    const repos = this.cpRepos();
+    if (!repos.length) { this.error = "Checkpoints are kept for git repos only, and this space has none"; this.paint(cx); return; }
+    openOverlay({ mod: "wingman", props: { form: "checkpoints", space: this.spaceId, repos }, kind: "dialog", width: 760, height: 600 });
+  }
+
   /** The header's Comments count and alt-shift-m: the comments dialog for the shown space. */
   openCommentList() {
     if (!this.spaceId) return;
@@ -4299,6 +4346,7 @@ export default class Review extends View {
     }
     if (this.form.form === "comment") return this.initCommentForm(cx);
     if (this.form.form === "comments") return this.initCommentList(cx);
+    if (this.form.form === "checkpoints") return this.initCheckpoints(cx);
     this.text = "";
     // A text area: Enter adds a line, Ctrl+Enter sends (also caught on the form, in case the
     // text area doesn't report it as a submit).
@@ -4546,6 +4594,208 @@ export default class Review extends View {
     cx.write_to_clipboard(this.promptFor(cs, address));
     this.note = address ? `Prompt copied, paths as ${agentLabel(agents().find((a) => a.address === address) ?? { address })} sees them` : "Prompt copied, with full paths (no single agent to send to)";
     this.paint(cx);
+  }
+
+  // ---- G4: the checkpoints dialog (props.form "checkpoints": { space, repos: [{ root, gitDir, on, name }] }) ----
+  // Rows are turns (checkpoints.turnRows), newest first. A row picked shows its files (a click opens
+  // one in Review, else Edit) and Restore to before this turn, which asks first. The restore runs
+  // here (planRestore, applyRestore), so Esc waits while it runs.
+
+  initCheckpoints(cx) {
+    this.formHandle = cx.focus_handle(); this.formHandle.focus();
+    this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to another machine
+    const repos = (Array.isArray(this.form.repos) ? this.form.repos : []).filter((r) => typeof r?.root === "string" && typeof r?.gitDir === "string");
+    this.cp = { repos: repos.map((r) => { const store = new Store(r.root, r.gitDir, r.on ?? null); return { store, key: idOf(store), name: r.name || base(r.root) }; }),
+      rows: null, sel: null, confirm: null, busy: null, note: null, loading: false };
+    this.loadCheckpoints(cx);
+    cx.timer.every(2000, (cx) => this.loadCheckpoints(cx));
+    // Commands for keys and tests: wingman.cpNext / cpPrev / cpOpen / cpRestore / cpConfirm / cpCancel.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = String(await nextCommand()).replace(/^wingman\./, "");
+        this.cpCommand(c, cx);
+        this.paint(cx);
+      }
+    });
+  }
+
+  /** Reads every repo's checkpoints.json again (not while a restore is asked or runs). */
+  loadCheckpoints(cx) {
+    const cp = this.cp;
+    if (!cp || cp.loading || cp.busy || cp.confirm) return;
+    cp.loading = true;
+    cx.spawn(async (cx) => {
+      try {
+        const repos = [];
+        for (const r of cp.repos) repos.push({ key: r.key, name: r.name, data: parseCheckpoints(await r.store.read(`${r.store.dir}/checkpoints.json`).catch(() => null)) });
+        cp.rows = turnRows(repos, this.form.space);
+        if (!cp.rows.some((x) => x.id === cp.sel)) cp.sel = cp.rows[0]?.id ?? null;
+      } catch (e) { cp.note = `Checkpoints not read: ${e.message ?? e}`; cp.rows ??= []; }
+      finally { cp.loading = false; }
+      this.paint(cx);
+    });
+  }
+
+  cpRow() { return this.cp?.rows?.find((r) => r.id === this.cp.sel) ?? null; }
+
+  cpCommand(c, cx) {
+    const cp = this.cp, rows = cp?.rows ?? [];
+    if (!cp) return;
+    const at = rows.findIndex((r) => r.id === cp.sel);
+    const go = {
+      cpNext: () => { if (!cp.busy && rows.length) { cp.sel = rows[Math.min(rows.length - 1, at + 1)].id; cp.confirm = null; } },
+      cpPrev: () => { if (!cp.busy && rows.length) { cp.sel = rows[Math.max(0, at - 1)].id; cp.confirm = null; } },
+      cpOpen: () => { const f = this.cpRow()?.files[0]; if (f) this.cpOpenFile(f); },
+      cpRestore: () => this.cpAsk(cx),
+      cpConfirm: () => this.cpRestore(cx),
+      cpCancel: () => { if (!cp.busy) cp.confirm = null; },
+    }[c];
+    go?.();
+  }
+
+  /** Opens a checkpoint's file and closes the dialog: in the Review panel (which hands it to Edit when it has nothing to review), else a pane copy's Edit. */
+  cpOpenFile(f) {
+    const r = this.cp.repos.find((x) => x.key === f.key);
+    if (!r || this.cp.busy) return;
+    closeOverlay(this.form.overlay); // as the comments dialog's Jump: the file shows behind it
+    const at = { line: 0, col: 0 }, key = `${r.store.root}|${f.rel}`;
+    if (hasView("review")) { showView("review"); setShared(GOTO, { view: "review", space: this.form.space, key, at, open: true, stamp: Date.now() }); return; }
+    if (hasView("edit")) { showView("edit"); setShared(GOTO, { view: "edit", space: this.form.space, key, at, stamp: Date.now() }); return; }
+    setShared(CMT_JUMP, { space: this.form.space, root: r.store.root, rel: f.rel, line: 0, stamp: Date.now() });
+  }
+
+  /** The row's parts with their stores, for planRestore. */
+  cpParts(row) {
+    return row.parts.map((p) => ({ ...p, store: this.cp.repos.find((r) => r.key === p.key)?.store })).filter((p) => p.store);
+  }
+
+  /** File keys ("<root>|<rel>") with unsaved edits in any Wingman copy (DIRTY). */
+  cpHeld(keys) {
+    const now = Date.now(), held = new Set();
+    for (const v of Object.values(shared(DIRTY) ?? {})) if (now - (v?.at ?? 0) <= DIRTY_FRESH) for (const k of v.keys ?? []) held.add(k);
+    return keys.filter((k) => held.has(k));
+  }
+
+  /** Restore to before this turn, first step: which files would change, then the confirm. */
+  cpAsk(cx) {
+    const cp = this.cp, row = this.cpRow();
+    if (!row || cp.busy) return;
+    cp.busy = "Checking which files changed since this checkpoint…"; cp.note = null; cp.confirm = null; this.paint(cx);
+    cx.spawn(async (cx) => {
+      try {
+        const plan = await planRestore(this.cpParts(row));
+        const n = plan.parts.reduce((k, p) => k + p.files.length, 0);
+        const held = this.cpHeld(plan.parts.flatMap((p) => p.files.map((f) => `${p.store.root}|${f.rel}`)));
+        if (!n) cp.note = plan.parts.some((p) => p.skipped.length) ? confirmText(plan, timeLabel(row.at)).replace(/^Restore 0 files[^?]*\? ?/, "Nothing to restore as text. ") : "Nothing to restore: the files are as they were before this turn.";
+        else if (held.length) cp.note = `Unsaved edits in ${held.map((k) => base(k.slice(k.indexOf("|") + 1))).join(", ")}: save or discard them in Edit first`;
+        else cp.confirm = { row: row.id, plan, sig: planSig(plan), text: confirmText(plan, timeLabel(row.at)) };
+      } catch (e) { cp.note = String(e.message ?? e); }
+      cp.busy = null; this.paint(cx);
+    });
+  }
+
+  /**
+   * Restore, confirmed. The plan is made again: when its files differ from the confirmed ones, the
+   * new confirm shows instead. Then applyRestore (a "before restore" checkpoint first, then the
+   * compare-and-swap writes), and the factual note to each Claude whose turns are undone (Auto note on rejections).
+   */
+  cpRestore(cx) {
+    const cp = this.cp, ask = cp?.confirm, row = cp?.rows?.find((r) => r.id === ask?.row);
+    if (!ask || !row || cp.busy) return;
+    const space = this.form.space, rows = cp.rows, when = timeLabel(row.at);
+    cp.busy = "Restoring…"; cp.note = null; this.paint(cx);
+    cx.spawn(async (cx) => {
+      try {
+        const plan = await planRestore(this.cpParts(row));
+        if (planSig(plan) !== ask.sig) {
+          cp.confirm = { row: row.id, plan, sig: planSig(plan), text: confirmText(plan, when) };
+          cp.note = "The files changed since you asked: check the new count and confirm again.";
+        } else {
+          cp.confirm = null;
+          const res = await applyRestore(plan, { held: (keys) => this.cpHeld(keys), space, when });
+          const notes = await this.cpNotes(rows, row, res.restored, when);
+          cp.note = `Restored ${res.restored.length} file${res.restored.length === 1 ? "" : "s"}.`
+            + (res.failed.length ? ` Not restored: ${res.failed.map((f) => `${f.rel} (${f.why})`).join(", ")}.` : "")
+            + (res.before.length ? " A \"Before restore\" checkpoint was kept first: restore it to go forward again." : "")
+            + (notes ? ` ${notes}` : "");
+          cp.rows = null; // read again
+        }
+      } catch (e) { cp.confirm = null; cp.note = String(e.message ?? e); }
+      cp.busy = null; this.paint(cx);
+      this.loadCheckpoints(cx);
+    });
+  }
+
+  /** The restore's note to each Claude of the undone turns, as a rejection's (respects Auto note on rejections). Returns what to add to the status, or "". */
+  async cpNotes(rows, row, restored, when) {
+    if (!restored.length || !(await loadSettings()).autoNote) return "";
+    const skipped = [];
+    for (const address of agentsSince(rows, row)) {
+      const a = agents().find((x) => x.address === address);
+      if (!a || !isClaude(a)) continue;
+      const on = spaces().find((s) => s.id === a.space)?.machine ?? null;
+      const mine = restored.filter((f) => (f.store.on ?? null) === on);
+      if (!mine.length) continue;
+      if (on && hookKnown(on) === false) { skipped.push(NOTES_NOTE(on)); continue; }
+      try { await queueFeedback(address, restoreNote(mine.map((f) => (on ? f.path : agentPath(f.path, address))), when), { on }); }
+      catch (e) { skipped.push(`Note to ${agentLabel(a)} not sent: ${e.message ?? e}`); }
+    }
+    return skipped.join(". ");
+  }
+
+  renderCheckpoints() {
+    const t = theme(), cp = this.cp ?? { rows: [], repos: [] }, { overlay } = this.form, rows = cp.rows ?? [], sel = this.cpRow();
+    const multi = cp.repos.length > 1, mono = settings().font_family ?? "JetBrains Mono";
+    const who = (row) => (row.kind === "restore" ? "Wingman" : row.agent ? agentLabel(agents().find((a) => a.address === row.agent) ?? { address: row.agent }) : "Agent");
+    const files = (n) => `${n} file${n === 1 ? "" : "s"}`;
+    const row = (r) => {
+      const on = r.id === cp.sel, branches = [...new Set(r.parts.map((p) => p.entry.branch).filter(Boolean))];
+      return v_flex().id(`cp-${r.id}`).flex_none().gap(4).px(10).py(6).rounded(6).bg(on ? t.selected : t.background).cursor_pointer()
+        .on_click((_e, cx) => { if (!cp.busy) { cp.sel = r.id; cp.confirm = null; cp.note = null; this.formHandle.focus(); this.paint(cx); } })
+        .child(h_flex().gap(8).items_center().text_size(12)
+          .child(div().w(84).flex_none().whitespace_nowrap().text_color(t.muted).child(timeLabel(r.at)))
+          .child(div().w(190).flex_none().min_w(0).truncate().child(who(r)))
+          .child(div().w(64).flex_none().whitespace_nowrap().text_color(t.dim).child(files(r.count)))
+          .child(div().flex_1().min_w(0).truncate().text_color(r.prompt ? t.foreground : t.dim).child(r.prompt ?? (r.kind === "restore" ? "" : "no prompt seen"))))
+        .when(on, (e) => e
+          .child(div().text_size(11).text_color(t.dim).child(`${branches.length ? `On ${branches.join(", ")}` : "No branch"}${multi ? ` · ${r.parts.map((p) => p.name).join(", ")}` : ""}${r.kind === "restore" ? " · the files as they were just before a restore: restoring this goes forward again" : ""}`))
+          .child(v_flex().gap(1).children([
+            ...r.files.slice(0, 200).map((f, i) => div().id(`cp-f-${i}`).h(18).flex().items_center().px(4).rounded(3).cursor_pointer().font_family(mono).text_size(11.5)
+              .hover((s) => s.bg(t.raised)).on_click((_e, cx) => { this.cpOpenFile(f); this.paint(cx); }).child(div().min_w(0).truncate().child(multi ? `${f.name}/${f.rel}` : f.rel))),
+            ...(r.count > Math.min(200, r.files.length) ? [div().text_size(11).text_color(t.dim).child(`… ${r.count - Math.min(200, r.files.length)} more`)] : []),
+            ...(!r.count && r.kind !== "restore" ? [div().text_size(11).text_color(t.dim).child("No files changed in this turn (yet).")] : []),
+          ]))
+          .child(h_flex().gap(6).items_center().pt(2)
+            .child(this.button("cp-restore", "Restore to before this turn", t.ansi3 + "55", (cx) => this.cpAsk(cx)).flex_none().whitespace_nowrap())
+            .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child("Puts every file changed since then back, across this turn's repos"))));
+    };
+    return v_flex().id("checkpoint-list").track_focus(this.formHandle)
+      .on_key_down((e, cx) => {
+        const k = e.key;
+        if (k === "escape") { if (cp.busy) return cx.stop_propagation(); if (cp.confirm) cp.confirm = null; else closeOverlay(overlay); }
+        else if (k === "down") this.cpCommand("cpNext", cx);
+        else if (k === "up") this.cpCommand("cpPrev", cx);
+        else if (k === "enter" && cp.confirm) this.cpRestore(cx);
+        else return;
+        this.formHandle.focus(); this.paint(cx); cx.stop_propagation();
+      })
+      .size_full().min_h(0).p(16).gap(8).bg(t.popover).text_color(t.foreground)
+      .child(h_flex().flex_none().items_center().gap(8)
+        .child(div().flex_1().text_size(15).font_semibold().child(`Checkpoints (${rows.length})`))
+        .child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(div().flex_none().text_size(11).text_color(t.dim).whitespace_normal()
+        .child(`Kept before each agent turn, the newest 30 per repo. Pick a turn to see the files it changed; a file opens in Review.`))
+      .child(v_flex().id("cp-rows").flex_1().min_h(0).gap(4).overflow_y_scrollbar()
+        .children(!cp.rows ? [div().id("cp-loading").text_size(12).text_color(t.dim).child("Loading…")]
+          : rows.length ? rows.map(row) : [div().id("cp-none").text_size(12).text_color(t.dim).whitespace_normal().child("No checkpoints yet. One is kept each time an agent in this space starts working.")]))
+      .when(!!cp.confirm, (e) => e.child(v_flex().flex_none().gap(6).p(8).rounded(6).bg(t.ansi3 + "22")
+        .child(div().text_size(12).whitespace_normal().child(cp.confirm.text))
+        .child(div().text_size(11).text_color(t.dim).whitespace_normal().child("A \"Before restore\" checkpoint is kept first, so you can restore forward again. Files with unsaved edits in Edit stop it."))
+        .child(h_flex().gap(8).items_center()
+          .child(div().flex_1())
+          .child(this.button("cp-confirm", "Restore", t.ansi3 + "88", (cx) => this.cpRestore(cx)).flex_none().whitespace_nowrap())
+          .child(this.button("cp-cancel", "Cancel", t.raised, (cx) => { cp.confirm = null; this.paint(cx); }).flex_none()))))
+      .when(!!(cp.busy || cp.note), (e) => e.child(div().flex_none().text_size(12).whitespace_normal().text_color(cp.busy ? t.muted : t.foreground).child(cp.busy ?? cp.note)));
   }
 
   renderCommentList() {
@@ -4867,6 +5117,7 @@ export default class Review extends View {
     const items = [], add = (id, labels, drop, group) => items.push({ id, labels, drop, size: 11, pad: 20, group });
     if (this.lastReject && !this.lastReject.remote) add("reason", [withKey("Comment last rejection", this.kl("reason")), "Comment last rejection", "Reason"], 1);
     if (total > 0 && this.mode === "review") { add("reject-all", ["Reject all files", "Reject all"], 2, "all"); add("accept-all", ["Accept all files", "Accept all"], 2, "all"); }
+    if (this.spaceId && this.mode === "review" && this.stores.some((st) => !st.plain)) add("checkpoints", [`Checkpoints ${this.cpCounts?.get(this.spaceId) ?? 0}`], 3);
     if (this.spaceId) add("comments", [withKey(`Comments ${ncomments}`, this.kl("commentList")), `Comments ${ncomments}`], Infinity);
     add("settings", ["⚙ Settings", "⚙"], Infinity);
     const fixed = 24 + 64 + (this.view ? 0 : 120) + SUBTITLE_MIN + 10 * 3; // padding, "Wingman", the Review/Edit switch, the subtitle, gaps
@@ -4963,6 +5214,7 @@ export default class Review extends View {
     if (this.form?.form === "keys") return this.renderKeys();
     if (this.form?.form === "comment") return this.renderCommentForm();
     if (this.form?.form === "comments") return this.renderCommentList();
+    if (this.form?.form === "checkpoints") return this.renderCheckpoints();
     if (this.form) return this.renderForm();
     if (this.view === "changes") { // crash breadcrumbs: the first render after shown, and the first after the list is set
       if (!this.crumbRendered) { this.crumbRendered = true; crumb(`render: first Changes render after shown (list set=${this.changeSig != null})`, "changes"); }
@@ -4997,6 +5249,8 @@ export default class Review extends View {
           .child(this.button("reject-all", hb.get("reject-all"), t.ansi1 + "55", (cx) => this.everything("reject", cx)).flex_none().whitespace_nowrap()))
         .when(hb.has("accept-all"), (e) => e
           .child(this.button("accept-all", hb.get("accept-all"), t.ansi2 + "55", (cx) => this.everything("accept", cx)).flex_none().whitespace_nowrap()))
+        // G4: the space's checkpoints, one per agent turn: the turn's files, Restore to before it.
+        .when(hb.has("checkpoints"), (e) => e.child(this.button("checkpoints", hb.get("checkpoints"), t.raised, (cx) => this.openCheckpoints(cx)).flex_none().whitespace_nowrap()))
         // Review comments: the count opens the list (send to the agent, jump, edit, delete).
         .when(hb.has("comments"), (e) => e.child(this.button("comments", hb.get("comments"), ncomments ? t.ansi5 + "55" : t.raised, () => this.openCommentList()).flex_none().whitespace_nowrap()))
         .child(this.button("settings", hb.get("settings"), t.raised, () => this.openSettings()).flex_none().whitespace_nowrap()))

@@ -13,6 +13,7 @@ import { spaceRoots, isHome, pathFor } from "./workspace.js";
 import { REMOTE, rootId, idOf } from "./remote.js";
 import { Journal, drainOutbox, hookKnown } from "./journal.js";
 import { crumb, ALIVE_MS } from "./crumbs.js";
+import { newId } from "./checkpoints.js";
 
 // Agents count as working while they are in a turn, including while blocked on a question.
 export const ACTIVE = new Set(["working", "blocked"]);
@@ -291,6 +292,8 @@ export class CaptureLoop {
         const c = this.captures.get(k);
         if (!c) continue;
         const change = applyPlan(c, p);
+        // G4: a checkpoint names the agent whose turn it is (any agent, not only a Claude: `by`).
+        if (p.active) c.who = agents().find((a) => p.spaces.includes(a.space) && (!p.space || a.space === p.space) && ACTIVE.has(a.status))?.address ?? c.who ?? null;
         if (change === "started") started.push(c);
         if (change) { log(`${c.capture.store.root}: ${change === "started" ? "working" : "idle"}`); this.paint(cx); }
         // With the slow fallback, a turn's last pass comes now, not up to SLOW_MS later.
@@ -298,6 +301,9 @@ export class CaptureLoop {
       }
       this.syncWatches(cx);
       // Every repo's snapshot at once: a turn waits for the slowest, not the sum.
+      // Their checkpoints share one turn id, so the list shows a turn over several repos as one row.
+      const turn = newId(this.now());
+      for (const c of started) c.turn = turn;
       if (started.length) await Promise.all(started.map((c) => this.collect(c, cx, true)));
       // A record whose pass is running ends at a later tick.
       const ends = [...(this.ending ?? [])].filter((c) => !c.busy);
