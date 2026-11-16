@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { github, PR_DETAIL_QUERY } from "../mods/wayfindr/providers/github.js";
-import { azure, fileStatus } from "../mods/wayfindr/providers/azure.js";
-import { CAPABILITIES } from "../mods/wayfindr/providers/contract.js";
+import { github, PR_DETAIL_QUERY, mapChecks as ghChecks } from "../mods/wayfindr/providers/github.js";
+import { azure, fileStatus, mapChecks as azChecks } from "../mods/wayfindr/providers/azure.js";
+import { CAPABILITIES, checksState } from "../mods/wayfindr/providers/contract.js";
 import { loadPullRequestDetail } from "../mods/wayfindr/flow.js";
 
 const json = (data, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(data) });
@@ -175,7 +175,7 @@ test("Azure pullRequest: PR, threads, iterations, changes and items, mapped to a
   const d = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, io);
 
   const kinds = new Set(io.calls.map((c) => new URL(c).pathname.replace(/^\/acme\/P\/_apis\/git\/repositories\/r1\//, "").replace(/\/\d+(\/|$)/g, "/N$1")));
-  assert.deepEqual([...kinds].sort(), ["items", "pullRequests/N", "pullRequests/N/iterations", "pullRequests/N/iterations/N/changes", "pullRequests/N/threads"]);
+  assert.deepEqual([...kinds].sort(), ["items", "pullRequests/N", "pullRequests/N/iterations", "pullRequests/N/iterations/N/changes", "pullRequests/N/statuses", "pullRequests/N/threads"]);
   assert.ok(io.calls.some((c) => c.includes("/changes?$top=100&")));
   assert.equal(io.calls.filter((c) => c.includes("/items?")).length, 8); // add and delete fetch one side only
   // The old side is the iteration's merge base, not the target branch's tip.
@@ -320,4 +320,117 @@ test("Azure mapPrDetail: head from lastMergeSourceCommit, file threads with side
   ]);
   assert.deepEqual(d.threads[1].comments[1], { author: "Ann", createdAt: "2026-11-01T03:00:00Z", body: "because" });
   assert.equal(d.comments.length, 7); // the flat list keeps the general thread too
+});
+
+// ---- Checks (#26) ----
+
+test("checksState: fail over pending over pass, none when nothing passed, failed or ran", () => {
+  const s = (...states) => checksState(states.map((state) => ({ state })));
+  assert.equal(s("pass", "pending", "fail", "skipped"), "fail");
+  assert.equal(s("pass", "pending", "skipped"), "pending");
+  assert.equal(s("pass", "skipped"), "pass");
+  assert.equal(s("skipped"), "none");
+  assert.equal(s(), "none");
+});
+
+test("GitHub mapChecks: CheckRun conclusions and StatusContext states, names, groups and links", () => {
+  const run = (name, conclusion, extra = {}) => ({ __typename: "CheckRun", name, conclusion, status: conclusion ? "COMPLETED" : "IN_PROGRESS", detailsUrl: `https://github.com/o/web/runs/${name}`, ...extra });
+  const wf = { checkSuite: { app: { name: "GitHub Actions" }, workflowRun: { workflow: { name: "CI" } } } };
+  const nodes = [
+    ...["SUCCESS", "NEUTRAL", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "CANCELLED", "SKIPPED", "STALE", null].map((c, i) => run(`r${i}`, c, wf)),
+    run("app", "SUCCESS", { checkSuite: { app: { name: "Codecov" }, workflowRun: null } }),
+    run("bare", "SUCCESS", { detailsUrl: "javascript:alert(1)" }),
+    ...["SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED"].map((state, i) => ({ __typename: "StatusContext", context: `s${i}`, state, targetUrl: `https://ci.example/${i}`, description: i ? "" : "All good" })),
+    null,
+  ];
+  const r = ghChecks({ state: "FAILURE", contexts: { totalCount: nodes.length - 1, nodes } });
+  assert.equal(r.state, "fail");
+  assert.deepEqual(r.list.slice(0, 10).map((c) => c.state), ["pass", "pass", "fail", "fail", "fail", "fail", "fail", "skipped", "skipped", "pending"]);
+  assert.deepEqual(r.list[0], { name: "r0", group: "CI", state: "pass", url: "https://github.com/o/web/runs/r0", description: null });
+  assert.equal(r.list[10].group, "Codecov");
+  assert.deepEqual([r.list[11].group, r.list[11].url], [null, null]);
+  assert.deepEqual(r.list.slice(12).map((c) => c.state), ["pass", "fail", "fail", "pending", "pending"]);
+  assert.deepEqual(r.list[12], { name: "s0", group: null, state: "pass", url: "https://ci.example/0", description: "All good" });
+  assert.equal(r.list[13].description, null);
+  assert.deepEqual(ghChecks(null), { state: "none", list: [] });
+});
+
+test("GitHub pullRequest: the detail query asks for the rollup and the PrDetail carries its checks", async () => {
+  assert.match(PR_DETAIL_QUERY, /statusCheckRollup \{ state contexts\(first: 100\)/);
+  const node = ghNode({ commits: { nodes: [{ commit: { statusCheckRollup: { state: "PENDING", contexts: { totalCount: 1, nodes: [
+    { __typename: "CheckRun", name: "build", conclusion: null, status: "QUEUED", detailsUrl: "https://github.com/x", checkSuite: { app: { name: "GitHub Actions" }, workflowRun: { workflow: { name: "CI" } } } },
+  ] } } } }] } });
+  const d = await github.pullRequest({ login: "me" }, { key: "K", repo: "o/web" }, ghIo(node, []), { patches: false });
+  assert.deepEqual(d.checks, { state: "pending", list: [{ name: "build", group: "CI", state: "pending", url: "https://github.com/x", description: null }] });
+  const none = await github.pullRequest({ login: "me" }, { key: "K", repo: "o/web" }, ghIo(ghNode(), []), { patches: false });
+  assert.deepEqual(none.checks, { state: "none", list: [] });
+});
+
+test("Azure mapChecks: evaluation and status states, names, groups, and only openable links", () => {
+  const ev = (status, extra = {}) => ({ evaluationId: status, status, configuration: { isBlocking: true, type: { displayName: "Minimum number of reviewers" } }, ...extra });
+  const r = azChecks({
+    evaluations: [
+      ...["approved", "rejected", "broken", "queued", "running", "notApplicable"].map((s) => ev(s)),
+      ev("approved", { configuration: { type: { displayName: "Build" } }, context: { buildId: 9, buildDefinitionName: "web-ci" },
+        _links: { self: { href: "https://dev.azure.com/acme/P/_apis/policy/evaluations/x" }, web: { href: "https://dev.azure.com/acme/P/_build/results?buildId=9" } } }),
+      ev("approved", { _links: { self: { href: "https://dev.azure.com/acme/P/_apis/policy/evaluations/y" } } }),
+      ev("approved", { _links: { web: { href: "http://insecure.example/x" } } }),
+    ],
+    statuses: ["succeeded", "failed", "error", "pending", "notSet", "notApplicable"].map((state, i) => ({
+      state, description: i ? undefined : "Passed", context: { name: `st${i}`, genre: i === 1 ? "" : "sonar" }, targetUrl: i === 2 ? "file:///c:/x" : `https://sonar.example/${i}`,
+    })),
+  });
+  assert.equal(r.state, "fail");
+  assert.deepEqual(r.list.slice(0, 6).map((c) => c.state), ["pass", "fail", "fail", "pending", "pending", "skipped"]);
+  assert.deepEqual(r.list[0], { name: "Minimum number of reviewers", group: "Policy", state: "pass", url: null, description: null });
+  assert.deepEqual(r.list[6], { name: "Build: web-ci", group: "Policy", state: "pass", url: "https://dev.azure.com/acme/P/_build/results?buildId=9", description: null });
+  assert.deepEqual([r.list[7].url, r.list[8].url], [null, null]);
+  assert.deepEqual(r.list.slice(9).map((c) => c.state), ["pass", "fail", "fail", "pending", "skipped", "skipped"]);
+  assert.deepEqual(r.list[9], { name: "st0", group: "sonar", state: "pass", url: "https://sonar.example/0", description: "Passed" });
+  assert.deepEqual([r.list[10].group, r.list[11].url], [null, null]);
+  assert.deepEqual(azChecks({ evaluations: [], statuses: [] }), { state: "none", list: [] });
+});
+
+const PROJECT_ID = "11111111-2222-3333-4444-555555555555";
+function azChecksIo({ evaluations, statuses }) {
+  const io = azIo([change("/src/a.js", "edit")], {});
+  const fetch = io.fetch;
+  io.policy = [];
+  io.fetch = async (url, opts) => {
+    const u = new URL(url), p = u.pathname;
+    if (p === "/acme/P/_apis/git/repositories/r1/pullRequests/5") return json({ ...azPr, repository: { ...azPr.repository, project: { name: "P", id: PROJECT_ID } } });
+    if (p === "/acme/P/_apis/policy/evaluations") {
+      io.policy.push(url);
+      assert.equal(u.searchParams.get("api-version"), "7.1-preview.1");
+      assert.equal(u.searchParams.get("artifactId"), `vstfs:///CodeReview/CodeReviewId/${PROJECT_ID}/5`);
+      return evaluations;
+    }
+    if (p.endsWith("/pullRequests/5/statuses")) return statuses;
+    return fetch(url, opts);
+  };
+  return io;
+}
+
+test("Azure pullRequest: checks from the policy evaluations and the PR statuses", async () => {
+  const io = azChecksIo({
+    evaluations: json({ value: [{ status: "running", configuration: { type: { displayName: "Build" } }, context: { buildDefinitionName: "web-ci" } }] }),
+    statuses: json({ value: [{ state: "succeeded", context: { name: "scan", genre: "sonar" }, targetUrl: "https://sonar.example/1", description: "ok" }] }),
+  });
+  const d = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, io, { patches: false });
+  assert.equal(io.policy.length, 1);
+  assert.deepEqual(d.checks, { state: "pending", list: [
+    { name: "Build: web-ci", group: "Policy", state: "pending", url: null, description: null },
+    { name: "scan", group: "sonar", state: "pass", url: "https://sonar.example/1", description: "ok" },
+  ] });
+});
+
+test("Azure pullRequest: a failed evaluations call leaves only the statuses, a failed statuses call only the evaluations", async () => {
+  const evals = () => json({ value: [{ status: "rejected", configuration: { type: { displayName: "Comment requirements" } } }] });
+  const sts = () => json({ value: [{ state: "succeeded", context: { name: "scan", genre: "sonar" }, targetUrl: "https://sonar.example/1" }] });
+  const a = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, azChecksIo({ evaluations: json({ message: "denied" }, 403), statuses: sts() }), { patches: false });
+  assert.deepEqual(a.checks.list.map((c) => c.name), ["scan"]);
+  assert.equal(a.checks.state, "pass");
+  assert.equal(a.files.length, 1); // the detail itself still loads
+  const b = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, azChecksIo({ evaluations: evals(), statuses: json({ message: "boom" }, 500) }), { patches: false });
+  assert.deepEqual(b.checks, { state: "fail", list: [{ name: "Comment requirements", group: "Policy", state: "fail", url: null, description: null }] });
 });

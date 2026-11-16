@@ -13,9 +13,15 @@ const pr = (n, repo, extra = {}) => ({
 test("PRs map to summaries, drafts marked, odd nodes skipped", () => {
   const [a, b] = mapPrs([pr(1, "o/web", { isDraft: true }), {}, pr(2, "o/api", { author: null })]);
   assert.deepEqual(a, { key: "pr-1", id: "web#1", title: "T1", url: "https://github.com/o/web/pull/1", repo: "o/web", draft: true,
-    author: { id: "ann", name: "Ann Lee" }, updatedAt: "2026-11-01T00:00:00Z" });
+    author: { id: "ann", name: "Ann Lee" }, updatedAt: "2026-11-01T00:00:00Z", checks: "none" });
   assert.equal(b.draft, false);
   assert.deepEqual(b.author, { id: "ghost", name: "ghost" });
+});
+
+test("a GitHub PR row's checks come from its head commit's rollup state (#26)", () => {
+  const rolled = (state) => pr(1, "o/web", { commits: { nodes: [{ commit: { statusCheckRollup: state === undefined ? null : { state } } }] } });
+  assert.deepEqual(mapPrs(["SUCCESS", "FAILURE", "ERROR", "PENDING", "EXPECTED", undefined].map(rolled)).map((p) => p.checks),
+    ["pass", "fail", "fail", "pending", "pending", "none"]);
 });
 
 test("both sections come from one request, for the Account's own login", async () => {
@@ -80,7 +86,7 @@ const azPr = (id, project, repo, extra = {}) => ({
 test("Azure PR list entries map to summaries dated by creation", () => {
   assert.deepEqual(mapPrSummary(azPr(4, "My Proj", "web", { isDraft: true }), ORG), {
     key: "r-web!4", id: "web!4", title: "A4", url: `${ORG}/My%20Proj/_git/web/pullrequest/4`, repo: "My Proj/web", draft: true,
-    author: { id: "u-ann", name: "Ann Lee" }, updatedAt: null, createdAt: "2026-11-04T00:00:00Z",
+    author: { id: "u-ann", name: "Ann Lee" }, updatedAt: null, createdAt: "2026-11-04T00:00:00Z", checks: null,
   });
   const g = byRepo([mapPrSummary(azPr(1, "P", "web"), ORG), mapPrSummary(azPr(3, "P", "web"), ORG)]);
   assert.deepEqual(g[0].prs.map((p) => p.id), ["web!3", "web!1"]);

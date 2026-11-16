@@ -11,7 +11,7 @@
 // Ticket detail converts the HTML fields to markdown. Bugs show their repro steps as the description.
 // Linked Azure PRs are fetched. GitHub PR links show by URL only (R5).
 import { htmlToMarkdown } from "./html.js";
-import { repoFilter, safeMarkdown } from "./contract.js";
+import { repoFilter, safeMarkdown, checksState, checkUrl } from "./contract.js";
 import { unifiedDiff } from "./diff.js";
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
@@ -20,6 +20,7 @@ const API_VERSION = "7.1";
 const PREVIEW = "7.1-preview"; // connectionData has no GA version
 const TEAMS_VERSION = "7.1-preview.3"; // the org-wide team list is preview only
 const COMMENTS_VERSION = "7.1-preview.4"; // the comments API is preview only: pinned here (R4)
+const POLICY_VERSION = "7.1-preview.1"; // policy evaluations are preview only
 const COMMENTS = 100, MAX_PRS = 20, MAX_PR_LIST = 100;
 const MAX_ITEMS = 2000, BATCH = 200;
 const DONE_DAYS = 30; // items in the last Column show only if they changed this recently
@@ -246,7 +247,30 @@ export function mapPrSummary(pr, org) {
     repo: `${project}/${repo.name ?? ""}`, draft: Boolean(pr.isDraft),
     author: { id: c.id ?? "", name: c.displayName ?? c.uniqueName ?? "" },
     updatedAt: null, createdAt: pr.creationDate ?? null,
+    checks: null, // one call per PR is too many for the list (#26)
   };
+}
+
+// Checks (#26): the PR's policy evaluations and its statuses into { state, list }. Pure.
+const EVAL_STATE = { approved: "pass", rejected: "fail", broken: "fail", queued: "pending", running: "pending", notApplicable: "skipped" };
+const STATUS_STATE = { succeeded: "pass", failed: "fail", error: "fail", pending: "pending", notSet: "skipped", notApplicable: "skipped" };
+// An evaluation's link, only one a person can open in the browser (not an _apis resource).
+const webLink = (links) => [links?.web?.href, links?.self?.href].map(checkUrl).find((u) => u && /^https:/i.test(u) && !/\/_apis\//i.test(u)) ?? null;
+export function mapChecks({ evaluations, statuses } = {}) {
+  const list = [];
+  for (const e of evaluations ?? []) {
+    if (!e) continue;
+    const type = e.configuration?.type?.displayName ?? "Policy", build = e.context?.buildDefinitionName;
+    list.push({ name: build ? `${type}: ${build}` : type, group: "Policy", state: EVAL_STATE[e.status] ?? "pending", url: webLink(e._links), description: null });
+  }
+  for (const st of statuses ?? []) {
+    if (!st) continue;
+    list.push({
+      name: st.context?.name ?? "", group: st.context?.genre || null, state: STATUS_STATE[st.state] ?? "skipped",
+      url: checkUrl(st.targetUrl), description: st.description || null,
+    });
+  }
+  return { state: checksState(list), list };
 }
 
 // Comments oldest first, from a page fetched newest first.
@@ -353,7 +377,7 @@ export function mapChange(entry, oldItem, newItem) {
   return { file: { path, oldPath, status, additions: d.additions, deletions: d.deletions, patch: d.patch, binary: false }, truncated: d.truncated };
 }
 
-export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated }) {
+export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated, checks = { evaluations: [], statuses: [] } }) {
   if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
   const { comments, moreComments, threads: fileThreads } = mapThreads(threads);
   const s = mapPrSummary(pr, org);
@@ -366,6 +390,7 @@ export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated }) {
     description: safeMarkdown(pr.description ?? ""),
     reviewers: (pr.reviewers ?? []).map((r) => ({ name: r.displayName ?? r.uniqueName ?? "", state: VOTE[r.vote] ?? "waiting" })),
     comments, moreComments, threads: fileThreads, files, moreFiles, truncated,
+    checks: mapChecks(checks),
   };
 }
 
@@ -468,9 +493,17 @@ export const azure = {
     const project = pr.repo.slice(0, pr.repo.lastIndexOf("/"));
     const org = orgUrl(account), tok = await token(account, io);
     const base = `${seg(project)}/_apis/git/repositories/${seg(repoId)}`, prPath = `${base}/pullRequests/${n}`;
+    // Checks (#26): each half failing on its own leaves that half empty. Evaluations need the project's id.
+    const half = (p) => p.then((r) => r.value ?? [], () => []);
+    const statusesP = half(rest(org, tok, io, `${prPath}/statuses`));
     const [d, threads, iterations] = await Promise.all([
       rest(org, tok, io, prPath), rest(org, tok, io, `${prPath}/threads`), rest(org, tok, io, `${prPath}/iterations`),
     ]);
+    const projectId = d?.repository?.project?.id;
+    const evaluationsP = /^[0-9a-f-]{36}$/i.test(String(projectId ?? ""))
+      ? half(rest(org, tok, io, `${seg(project)}/_apis/policy/evaluations?artifactId=${encodeURIComponent(`vstfs:///CodeReview/CodeReviewId/${projectId}/${n}`)}`, null, POLICY_VERSION))
+      : Promise.resolve([]);
+    const checksP = Promise.all([evaluationsP, statusesP]).then(([evaluations, statuses]) => ({ evaluations, statuses }));
     const lastIt = (iterations.value ?? []).at(-1), last = lastIt?.id;
     const entries = last == null ? [] : ((await rest(org, tok, io, `${prPath}/iterations/${last}/changes?$top=${PR_CHANGES}`)).changeEntries ?? [])
       .filter((e) => e?.item?.path && !e.item.isFolder && e.item.gitObjectType !== "tree");
@@ -486,7 +519,7 @@ export const azure = {
         const status = fileStatus(e.changeType);
         return { path: e.item.path, oldPath: status === "renamed" ? (e.originalPath ?? e.sourceServerItem ?? null) : null, status, additions: 0, deletions: 0, patch: null, binary: false };
       });
-      return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: 0, truncated: false });
+      return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: 0, truncated: false, checks: await checksP });
     }
     let truncated = false;
     const files = await pool(entries.slice(0, PR_FILES), FILE_FETCHES, async (e) => {
@@ -503,7 +536,7 @@ export const azure = {
         return { path: e.item.path, oldPath: status === "renamed" ? oldPath : null, status, additions: 0, deletions: 0, patch: null, binary: false };
       }
     });
-    return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: Math.max(0, entries.length - PR_FILES), truncated });
+    return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: Math.max(0, entries.length - PR_FILES), truncated, checks: await checksP });
   },
 
   // A Review's data (D16): the branches, the description, and the acceptance criteria of every linked

@@ -1,7 +1,7 @@
 // GitHub Provider: GitHub Projects (v2) boards. Translation only (ADR 0001).
 // Auth: `gh auth token --user <login>` through the Profile's runner, then GraphQL over fetch, so
 // the token never appears on a command line and `gh auth switch` is never used (ADR 0002).
-import { NO_COLUMN, safeMarkdown } from "./contract.js";
+import { NO_COLUMN, safeMarkdown, checksState, checkUrl } from "./contract.js";
 const byName = (a, b) => a.toLowerCase().localeCompare(b.toLowerCase()) || a.localeCompare(b); // case-insensitive in any engine
 
 const API = "https://api.github.com/graphql";
@@ -171,7 +171,9 @@ export function mapTicket(data, ref) {
 }
 
 // Both PR sections in one request: search allows 30 requests a minute.
-const PR_LIST_FIELDS = `... on PullRequest { id number title url isDraft updatedAt author { login ... on User { name } } repository { nameWithOwner } }`;
+// The list takes only the rollup's state (#26): the checks themselves come with the detail.
+const PR_LIST_FIELDS = `... on PullRequest { id number title url isDraft updatedAt author { login ... on User { name } } repository { nameWithOwner }
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } }`;
 export const PRS_QUERY = `query($mine: String!, $review: String!) {
   viewer { login }
   mine: search(type: ISSUE, query: $mine, first: ${PAGE}) { issueCount nodes { ${PR_LIST_FIELDS} } }
@@ -189,7 +191,36 @@ export function mapPrs(nodes) {
     repo: n.repository.nameWithOwner, draft: Boolean(n.isDraft),
     author: { id: n.author?.login ?? "ghost", name: n.author?.name || n.author?.login || "ghost" },
     updatedAt: n.updatedAt ?? null,
+    checks: ROLLUP_STATE[rollupOf(n)?.state] ?? "none",
   }));
+}
+
+// Checks (#26). The head commit's status check rollup: CheckRuns (Actions, apps) and StatusContexts.
+const ROLLUP_STATE = { SUCCESS: "pass", FAILURE: "fail", ERROR: "fail", PENDING: "pending", EXPECTED: "pending" };
+const RUN_STATE = {
+  SUCCESS: "pass", NEUTRAL: "pass",
+  FAILURE: "fail", TIMED_OUT: "fail", ACTION_REQUIRED: "fail", STARTUP_FAILURE: "fail", CANCELLED: "fail",
+  SKIPPED: "skipped", STALE: "skipped",
+};
+const rollupOf = (node) => node?.commits?.nodes?.[0]?.commit?.statusCheckRollup ?? null;
+export const CHECKS_FIELDS = `commits(last: 1) { nodes { commit { statusCheckRollup { state contexts(first: 100) { totalCount nodes { __typename
+      ... on CheckRun { name conclusion status detailsUrl checkSuite { app { name } workflowRun { workflow { name } } } }
+      ... on StatusContext { context state targetUrl description } } } } } } }`;
+
+// A rollup into { state, list }. Pure.
+export function mapChecks(rollup) {
+  const list = [];
+  for (const c of rollup?.contexts?.nodes ?? []) {
+    if (!c) continue;
+    if (c.__typename === "StatusContext") {
+      list.push({ name: c.context ?? "", group: null, state: ROLLUP_STATE[c.state] ?? "pending", url: checkUrl(c.targetUrl), description: c.description || null });
+    } else if (c.__typename === "CheckRun") {
+      const group = c.checkSuite?.workflowRun?.workflow?.name || c.checkSuite?.app?.name || null;
+      const state = c.conclusion == null ? "pending" : (RUN_STATE[c.conclusion] ?? "fail");
+      list.push({ name: c.name ?? "", group, state, url: checkUrl(c.detailsUrl), description: null });
+    }
+  }
+  return { state: checksState(list), list };
 }
 
 // Repos the login can reach (own, collaborator, org member), for following (PR filter).
@@ -232,6 +263,7 @@ export const PR_DETAIL_QUERY = `query($id: ID!) {
     latestReviews(first: 30) { nodes { author { login } state } }
     comments(first: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } body createdAt } }
     reviewThreads(first: ${THREADS}) { totalCount nodes { id path line isResolved isOutdated diffSide comments(first: ${THREAD_COMMENTS}) { totalCount nodes { author { login } body createdAt } } } }
+    ${CHECKS_FIELDS}
   } }
 }`;
 
@@ -287,6 +319,7 @@ export function mapPrDetail(node, files, pr) {
     files: files.map(mapPrFile),
     moreFiles: Math.max(0, (node.changedFiles ?? files.length) - files.length),
     truncated: false, // GitHub doesn't say when it left a patch out for size
+    checks: mapChecks(rollupOf(node)),
   };
 }
 

@@ -52,8 +52,10 @@
 // PullRequests  pullRequests()'s answer (D6): { me, mine: PrSummary[], needsReview: PrSummary[], more: { mine, needsReview } }
 //   mine       open and draft PRs the Account authored; needsReview: open PRs that ask it for a review
 //   more       how many more matched than were fetched
-// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt? }
+// PrSummary    { key, id ("repo#12"), title, url, repo ("owner/name"), draft, author: { id, name }, updatedAt, createdAt?, checks }
 //   updatedAt  ISO, or null when the Provider has none (Azure): then createdAt (ISO) dates it
+//   checks     the head commit's checks on the whole (#26): "pass" | "fail" | "pending" | "none", or null when
+//              the Provider didn't fetch them (Azure: one call per PR is too many for the list)
 // PrDetail     pullRequest()'s answer (#1): one Pull Request with its description, comments and files
 //   key, id, title, url, repo           as in PrSummary
 //   state      "open" | "merged" | "closed";  draft  boolean
@@ -73,11 +75,28 @@
 //              status: "added" | "modified" | "deleted" | "renamed"; oldPath set for renames, else null
 //              patch: unified hunks from the first "@@ … @@" line, no "diff --git" header; null when binary or too big
 //   moreFiles  how many changed files weren't returned
+//   checks     { state, list: Check[] }  the PR's checks (#26): GitHub's status check rollup on the head commit,
+//              Azure's policy evaluations and PR statuses. state "pass" | "fail" | "pending" | "none" (see checksState)
+// Check        { name, group, state, url, description }
+//   group      the workflow, app or policy type name, or null;  state "pass" | "fail" | "pending" | "skipped"
+//   url        an http(s) link to open, or null;  description  string or null
 //   truncated  true when any file's patch was cut for size
 
 export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "prDetail", "repos", "statuses", "signInState", "move", "update"];
 
 export const NO_COLUMN = "__none__";
+
+// The checks on the whole (#26): fail when any fails, else pending when any is pending, else pass when
+// any passed, else none (no checks, or only skipped ones).
+export function checksState(list) {
+  const has = (s) => (list ?? []).some((c) => c.state === s);
+  return has("fail") ? "fail" : has("pending") ? "pending" : has("pass") ? "pass" : "none";
+}
+
+// A check's link: kept only when it is an http(s) URL, so nothing else is handed to the browser.
+export function checkUrl(url) {
+  return typeof url === "string" && /^https?:\/\/[^\s]+$/i.test(url) ? url : null;
+}
 
 export function can(provider, capability) {
   return Boolean(provider?.capabilities?.includes(capability));
