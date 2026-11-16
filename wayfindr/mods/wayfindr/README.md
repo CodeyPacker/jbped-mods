@@ -31,7 +31,7 @@ Click a Pull Request row to open it as an overlay over the list, against the rig
 
 The rail starts with "N of M viewed" ("All M viewed" when done) and an "Overview" row, then the files in two groups: "Code", then "Tests, docs and generated" (test folders and `.test`/`.spec` files, docs and markdown, lock files, minified, snapshot and build output). Each file row shows its status letter, folder and name, `+added −deleted`, and an accent badge with its review thread count. Click a row to show that file. Click its first cell, or press `v` on the shown file, or use the "Viewed" / "Unviewed" button over its diff, to mark it viewed: the cell turns into a green check. Viewed marks are saved per PR under Herdr's home in `data/wayfindr/viewed/<repo>-pr-<n>.json`, with the PR's head commit: a new push clears them. Without a head commit they last until Wayfindr reloads.
 
-Keys while the overlay is open: `down` and `up` move through the Overview and the rail's files, `home` goes to the Overview, `v` marks the shown file viewed or not, Esc closes the overlay.
+Keys while the overlay is open: `down` and `up` move through the Overview and the rail's files, `home` goes to the Overview, `v` marks the shown file viewed or not, `p` opens Post review, Esc closes the overlay (an open comment box, the review screen's confirm, then the review screen go first).
 
 The Overview shows what the Ticket panel shows: author, branch into target, reviewers and their state, dates, "Open in browser", the description, the files summary line, and the comments. A file shows its diff with its review threads under the lines they are on: the first comment, then the replies indented. A resolved thread folds to one dim line, "Resolved · author: first line"; click it to open it, and "Fold" folds it again. Comments not on a file, and threads that can't go under a shown row (on no line, outdated, or on a line or file the diff doesn't show), stay in the Overview's Comments with their path and line. Each diff shows as numbered rows in the terminal font: hunk headers, then each line with its line number (the new file's, the old file's for a removed line), a +/− mark and a green or red tint for added and removed lines. Long lines scroll sideways. A file shows 500 rows before "Show N more lines". While it is open the list is dimmed and inert: click the dimmed list, or press Esc, to close it. The Review button is in the row and in the overlay's header.
 
@@ -41,6 +41,19 @@ Files and diffs come from the PR's local clone when Wayfindr knows one: the Prof
 
 - GitHub: one GraphQL request for the fields and comments, and the REST files endpoint for each file's patch (up to 300 files, 100 issue comments, 50 review threads).
 - Azure: the PR, its threads, the last iteration's changes, and both sides of each file (the merge base and the source commit), diffed by Wayfindr. Up to 50 files are diffed and 100 threads shown; a file over 3000 lines shows no diff.
+
+### Comments and reviews
+
+Click a numbered line in a diff to open a comment box under it. Shift-click another line in the same hunk to stretch it to a range: the range stops at a hunk header, since GitHub takes ranges inside one hunk only, and the rows it covers get an accent edge. Enter or Save keeps the comment, Esc or Cancel drops the box, and an empty box saves nothing. A saved comment shows under its last line in an accent box, with "Lines a-b" on a range. Click its text to edit it, or × to delete it. A line that already has a thread or a comment still takes another. The line over the diff counts the file's saved comments.
+
+Saved comments stay on this computer, in `data/wayfindr/comments/<repo>-pr-<n>.json` under Herdr's home, until a review posts them. Nothing leaves the machine until you press Yes.
+
+"Post review (N)" in the overlay's header, or `p`, opens the review screen in place of a file: who it posts as, the saved comments (`path:line` and the text), the verdict, and an optional summary. Verdicts: Comment, Approve, Request changes. On your own Pull Request only Comment is offered, because GitHub refuses the others from the author. A post needs a comment, Approve, or a summary. "Post as <verdict>" asks once more, `Post <verdict> to <PR> as <you> with N comments? Everyone on the PR will see it.`, and Yes posts. After it posts, "Posted. Open on <site>" links to it, the saved comments are deleted, and the PR reloads. If it fails, the error shows and the comments stay. A review goes out as the signed-in account, and Wayfindr can't undo it.
+
+- GitHub: one review through the reviews API, on the PR's head commit. An empty summary is sent as "See the inline comments." (except on Approve). It needs the `repo` scope, which `gh auth login` grants by default.
+- Azure: one thread per comment, then the summary as a thread on no file, then your vote: Approve votes "Approved", Request changes votes "Rejected", and Comment casts no vote. A failure part way says how many threads were posted.
+
+"Reply" under an open review thread opens the same box under it. Save posts the reply at once as the signed-in account, then the PR reloads. A refused reply shows its error under the thread and keeps the text.
 
 ### Limits
 
