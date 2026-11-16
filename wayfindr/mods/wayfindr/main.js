@@ -9,11 +9,12 @@ import { run, layout, shared, setShared, theme, settings, home, appHome, readTex
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, loadLocalPrDiff, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceTarget, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
+import { diffRows, longestLine } from "./prdiff.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -25,7 +26,10 @@ const SITE = { github: "GitHub", azure: "Azure", clickup: "ClickUp" }; // for th
 const FILE_STATUS = { added: "A", modified: "M", deleted: "D", renamed: "R" };
 // The Pull Request overlay's width as a fraction of Wayfindr's: 60% to start, dragged by its left edge.
 const PR_W_KEY = "wayfindr.prWidth", PR_W_DEFAULT = 0.6, PR_W_MIN = 0.3, PR_W_MAX = 0.95;
-const DIFF_LINES = 300; // a patch's lines shown before "Show N more lines"
+const DIFF_LINES = 500; // a patch's rows shown before "Show N more lines"
+const DIFF_CHAR_W = 7, DIFF_GUTTER = 80; // about one terminal-font character at 11.5 px; number, mark and gaps
+const PR_SITE = { github: "GitHub", azure: "Azure DevOps" }; // where API diffs come from
+const diffRowsOf = new WeakMap(); // a PrDetail file -> { rows, longest }, so a render doesn't parse again
 // A faint background of a theme color (#rrggbb), or none.
 const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
 
@@ -652,15 +656,39 @@ export default class Wayfindr extends View {
 
   closePr() { this.selectedPr = null; }
 
+  // A Pull Request's clone (D1): the Profile Repo for its repo, else the one clone of it the index found, else
+  // null. Never asks and never scans: without a clone the diffs come from the API.
+  cloneForPr(pr) {
+    const repo = this.profile?.repos.find((r) => r.prRepo && sameRepo(r.prRepo, pr.repo));
+    if (repo) return repo.path;
+    return soleClone(this.clonesOf(pr.repo))?.path ?? null;
+  }
+
+  // The detail from the Provider. With a clone, its files and patches come from git there (#22); when git
+  // fails, the Provider's are fetched instead and gitError says why.
   fetchPr(cx) {
     const sel = this.selectedPr, p = this.profile;
     if (!sel || !p) return;
-    const key = sel.pr.key;
+    const key = sel.pr.key, clone = this.cloneForPr(sel.pr);
     this.prDetails[key] = { status: "loading", data: this.prDetails[key]?.data ?? null };
     const io = this.io();
     cx.spawn(async (cx) => {
       let next;
-      try { next = { status: "ok", data: await loadPullRequestDetail(p, sel.account, sel.pr, io) }; } catch (e) {
+      try {
+        let data = await loadPullRequestDetail(p, sel.account, sel.pr, io, clone ? { patches: false } : {});
+        if (!clone) data = { ...data, source: { kind: "api" } };
+        else {
+          try {
+            const number = String(data.id ?? sel.pr.id ?? "").split(/[#!]/).pop();
+            const local = await loadLocalPrDiff(clone, data.branch, data.target, number, io);
+            data = { ...data, files: local.files, moreFiles: 0, truncated: local.truncated, source: { kind: "clone", path: clone } };
+          } catch (e) {
+            const api = await loadPullRequestDetail(p, sel.account, sel.pr, io);
+            data = { ...api, source: { kind: "api" }, gitError: String(e.message ?? e) };
+          }
+        }
+        next = { status: "ok", data };
+      } catch (e) {
         next = { status: "error", data: this.prDetails[key]?.data ?? null, error: String(e.message ?? e) };
       }
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
@@ -1852,7 +1880,8 @@ export default class Wayfindr extends View {
     cx.notify();
   }
 
-  // One changed file: a header that folds its diff. The first DIFF_LINES lines show, then a row for the rest.
+  // One changed file: a header that folds its diff. The first DIFF_LINES rows show, then a row for the rest.
+  // Rows (#23): hunk headers, then a line number, a +/− mark and the text; long lines scroll sideways.
   prFile(t, k, f, i, defaultOpen) {
     const st = this.prFolds[k]?.[f.path] ?? (defaultOpen ? "open" : "folded");
     const setFold = (v) => { (this.prFolds[k] ??= {})[f.path] = v; };
@@ -1870,20 +1899,26 @@ export default class Wayfindr extends View {
     const note = (text) => div().px(8).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).child(text);
     if (f.binary) return block.child(note("Binary file"));
     if (f.patch == null) return block.child(note("Diff not shown"));
-    const lines = String(f.patch).replace(/\n$/, "").split("\n");
-    const shown = st === "all" ? lines : lines.slice(0, DIFF_LINES);
-    const line = (text) => {
-      const [color, bg] = text.startsWith("@@") ? [t.dim, null] : text.startsWith("+") ? [t.done, tint(t.done)]
-        : text.startsWith("-") ? [t.blocked, tint(t.blocked)] : [t.foreground, null];
-      return div().px(8).whitespace_nowrap().text_color(color).when(Boolean(bg), (el) => el.bg(bg)).child(text || " ");
+    let parsed = diffRowsOf.get(f);
+    if (!parsed) { const rows = diffRows(f.patch); parsed = { rows, longest: longestLine(rows) }; diffRowsOf.set(f, parsed); }
+    const { rows, longest } = parsed;
+    const shown = st === "all" ? rows : rows.slice(0, DIFF_LINES);
+    const row = (r) => {
+      if (r.kind === "@") return div().w_full().h(20).flex_none().px(12).whitespace_nowrap().bg(t.raised).text_color(t.dim).child(r.text);
+      return h_flex().w_full().h(20).flex_none().gap(10).items_center()
+        .when(r.kind === "+", (el) => el.bg(tint(t.done) ?? t.surface)).when(r.kind === "-", (el) => el.bg(tint(t.blocked) ?? t.surface))
+        .child(div().w(36).flex_none().text_right().text_color(t.dim).child(r.number === undefined ? "" : String(r.number)))
+        .child(div().w(10).flex_none().text_color(r.kind === "+" ? t.done : t.blocked).child(r.kind === "+" ? "+" : r.kind === "-" ? "−" : ""))
+        .child(div().flex_none().pr(12).whitespace_nowrap().text_color(r.kind === "" ? t.dim : t.foreground).child(r.text.replace(/\t/g, "    ")));
     };
     return block
-      .child(div().id(`wf-pr-diff-${k}-${i}`).border_t(1).border_color(t.border).overflow_x_scrollbar()
-        .child(v_flex().flex_none().min_w_full().py(4).font_family(settings().font_family ?? settings().font ?? "monospace").text_size(11).children(shown.map(line))))
-      .when(shown.length < lines.length, (el) => el.child(h_flex().id(`wf-pr-more-${k}-${i}`).h(26).px(8).items_center().border_t(1).border_color(t.border)
+      .child(div().id(`wf-pr-diff-${k}-${i}`).w_full().border_t(1).border_color(t.border).overflow_x_scrollbar()
+        .child(v_flex().w_full().min_w(DIFF_GUTTER + longest * DIFF_CHAR_W).py(4)
+          .font_family(settings().font_family ?? settings().font ?? "monospace").text_size(11.5).children(shown.map(row))))
+      .when(shown.length < rows.length, (el) => el.child(h_flex().id(`wf-pr-more-${k}-${i}`).h(26).px(8).items_center().border_t(1).border_color(t.border)
         .cursor_pointer().text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { setFold("all"); cx.notify(); })
-        .child(`Show ${lines.length - shown.length} more lines`)));
+        .child(`Show ${rows.length - shown.length} more lines`)));
   }
 
   // The Pull Request panel: the row's summary shows at once, the rest when the detail arrives.
@@ -1918,7 +1953,9 @@ export default class Wayfindr extends View {
       const files = d.files ?? [], comments = d.comments ?? [];
       const adds = files.reduce((n, f) => n + (f.additions ?? 0), 0), dels = files.reduce((n, f) => n + (f.deletions ?? 0), 0);
       const summary = [`${files.length} ${files.length === 1 ? "file" : "files"} · +${adds} −${dels}`,
-        ...(d.moreFiles ? [`${d.moreFiles} more not shown`] : []), ...(d.truncated ? ["Some diffs were cut"] : [])].join(" · ");
+        ...(d.moreFiles ? [`${d.moreFiles} more not shown`] : []), ...(d.truncated ? ["Some diffs were cut"] : []),
+        ...(d.source?.kind === "clone" ? [`diffs from ${d.source.path}`] : [])].join(" · ");
+      const site = PR_SITE[this.profile?.accounts.find((a) => a.id === sel.account)?.provider] ?? "the API";
       body
         .child(v_flex().gap(6)
           .child(row("Author", d.author?.name))
@@ -1931,6 +1968,7 @@ export default class Wayfindr extends View {
         .child(String(d.description ?? "").trim() ? md("desc", d.description) : note("No description."))
         .child(section("Files"))
         .child(note(summary))
+        .when(Boolean(d.gitError), (el) => el.child(note(`Diffs from ${site}: ${String(d.gitError).split("\n")[0]}`)))
         .children(files.map((f, i) => this.prFile(t, k, f, i, files.length <= 5)))
         .child(section(`Comments (${comments.length + (d.moreComments ?? 0)})`))
         .children(comments.map((c, i) => v_flex().id(`wf-pr-c-${k}-${i}`).gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
