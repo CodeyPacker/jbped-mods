@@ -585,7 +585,10 @@ export const azure = {
         await rest(org, tok, io, `${prPath}/reviewers/${seg(id)}`, { vote, id }, API_VERSION, "PUT");
       }
     } catch (e) {
-      throw new Error(done ? `Posted ${done} of ${posts.length} threads, then: ${e.message ?? e}` : String(e.message ?? e));
+      // `posted`: how many of review.comments went out (the summary thread is last), so the caller can drop them.
+      const err = new Error(done ? `Posted ${done} of ${posts.length} threads, then: ${e.message ?? e}` : String(e.message ?? e));
+      err.posted = Math.min(done, (review.comments ?? []).length);
+      throw err;
     }
     return { url: detail?.url ?? pr.url ?? null };
   },

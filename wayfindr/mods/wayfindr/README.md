@@ -44,14 +44,14 @@ Files and diffs come from the PR's local clone when Wayfindr knows one: the Prof
 
 ### Comments and reviews
 
-Click a numbered line in a diff to open a comment box under it. Shift-click another line in the same hunk to stretch it to a range: the range stops at a hunk header, since GitHub takes ranges inside one hunk only, and the rows it covers get an accent edge. Enter or Save keeps the comment, Esc or Cancel drops the box, and an empty box saves nothing. A saved comment shows under its last line in an accent box, with "Lines a-b" on a range. Click its text to edit it, or × to delete it. A line that already has a thread or a comment still takes another. The line over the diff counts the file's saved comments.
+Click a numbered line in a diff to open a comment box under it. Shift-click another line in the same hunk to stretch it to a range: the range stops at a hunk header, since GitHub takes ranges inside one hunk only, and the rows it covers get an accent edge. Ctrl+Enter or Save keeps the comment (Enter is a new line), Esc or Cancel drops the box, and an empty box saves nothing. A saved comment shows under its last line in an accent box, with "Lines a-b" on a range. Click its text to edit it, or × to delete it. A line that already has a thread or a comment still takes another. The line over the diff counts the file's saved comments.
 
 Saved comments stay on this computer, in `data/wayfindr/comments/<repo>-pr-<n>.json` under Herdr's home, until a review posts them. Nothing leaves the machine until you press Yes.
 
 "Post review (N)" in the overlay's header, or `p`, opens the review screen in place of a file: who it posts as, the saved comments (`path:line` and the text), the verdict, and an optional summary. Verdicts: Comment, Approve, Request changes. On your own Pull Request only Comment is offered, because GitHub refuses the others from the author. A post needs a comment, Approve, or a summary. "Post as <verdict>" asks once more, `Post <verdict> to <PR> as <you> with N comments? Everyone on the PR will see it.`, and Yes posts. After it posts, "Posted. Open on <site>" links to it, the saved comments are deleted, and the PR reloads. If it fails, the error shows and the comments stay. A review goes out as the signed-in account, and Wayfindr can't undo it.
 
 - GitHub: one review through the reviews API, on the PR's head commit. An empty summary is sent as "See the inline comments." (except on Approve). It needs the `repo` scope, which `gh auth login` grants by default.
-- Azure: one thread per comment, then the summary as a thread on no file, then your vote: Approve votes "Approved", Request changes votes "Rejected", and Comment casts no vote. A failure part way says how many threads were posted.
+- Azure: one thread per comment, then the summary as a thread on no file, then your vote: Approve votes "Approved", Request changes votes "Rejected", and Comment casts no vote. A failure part way says how many threads were posted, and the comments that went out leave the saved list, so posting again sends only the rest.
 
 "Reply" under an open review thread opens the same box under it. Save posts the reply at once as the signed-in account, then the PR reloads. A refused reply shows its error under the thread and keeps the text.
 

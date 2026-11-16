@@ -183,6 +183,7 @@ test("Azure postReview: a refusal says how far it got, never with the token", as
   const review = { event: "comment", body: "", comments: [{ path: "a", line: 1, side: "new", body: "x" }, { path: "a", line: 900, side: "new", body: "y" }] };
   await assert.rejects(azure.postReview(AZ, azPr, { me: { id: "u" } }, review, r.io), (e) => {
     assert.equal(e.message, "Posted 1 of 2 threads, then: The line is outside the file");
+    assert.equal(e.posted, 1);
     return !e.message.includes(TOKEN);
   });
   r = writer(() => [401, ""]);

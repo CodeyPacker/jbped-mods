@@ -892,6 +892,9 @@ export default class Wayfindr extends View {
         if (this.selectedPr?.pr.key === key) { this.prSummary.set_value(""); this.fetchPr(cx); }
       } catch (e) {
         Object.assign(P, { status: "error", error: `Couldn't post the review: ${e.message ?? e}` });
+        // Azure posts one thread per comment: the ones that went out leave the list, so a retry doesn't repeat them.
+        const n = Number.isInteger(e?.posted) ? e.posted : 0, c = this.prComments[key];
+        if (n > 0 && c) { const gone = new Set(list.slice(0, n).map((x) => x.id)); c.list = c.list.filter((x) => !gone.has(x.id)); this.persistPrComments(key, cx); }
       }
       cx.notify();
     });
@@ -2213,11 +2216,13 @@ export default class Wayfindr extends View {
           .child("Reply")));
   }
 
-  // The comment box under a row or a thread (D5, D6): the text, Save (Reply) and Cancel. Enter saves, Esc cancels.
+  // The comment box under a row or a thread (D5, D6): the text, Save (Reply) and Cancel. Ctrl+Enter saves (Enter
+  // is a new line in a markdown comment), Esc cancels.
   prBoxEl(t, k, { reply = false, busy = false, error = null, label = null } = {}) {
     return v_flex().id(`wf-pr-box-${k}`).min_w(0).ml(56).mr(10).my(4).max_w(640).gap(6)
       .when(Boolean(label), (el) => el.child(div().text_size(11).text_color(t.dim).child(label)))
       .child(div().on_mouse_down("left", stop).rounded(6).border(1).border_color(t.accent).bg(t.background).p(6).text_size(12).text_color(t.foreground)
+        .on_key_down((e, cx) => { if (e.keystroke === "ctrl-enter" || e.keystroke === "cmd-enter") { cx.stop_propagation(); this.savePrBox(cx); cx.notify(); } })
         .child(Textarea.new(this.prBox).w_full()))
       .child(h_flex().gap(8).items_center()
         .child(div().flex_1().min_w(0).text_size(11.5).text_color(error ? t.blocked : t.dim)
