@@ -990,7 +990,7 @@ export default class Review extends View {
     return this.withTokens({ ...f, Btext: text, Ctext: text, B: C, C }, cx);
   }
 
-  async openFile(store, rel, cx, at = null) {
+  async openFile(store, rel, cx, at = null, { check = false } = {}) {
     [store, rel] = this.own(store, rel); // one identity per file, however it was reached (P1)
     this.narrowLeft = false; // a narrow Edit view (columns.js) shows the file, not the column
     const key = `${store.root}|${rel}`, space = this.spaceId, rk = `${idOf(store)}|${rel}`;
@@ -1013,7 +1013,7 @@ export default class Review extends View {
     if (fresh) this.opened.push(key);
     this.pick(key, cx);
     const f = this.file();
-    if (fresh && f?.key === key) this.problems.opened(f.store, f.rel, cx);
+    if ((fresh || check) && f?.key === key) this.problems.opened(f.store, f.rel, cx); // check: a hand-off from Review or Changes, whose file may have changed since its last run
     if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); this.paint(cx); }
     if (f && this.nvim()) this.toNvim(f, at?.line ?? f.hunks[0]?.n ?? 0, cx);
   }
@@ -1429,7 +1429,7 @@ export default class Review extends View {
         else if (store && this.view === "edit") {
           // An inline edit asked for in Review (ctrl-k there) opens here, on the same lines.
           const inline = g.inline ?? null;
-          cx.spawn(async (cx) => { await this.openFile(store, g.key.slice(i + 1), cx, g.at); if (inline && this.file()?.key === g.key) this.openInline(cx, inline.instruction ?? null, inline.span); });
+          cx.spawn(async (cx) => { await this.openFile(store, g.key.slice(i + 1), cx, g.at, { check: true }); if (inline && this.file()?.key === g.key) this.openInline(cx, inline.instruction ?? null, inline.span); });
         }
         else if (store && this.visible().some((f) => f.key === g.key)) {
           this.pick(g.key, cx);
