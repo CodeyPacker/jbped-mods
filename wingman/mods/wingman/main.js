@@ -16,6 +16,8 @@ import { buildPrompt, chooseTarget, isWslArgv, promptProblem } from "./commentpr
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
 import { Store, PlainRoot, norm, shows, MAX_TEXT } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
+import { formatText, newFormatCache } from "./formatrun.js";
+import { applyFormat } from "./format.js";
 import { edit, body, cmp, linesOf, wordMove, wordAt, textBetween, indentUnit, visualCol, charAt, expandTabs } from "./edit.js";
 import { hostPath } from "./capture.js";
 import { captureNotices } from "./captureplan.js";
@@ -42,7 +44,7 @@ import { REMOTE, NVIM_NOTE, EDITOR_NOTE, NOTES_NOTE, REASON_NOTE, remotePath, ro
 import { grepArgs, searchRepo, replacePlan } from "./search.js";
 import { MAX_RESULTS, fmt, many, resultRows, occurrences, summaryOf, matchPieces, replaceState } from "./searchview.js";
 import { matchBracket, tokenSkip } from "./brackets.js";
-import { spans as spansOf } from "./spans.js";
+import { spans as spansOf, packSpans } from "./spans.js";
 import { sync as syncPanels } from "./panels.js";
 import { addSpaceRepos, queueFeedback, withdrawFeedback, queuePrompt, loadSettings, saveSettings, loadKeys, saveKeys, hookKnown, forgetHook } from "./journal.js";
 import { hookStatus, hookSummary, installHook, uninstallHook } from "./hooksetup.js";
@@ -207,7 +209,9 @@ export default class Review extends View {
     if (props()?.role === CONTROLLER) return this.initController(cx);
     this.id = Math.random().toString(36).slice(2);
     this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
-    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, hideHerdrPanels: false };
+    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, hideHerdrPanels: false, formatOnSave: false };
+    this.formatting = new Set(); // "<space>|<file key>" of the formats running
+    this.fmtCaches = new Map(); // space -> what formatrun.js found for it (the formatter per folder), cleared with the space
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
     this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
@@ -3183,7 +3187,7 @@ export default class Review extends View {
   openSettings() {
     // A space on another machine adds the "Claude hook on <machine>" section.
     const machine = this.machine();
-    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 870 + (machine ? 150 : 0) });
+    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 940 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -4093,6 +4097,80 @@ export default class Review extends View {
     return w;
   }
 
+  // ---- format on save ----------------------------------------------------------
+
+  /** ctrl-s and the Save button: formats first when Settings has Format on save on. Autosave never does (save). */
+  saveKey(cx) { if (this.settings.formatOnSave) this.formatThenSave(cx, false); else this.save(cx); }
+
+  /** The format command (alt-shift-f): format and save, whatever Format on save says. */
+  formatNow(cx) { this.formatThenSave(cx, true); }
+
+  /**
+   * Formats the current file with the repo's formatter (formatrun.js), applies the result as one undo
+   * step, then saves. A formatter that is missing or fails never blocks the save: the buffer is
+   * saved as it is, with a one-line notice. A result is only applied to a buffer that hasn't changed
+   * since the format began.
+   */
+  formatThenSave(cx, explicit) {
+    const f = this.file();
+    if (!f) return;
+    const canEdit = this.editable(f) && this.view !== "review" && this.mode !== "changes" && !this.nvim() && !!f.store;
+    if (!canEdit || f.conflict) {
+      if (explicit && !f.conflict) { this.error = "Format works on a file open in the Edit view"; this.paint(cx); return; }
+      return this.save(cx);
+    }
+    const space = this.spaceId, key = f.key, text = f.Ctext, mark = `${space}|${key}`;
+    if (this.formatting.has(mark)) return;
+    if (this.fmtNote && this.error === this.fmtNote) this.error = null; // the last format's notice goes when the next one starts
+    this.fmtNote = null;
+    this.formatting.add(mark);
+    if (!this.fmtCaches.has(space)) this.fmtCaches.set(space, newFormatCache());
+    const cache = this.fmtCaches.get(space), { root, on = null } = f.store, rel = f.rel;
+    cx.spawn(async (cx) => {
+      let r;
+      try { r = await formatText({ root, on, rel, text, cache }); } catch (e) { r = { status: "failed", reason: String(e?.message ?? e).slice(0, 200) }; }
+      this.formatting.delete(mark);
+      try { this.finishFormat(space, key, text, r, explicit, cx); }
+      catch (e) { // the buffer still holds the user's text: save it as it is
+        failIn(this, space, `Not formatted (${String(e?.message ?? e).slice(0, 120)}). Saved as is`);
+        const g = space === this.spaceId ? this.files.find((x) => x.key === key) : null;
+        if (g) this.save(cx, g);
+        this.paint(cx);
+      }
+    });
+  }
+
+  /** A format ended: apply it when the buffer is as it was, save, and say what didn't work. */
+  finishFormat(space, key, text, r, explicit, cx) {
+    if (space !== this.spaceId) { failIn(this, space, "Format finished after you left this space: not applied, not saved"); this.paint(cx); return; }
+    const g = this.files.find((x) => x.key === key);
+    if (!g) return;
+    let msg = r.leftover ? `Could not remove the temp file ${r.leftover}` : null;
+    if (g.Ctext !== text) msg = "Not formatted: the file changed while the formatter ran. Saved as is";
+    else if (r.status === "failed") msg = `Not formatted (${r.reason}). Saved as is`;
+    else if (r.status === "none") { if (explicit) msg = r.ignoredBy ? `${r.ignoredBy} ignores ${base(g.rel)}. Saved as is` : `No formatter for ${base(g.rel)} in this repo. Saved as is`; }
+    else if (r.status === "ok") {
+      const shown = this.sel === key;
+      // Highlighting a big result line by line in one go could run too long for Herdr's script runtime:
+      // past 300 lines the new lines start plain and retokenize (chunked) colours them a moment later.
+      const lang = languageOf(g.rel, body(linesOf(g)[0] ?? "")), big = r.text.split("\n").length > 300;
+      const res = applyFormat(g, r.text, big ? (ls) => ls.map((l) => packSpans(l ? [{ text: l, type: null }] : [])) : (ls) => highlightLines(ls, lang), shown ? this.cur : null);
+      if (!res) msg = `Not formatted (${r.tool} gave a result Wingman could not apply). Saved as is`;
+      else if (!res.same) {
+        // One undo step for the whole format.
+        this.history.push({ edit: true, key, state: bare(g), cur: this.cur, at: Date.now(), group: false }); capSteps(this.history);
+        this.redo = [];
+        res.state.edited = true;
+        this.replace(g, res.state);
+        if (shown && res.cursor) { this.cur = res.cursor; this.anchor = null; this.selA = this.selB = null; this.goalX = null; }
+        this.settle(); if (shown) this.showCursor(); this.retokenize(cx);
+      }
+    }
+    this.save(cx, this.files.find((x) => x.key === key));
+    if (msg) { failIn(this, space, msg); this.fmtNote = msg; }
+    this.paint(cx);
+  }
+
   save(cx, f = this.file()) {
     if (!f) return;
     if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; this.paint(cx); return; }
@@ -4199,7 +4277,7 @@ export default class Review extends View {
       quickOpen: () => this.openQuick(cx), toggleView: () => this.setMode(this.nextView(), cx),
       toggleTree: () => this.toggleTree(cx), openInVSCode: () => this.toVSCode(cx), toggleWrap: () => this.toggleWrap(cx),
       openInNvim: () => { if (f) this.toNvim(f, this.cur?.line ?? f.hunks[this.current]?.n ?? 0, cx); },
-      save: () => this.save(cx), undo: () => this.undo(cx), redo: () => this.redoEdit(cx),
+      save: () => this.saveKey(cx), formatFile: () => this.formatNow(cx), undo: () => this.undo(cx), redo: () => this.redoEdit(cx),
       selectAll: () => this.clip("all", cx), copy: () => this.clip("copy", cx), cut: () => this.clip("cut", cx), paste: () => this.clip("paste", cx),
       moveLineUp: () => this.lineOp("moveUp", cx), moveLineDown: () => this.lineOp("moveDown", cx),
       copyLineUp: () => this.lineOp("copyUp", cx), copyLineDown: () => this.lineOp("copyDown", cx),
@@ -4789,6 +4867,7 @@ export default class Review extends View {
             .bg(st.autosaveDelay === n ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85))
             .on_click((_e, cx) => { if (st.autosave) this.setSetting({ autosaveDelay: n }, cx); })
             .child(n ? `${n}s` : "Focus change")))))
+        .child(toggle("set-format", "Format on save", "Run the repo's Prettier (or CSharpier for C#) on Ctrl+S and Alt+Shift+F. Autosave never formats: it would move text while you are elsewhere.", st.formatOnSave ?? false, (cx) => this.setSetting({ formatOnSave: !(st.formatOnSave ?? false) }, cx)))
         .child(v_flex().gap(6).pt(4)
           .child(div().text_size(12).text_color(t.muted).child("Editor"))
           .child(h_flex().gap(4).children([["wingman", "Wingman"], ["nvim", "Neovim"]].map(([v, label]) => div().id(`editor-${v}`).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
@@ -5027,7 +5106,7 @@ export default class Review extends View {
           }))
         .when(fb.has("pos"), (e) => e.child(div().flex_none().whitespace_nowrap().text_size(10).text_color(t.dim).px(6).child(fb.get("pos"))))
         .when(fb.has("nvim"), (e) => e.child(this.button("nvim", fb.get("nvim"), t.raised, (cx) => this.toNvim(f, f.hunks[this.current]?.n ?? 0, cx)).flex_none().whitespace_nowrap()))
-        .when(fb.has("save"), (e) => e.child(this.button("save", fb.get("save"), t.accent + "55", (cx) => this.save(cx)).flex_none().whitespace_nowrap()))
+        .when(fb.has("save"), (e) => e.child(this.button("save", fb.get("save"), t.accent + "55", (cx) => this.saveKey(cx)).flex_none().whitespace_nowrap()))
         // A review comment on the cursor's line or the selection (Review also has one on each change).
         .when(fb.has("add-comment"), (e) => e.child(this.button("add-comment", fb.get("add-comment"), t.ansi5 + "40", (cx) => this.commentHere(cx)).flex_none().whitespace_nowrap()))
         // Only a file with the agent's changes (an opened file's own edits aren't the agent's).
