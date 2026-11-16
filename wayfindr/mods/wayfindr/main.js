@@ -10,13 +10,14 @@ import { run, layout, shared, setShared, theme, settings, home, appHome, readTex
 import { parseConfig, defaultRunner } from "./config.js";
 import { parseWranglr } from "./wranglr.js";
 import { createRunner } from "./runner.js";
-import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, loadLocalPrDiff, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
+import { loadBoard, loadTicket, loadPullRequests, loadPullRequestDetail, loadLocalPrDiff, signInStates, discoverBoards, discoverRepos, loadImages, IMAGE_MD, existingWorktrees, makeLaunchWorktrees, makeReviewWorktree, listClones, cloneOrigin, loadReviewInfo, moveTicket, updateTicket, commentOnTicket, postPrReview, replyToPrThread, pruneImages, boardStatuses, providerFor, renameProfileData } from "./flow.js";
 import * as edits from "./settings.js";
 import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPrompt, reviewPrompt, ticketFolder, ticketPrefix, reviewFolder, slug, repoName, spaceTarget, launchSpaceName, reviewSpaceName } from "./launch.js";
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
 import { diffRows, longestLine } from "./prdiff.js";
 import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads, barePath } from "./prfiles.js";
+import { COMMENTS_DIR, parseComments, commentsOn, coveredRows, openAt, extendOpen, saveComment, removeComment, linesOf, rowOf, verdictsFor, verdictLabel, canPost, toReview, confirmText } from "./prcomments.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -33,6 +34,10 @@ const PR_RAIL_KEY = "wayfindr.prRail", PR_RAIL_DEFAULT = 210, PR_RAIL_MIN = 140,
 // Viewed marks, one file per Pull Request: { head, files: { [path]: true } }, under Herdr's home.
 const VIEWED_DIR = "data/wayfindr/viewed";
 const viewedDir = () => `${appHome()}/${VIEWED_DIR}`.replace(/\\/g, "/");
+// Line comments (#27), one file per Pull Request: [{ id, path, line, side, startLine?, startSide?, text, code }].
+// The save path is data/wayfindr/comments/<viewedKey>.json under Herdr's home (COMMENTS_DIR).
+const commentsDir = () => `${appHome()}/${COMMENTS_DIR}`.replace(/\\/g, "/");
+const REVIEW_SCREEN = "__review__"; // prShown's value for the Post review screen (#27): not a file, not in the rail order
 const DIFF_LINES = 500; // a patch's rows shown before "Show N more lines"
 const DIFF_CHAR_W = 7, DIFF_GUTTER = 80; // about one terminal-font character at 11.5 px; number, mark and gaps
 const PR_SITE = { github: "GitHub", azure: "Azure DevOps" }; // where API diffs come from
@@ -273,6 +278,23 @@ export default class Wayfindr extends View {
     this.prViewed = {}; // pr key -> { head, files: { path -> true }, file, text, saving }: the viewed marks (D8)
     this.prThreadsOpen = {}; // pr key -> Set of resolved thread ids drawn open (#25)
     this.railDrag = null; // the rail's edge drag: { x, from, w }
+    // Writing a review (#27).
+    this.prComments = {}; // pr key -> { list, file, text, saving }: the line comments saved on this computer
+    this.prOpen = {}; // pr key -> the comment box: { path, line, side, startLine?, startSide?, editId? } or { reply: thread id }, or null
+    this.prBox = TextareaState.new({ placeholder: "Comment on this line (markdown)", rows: 3 });
+    this.prBox.set_auto_grow(3, 10);
+    this.prBox.on("focus", () => { this.typing = "pr"; });
+    this.prBox.on("blur", () => { if (this.typing === "pr") this.typing = false; });
+    this.prBox.on("submit", (_e, cx) => { this.savePrBox(cx); cx.notify(); });
+    this.prSummary = TextareaState.new({ placeholder: "Summary (optional)", rows: 3 });
+    this.prSummary.set_auto_grow(3, 10);
+    this.prSummary.on("focus", () => { this.typing = "summary"; });
+    this.prSummary.on("blur", () => { if (this.typing === "summary") this.typing = false; });
+    this.prSummary.on("change", (_e, cx) => cx.notify()); // the Post button wakes when a summary is typed
+    this.prVerdict = {}; // pr key -> "comment" | "approve" | "changes"
+    this.prConfirm = null; // the pr key whose Post waits for Yes
+    this.prPosting = null; // { key, status: "busy" | "done" | "error", url, error }
+    this.prReplying = null; // { key, id (thread), status: "busy" | "error", error }
     this.editing = null; // the title being edited: { key, input, status, error }
     this.commentBox = TextareaState.new({ placeholder: "Write a comment (markdown)", rows: 3 });
     this.commentBox.set_auto_grow(3, 10);
@@ -483,6 +505,8 @@ export default class Wayfindr extends View {
       if (now !== before) {
         this.selected = null; this.fetchTicketLater = false; this.moveOpen = null;
         this.selectedPr = null; this.fetchPrLater = false; this.prAll = {}; this.prShown = {}; this.prLast = null; this.prViewed = {}; this.prThreadsOpen = {};
+        this.prComments = {}; this.prOpen = {}; this.prVerdict = {}; this.prConfirm = null; this.prPosting = null; this.prReplying = null;
+        this.prBox.set_value(""); this.prSummary.set_value("");
         this.launch = null; this.reviews = {}; this.editing = null; this.typing = false;
         this.commenting = null; this.moving = null; this.cursor = null;
       }
@@ -673,7 +697,11 @@ export default class Wayfindr extends View {
 
   // Opens the Pull Request panel, or switches it to another.
   openPr(accountId, pr, cx) {
-    if (this.prLast !== pr.key) { this.prShown[pr.key] = null; this.prLast = pr.key; }
+    if (this.prLast !== pr.key) {
+      this.prShown[pr.key] = null; this.prLast = pr.key;
+      // One comment box and one summary for the overlay: another PR starts them empty.
+      this.prOpen = {}; this.prBox.set_value(""); this.prSummary.set_value(""); this.prConfirm = null;
+    }
     this.selectedPr = { account: accountId, pr };
     this.handle.focus(); // the row's click stops the root's, which would focus: Esc needs it
     if (this.prDetails[pr.key]?.status !== "ok") this.fetchPr(cx);
@@ -719,7 +747,152 @@ export default class Wayfindr extends View {
       }
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.prDetails[key] = next;
-      if (next.status === "ok") this.loadViewed(key, next.data, cx);
+      if (next.status === "ok") { this.loadViewed(key, next.data, cx); this.loadPrComments(key, next.data, cx); }
+      cx.notify();
+    });
+  }
+
+  // The PR's saved line comments (#27), read once per PR when its detail first arrives. Comments made while the
+  // file is read are kept.
+  loadPrComments(key, d, cx) {
+    if (this.prComments[key]?.file) return;
+    const entry = { list: this.prComments[key]?.list ?? [], file: `${commentsDir()}/${viewedKey(d)}.json`, text: null };
+    this.prComments[key] = entry;
+    cx.spawn(async (cx) => {
+      let text = null;
+      try { text = await readTextFile(entry.file); } catch { /* none yet */ }
+      entry.text = text;
+      const ids = new Set(entry.list.map((c) => c.id));
+      entry.list = [...parseComments(text).filter((c) => !ids.has(c.id)), ...entry.list];
+      cx.notify();
+    });
+  }
+
+  // Saves the PR's comments, one save after another. An empty list removes the file.
+  persistPrComments(key, cx) {
+    const c = this.prComments[key];
+    if (!c?.file) return;
+    const before = c.saving ?? Promise.resolve();
+    let done;
+    c.saving = new Promise((r) => { done = r; });
+    cx.spawn(async () => {
+      await before;
+      try { await this.writePrComments(c); } catch { /* the comments stay in memory */ }
+      done();
+    });
+  }
+
+  // Compare-and-swap on the text read before, as the viewed marks; on a conflict, read again and write once more.
+  async writePrComments(c) {
+    if (c.list.length === 0) {
+      try { await fs.rm(c.file, { force: true }); c.text = null; return; } catch { /* no rm here: write an empty list */ }
+    }
+    const text = JSON.stringify(c.list, null, 2);
+    await fs.mkdir(commentsDir(), { recursive: true });
+    try { await writeTextFile(c.file, text, c.text); } catch {
+      const cur = await readTextFile(c.file);
+      await writeTextFile(c.file, text, cur ?? null);
+    }
+    c.text = text;
+  }
+
+  // Opens the comment box at a place (a line, a range, or { reply }) with its text, and gives it the keyboard.
+  openPrBox(key, place, text = "") {
+    this.prOpen[key] = place;
+    this.prBox.set_value(text);
+    this.prBox.focus();
+    if (this.prReplying?.key === key && this.prReplying.status === "error") this.prReplying = null;
+  }
+
+  closePrBox(key) {
+    this.prOpen[key] = null;
+    this.prBox.set_value("");
+    if (this.typing === "pr") this.typing = false;
+    this.handle.focus();
+  }
+
+  // A click on a numbered diff row (D5): opens the box on it. With shift while the box is open on this file,
+  // the box spans the rows between, cut at a hunk header, and keeps its text.
+  clickPrRow(key, f, rows, i, shift) {
+    const open = this.prOpen[key];
+    if (shift && open && open.reply == null && barePath(open.path) === barePath(f.path)) {
+      const text = this.prBox.value();
+      this.prOpen[key] = extendOpen(rows, open, i);
+      this.prBox.focus();
+      if (this.prBox.value() !== text) this.prBox.set_value(text);
+      return;
+    }
+    const place = openAt(rows, f.path, i);
+    if (place) this.openPrBox(key, place);
+  }
+
+  // Enter or Save in the box: a reply posts at once; a line comment is saved on this computer. Empty text closes.
+  savePrBox(cx) {
+    const sel = this.selectedPr, key = sel?.pr.key, open = key ? this.prOpen[key] : null;
+    if (!open) return;
+    const text = this.prBox.value().trim();
+    if (open.reply != null) { if (text) this.postPrReply(key, open.reply, text, cx); return; }
+    if (text) {
+      const d = this.prDetails[key]?.data, f = (d?.files ?? []).find((x) => barePath(x.path) === barePath(open.path));
+      const rows = f && !f.binary && f.patch != null ? this.rowsOf(f).rows : [];
+      const code = rows[rowOf(rows, open.line, open.side)]?.text ?? "";
+      const c = (this.prComments[key] ??= { list: [], file: null, text: null });
+      c.list = saveComment(c.list, open, text, code, `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
+      this.persistPrComments(key, cx);
+    }
+    this.closePrBox(key);
+  }
+
+  deletePrComment(key, id, cx) {
+    const c = this.prComments[key];
+    if (!c) return;
+    c.list = removeComment(c.list, id);
+    if (this.prOpen[key]?.editId === id) this.closePrBox(key);
+    this.persistPrComments(key, cx);
+  }
+
+  // Reply (D6): posts under the thread at once, then reloads the detail. A refusal shows under the thread and the
+  // text stays in the box.
+  postPrReply(key, threadId, text, cx) {
+    const sel = this.selectedPr, p = this.profile, d = this.prDetails[key]?.data;
+    const th = (d?.threads ?? []).find((x) => String(x.id) === String(threadId));
+    if (!sel || !th || this.prReplying?.status === "busy") return;
+    const R = this.prReplying = { key, id: String(threadId), status: "busy" };
+    const io = this.io();
+    cx.spawn(async (cx) => {
+      try {
+        await replyToPrThread(p, sel.account, sel.pr, d, th, text, io);
+        if (this.prReplying === R) this.prReplying = null;
+        if (this.prOpen[key]?.reply === threadId) this.closePrBox(key);
+        if (this.selectedPr?.pr.key === key) this.fetchPr(cx);
+      } catch (e) {
+        R.status = "error"; R.error = `Couldn't post the reply: ${e.message ?? e}`;
+      }
+      cx.notify();
+    });
+  }
+
+  // Post review (D7), after Yes: one review with every saved comment, the verdict and the summary. Posted
+  // comments leave this computer's list; a failure keeps them all.
+  sendPrReview(cx) {
+    const sel = this.selectedPr, p = this.profile, key = sel?.pr.key, d = this.prDetails[key]?.data;
+    if (!d || this.prPosting?.status === "busy") return;
+    const list = this.prComments[key]?.list ?? [], mine = Boolean(d.me && d.author?.id === d.me.id);
+    const event = mine ? "comment" : (this.prVerdict[key] ?? "comment"), body = this.prSummary.value();
+    this.prConfirm = null;
+    if (!canPost(list, event, body)) return;
+    const P = this.prPosting = { key, status: "busy" };
+    const io = this.io(), posted = new Set(list.map((c) => c.id));
+    cx.spawn(async (cx) => {
+      try {
+        const r = await postPrReview(p, sel.account, sel.pr, d, toReview(list, event, body), io);
+        Object.assign(P, { status: "done", url: r?.url ?? d.url ?? null });
+        const c = this.prComments[key];
+        if (c) { c.list = c.list.filter((x) => !posted.has(x.id)); this.persistPrComments(key, cx); }
+        if (this.selectedPr?.pr.key === key) { this.prSummary.set_value(""); this.fetchPr(cx); }
+      } catch (e) {
+        Object.assign(P, { status: "error", error: `Couldn't post the review: ${e.message ?? e}` });
+      }
       cx.notify();
     });
   }
@@ -780,17 +953,29 @@ export default class Wayfindr extends View {
   }
 
   // Keys while the Pull Request overlay is open (D5): down and up through the Overview and the rail's files,
-  // home to the Overview, v marks the shown file viewed. True when the key was used.
+  // home to the Overview, v marks the shown file viewed, p opens Post review (#27). True when the key was used.
+  // The Post review screen isn't in the rail's order: down from it goes to the first file, up to the Overview.
   prKey(key, cx, mods = {}) {
     const sel = this.selectedPr;
-    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v"].includes(key)) return false;
+    if (!sel || mods.control || mods.alt || mods.platform || !["up", "down", "home", "v", "p"].includes(key)) return false;
     const k = sel.pr.key, d = this.prDetails[k]?.data;
+    if (key === "p") {
+      if (!this.canWritePr(sel.account, "postReview")) return false;
+      this.prShown[k] = REVIEW_SCREEN;
+      return true;
+    }
     const order = this.railOrder(d).map((f) => f.path), cur = this.prShown[k] ?? null, i = cur == null ? -1 : order.indexOf(cur);
     if (key === "home") this.prShown[k] = null;
     else if (key === "down") { if (i + 1 < order.length) this.prShown[k] = order[i + 1]; }
     else if (key === "up") this.prShown[k] = i <= 0 ? null : order[i - 1];
-    else if (cur != null) this.toggleViewed(k, cur, cx);
+    else if (cur != null && cur !== REVIEW_SCREEN) this.toggleViewed(k, cur, cx);
     return true;
+  }
+
+  // Whether the Account's Provider can post reviews or replies (#27).
+  canWritePr(accountId, capability) {
+    const a = this.profile?.accounts.find((x) => x.id === accountId);
+    return Boolean(a) && can(providerFor(a), capability);
   }
 
   // A Ticket's images, saved under Herdr's home so image() can show them. Each shows as it arrives.
@@ -2020,7 +2205,44 @@ export default class Wayfindr extends View {
           .on_mouse_down("left", stop).on_click((_e, cx) => flip(cx)).child("Fold"))))
       .children(th.comments.map((c, i) => v_flex().min_w(0).gap(1).when(i > 0, (el) => el.pl(10).border_l_2().border_color(t.border))
         .child(div().text_size(11).font_semibold().text_color(t.muted).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
-        .child(div().min_w(0).text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-th-${k}-${id}-${i}`, c.body ?? "").selectable(true)))));
+        .child(div().min_w(0).text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-th-${k}-${id}-${i}`, c.body ?? "").selectable(true)))))
+      // Reply (D6): opens the comment box under the thread.
+      .when(th.reply != null && this.prOpen[k]?.reply !== th.id && this.canWritePr(this.selectedPr?.account, "reply"), (el) => el
+        .child(div().id(`wf-pr-th-reply-${k}-${id}`).text_size(11.5).text_color(t.accent).cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.openPrBox(k, { reply: th.id }); cx.notify(); })
+          .child("Reply")));
+  }
+
+  // The comment box under a row or a thread (D5, D6): the text, Save (Reply) and Cancel. Enter saves, Esc cancels.
+  prBoxEl(t, k, { reply = false, busy = false, error = null, label = null } = {}) {
+    return v_flex().id(`wf-pr-box-${k}`).min_w(0).ml(56).mr(10).my(4).max_w(640).gap(6)
+      .when(Boolean(label), (el) => el.child(div().text_size(11).text_color(t.dim).child(label)))
+      .child(div().on_mouse_down("left", stop).rounded(6).border(1).border_color(t.accent).bg(t.background).p(6).text_size(12).text_color(t.foreground)
+        .child(Textarea.new(this.prBox).w_full()))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(11.5).text_color(error ? t.blocked : t.dim)
+          .child(error ?? (reply ? "Posts at once, as the signed-in account." : "Saved on this computer until you post a review.")))
+        .child(button(`wf-pr-box-cancel-${k}`, "Cancel", t, (cx) => { this.closePrBox(k); cx.notify(); }))
+        .child(button(`wf-pr-box-save-${k}`, busy ? "Posting…" : reply ? "Reply" : "Save", t, (cx) => { this.savePrBox(cx); cx.notify(); }, { on: true })));
+  }
+
+  // A saved line comment under its last line (D5): "Lines a-b" on a range, the text (a click edits it), × deletes.
+  prBubble(t, k, c) {
+    return h_flex().id(`wf-pr-cm-${k}-${c.id}`).min_w(0).ml(56).mr(10).my(3).max_w(640).px(10).py(6).gap(8).items_start().rounded(7)
+      .border_1().border_color(t.accent).bg(t.raised).text_size(12)
+      .child(v_flex().id(`wf-pr-cm-edit-${k}-${c.id}`).flex_1().min_w(0).gap(2).cursor_pointer()
+        .on_mouse_down("left", stop)
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          const place = { path: c.path, line: c.line, side: c.side, ...(c.startLine !== undefined ? { startLine: c.startLine, startSide: c.startSide } : {}), editId: c.id };
+          this.openPrBox(k, place, c.text); cx.notify();
+        })
+        .when(c.startLine !== undefined, (el) => el.child(div().text_size(11).text_color(t.dim).child(`Lines ${linesOf(c)}`)))
+        .child(div().min_w(0).text_color(t.foreground).child(c.text)))
+      .child(div().id(`wf-pr-cm-del-${k}-${c.id}`).flex_none().px(4).rounded(4).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.deletePrComment(k, c.id, cx); cx.notify(); })
+        .child("×"));
   }
 
   // One file's diff rows (#23) with its review threads under their lines (#25). The first DIFF_LINES rows show,
@@ -2040,12 +2262,31 @@ export default class Wayfindr extends View {
         .child(div().w(10).flex_none().text_color(r.kind === "+" ? t.done : t.blocked).child(r.kind === "+" ? "+" : r.kind === "-" ? "−" : ""))
         .child(div().flex_none().pr(12).whitespace_nowrap().text_color(r.kind === "" ? t.dim : t.foreground).child(r.text.replace(/\t/g, "    ")));
     };
-    const items = [];
-    for (const r of shown) {
-      items.push(div().min_w(width).flex_none().font_family(mono).text_size(11.5).child(row(r)));
-      for (const th of threadsOn(threads, f.path, r)) items.push(this.prThread(t, k, th, site));
-    }
+    // Comments (#27): a numbered row takes a click (shift extends the open box); saved ones and the box sit under
+    // their last line; the rows a range covers get an accent edge.
     const i = (this.prDetails[k]?.data?.files ?? []).indexOf(f);
+    const writable = this.canWritePr(this.selectedPr?.account, "postReview");
+    const saved = this.prComments[k]?.list ?? [], open = this.prOpen[k] ?? null, covered = coveredRows(rows, saved, f.path, open);
+    const R = this.prReplying?.key === k ? this.prReplying : null;
+    const items = [];
+    shown.forEach((r, idx) => {
+      const clickable = writable && r.kind !== "@" && r.number !== undefined;
+      items.push(div().id(`wf-pr-row-${k}-${i}-${idx}`).min_w(width).flex_none().font_family(mono).text_size(11.5)
+        .when(covered.has(idx), (el) => el.border_l_2().border_color(t.accent))
+        .when(clickable, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", stop)
+          .on_click((e, cx) => { cx.stop_propagation(); this.clickPrRow(k, f, rows, idx, Boolean(e.modifiers?.shift)); cx.notify(); }))
+        .child(row(r)));
+      for (const th of threadsOn(threads, f.path, r)) {
+        items.push(this.prThread(t, k, th, site));
+        if (open?.reply != null && open.reply === th.id) items.push(this.prBoxEl(t, k, { reply: true, busy: R?.id === String(th.id) && R.status === "busy", error: R?.id === String(th.id) ? R.error ?? null : null }));
+        else if (R?.id === String(th.id) && R.status === "error") items.push(div().ml(56).mr(10).max_w(640).text_size(11.5).text_color(t.blocked).child(R.error));
+      }
+      for (const c of commentsOn(saved, f.path, r)) if (c.id !== open?.editId) items.push(this.prBubble(t, k, c));
+      if (open && open.reply == null && commentsOn([open], f.path, r).length) {
+        items.push(this.prBoxEl(t, k, { label: open.startLine !== undefined ? `Lines ${linesOf(open)}` : null }));
+      }
+    });
     // A plain sideways scroll area with the bar drawn over it (Tourist's way): overflow_x_scrollbar sizes its
     // content to the longest row, which would make the threads as wide as it too.
     const sid = `wf-pr-diff-${k}-${i}`;
@@ -2104,6 +2345,59 @@ export default class Wayfindr extends View {
       .child(strip);
   }
 
+  // The Post review screen (D7), in the content column: who posts, the saved comments, the verdict, the summary,
+  // then Post with a confirm line in its place. Nothing leaves this computer until Yes.
+  prReviewScreen(t, k, d, cur, body, site) {
+    const list = this.prComments[k]?.list ?? [], me = d?.me?.name ?? "the signed-in account";
+    const mine = Boolean(d?.me && d.author?.id === d.me.id), verdicts = verdictsFor(mine);
+    const event = verdicts.some((v) => v.event === this.prVerdict[k]) ? this.prVerdict[k] : "comment";
+    const P = this.prPosting?.key === k ? this.prPosting : null, ready = Boolean(d) && canPost(list, event, this.prSummary.value());
+    const mono = settings().font_family ?? settings().font ?? "monospace";
+    const section = (title) => div().pt(8).text_size(11).font_semibold().text_color(t.dim).child(title.toUpperCase());
+    body
+      .child(h_flex().gap(8).items_baseline()
+        .child(div().text_size(16).font_semibold().text_color(t.foreground).child(`Post review on ${cur.id}`))
+        .child(div().text_size(12).text_color(t.dim).child(`posting as ${me}`)))
+      .child(section(`Comments (${list.length})`))
+      .when(list.length === 0, (el) => el.child(div().text_size(12).text_color(t.dim).child("No line comments. Click a line in a file to add one.")))
+      .children(list.map((c) => v_flex().id(`wf-pr-rv-c-${k}-${c.id}`).gap(4).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border)
+        .child(div().font_family(mono).text_size(11.5).text_color(t.dim).truncate().child(`${c.path}:${linesOf(c)}`))
+        .when(Boolean(c.code), (el) => el.child(div().font_family(mono).text_size(11.5).text_color(t.muted).truncate().child(c.code.replace(/\t/g, "    "))))
+        .child(div().text_size(12).text_color(t.foreground).child(c.text))))
+      .child(section("Verdict"))
+      .children(verdicts.map((v) => {
+        const on = v.event === event;
+        return h_flex().id(`wf-pr-rv-v-${k}-${v.event}`).h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+          .when(on, (el) => el.bg(t.selected)).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+          .on_mouse_down("left", stop).on_click((_e, cx) => { this.prVerdict[k] = v.event; this.prConfirm = null; cx.notify(); })
+          .child(div().w(12).flex_none().text_size(12).text_color(on ? t.accent : t.dim).child(on ? "●" : "○"))
+          .child(div().w(120).flex_none().text_size(12).text_color(t.foreground).child(v.label))
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(v.hint));
+      }))
+      .when(mine, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("This is your own Pull Request, so the verdict is Comment.")))
+      .child(section("Summary"))
+      .child(div().on_mouse_down("left", stop).rounded(6).border(1).border_color(t.input).bg(t.background).p(6).text_size(12).text_color(t.foreground)
+        .child(Textarea.new(this.prSummary).w_full()));
+    const label = verdictLabel(event);
+    if (P?.status === "busy") body.child(div().text_size(12).text_color(t.dim).child("Posting…"));
+    else if (this.prConfirm === k) {
+      body.child(v_flex().gap(8).p(10).rounded(8).border_1().border_color(t.accent).bg(t.raised)
+        .child(div().text_size(12).text_color(t.foreground).child(confirmText(event, cur.id, me, list.length)))
+        .child(h_flex().gap(8)
+          .child(button("wf-pr-rv-yes", "Yes", t, (cx) => { this.sendPrReview(cx); cx.notify(); }, { on: true }))
+          .child(button("wf-pr-rv-no", "No", t, (cx) => { this.prConfirm = null; cx.notify(); }))));
+    } else {
+      body.child(h_flex().gap(8).items_center()
+        .child(ready
+          ? button("wf-pr-rv-post", `Post as ${label}`, t, (cx) => { this.prConfirm = k; if (this.prPosting?.key === k) this.prPosting = null; cx.notify(); }, { on: true })
+          : h_flex().h(26).px(10).flex_none().items_center().rounded(6).text_size(12).text_color(t.dim).bg(t.background).child(`Post as ${label}`))
+        .child(button("wf-pr-rv-back", "Back", t, (cx) => { this.prShown[k] = null; this.prConfirm = null; cx.notify(); }))
+        .when(!ready, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Add a comment, choose Approve, or write a summary first."))));
+    }
+    if (P?.status === "done") body.child(div().text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-rv-done-${k}`, `Posted. ${link(`Open on ${site}`, P.url)}`)));
+    if (P?.status === "error") body.child(div().text_size(12).text_color(t.blocked).child(P.error));
+  }
+
   // The Pull Request overlay: a header, then the file rail and the content column (#24). The content is the
   // Overview (the summary, description, files line and comments) or one file's diff with its threads.
   prPanel(t) {
@@ -2120,6 +2414,7 @@ export default class Wayfindr extends View {
     const review = this.reviewActions(sel.account, pr), rv = review.state;
     const site = PR_SITE[this.profile?.accounts.find((a) => a.id === sel.account)?.provider] ?? "the API";
     const badge = checksBadge(d?.checks);
+    const writable = this.canWritePr(sel.account, "postReview"), saved = this.prComments[k]?.list ?? [];
 
     const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
       .child(div().min_w(0).text_size(12).text_color(t.muted).truncate().child([cur.id, cur.repo, cur.state].filter(Boolean).join(" · ")))
@@ -2131,13 +2426,17 @@ export default class Wayfindr extends View {
       .when(Boolean(cur.draft), (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
       .child(div().flex_1())
       .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      // Post review (#27): the saved comments, a verdict and a summary, posted as one review.
+      .when(writable, (el) => el.child(button("wf-pr-post-review", `Post review (${saved.length})`, t,
+        (cx) => { this.prShown[k] = REVIEW_SCREEN; cx.notify(); }, { on: this.prShown[k] === REVIEW_SCREEN })))
       .child(button("wf-pr-panel-review", rv?.status === "busy" ? (rv.message ?? "Starting…") : "Review", t,
         (cx) => review.start(cx), { on: rv?.status === "busy" }))
       .child(button("wf-pr-close", "Close", t, (cx) => { this.closePr(); cx.notify(); }));
 
     const files = d?.files ?? [], threads = d?.threads ?? [];
     const shownPath = this.prShown[k] ?? null, f = shownPath == null ? null : files.find((x) => x.path === shownPath) ?? null;
-    const body = v_flex().id(`wf-pr-body-${k}-${f ? files.indexOf(f) : "o"}`).flex_1().min_w(0).min_h(0).p(14).gap(10).overflow_y_scrollbar();
+    const reviewing = shownPath === REVIEW_SCREEN && writable;
+    const body = v_flex().id(`wf-pr-body-${k}-${f ? files.indexOf(f) : reviewing ? "r" : "o"}`).flex_1().min_w(0).min_h(0).p(14).gap(10).overflow_y_scrollbar();
     if (f) {
       const seen = Boolean(this.prViewed[k]?.files[barePath(f.path)]);
       body
@@ -2149,7 +2448,11 @@ export default class Wayfindr extends View {
             .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
             .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)))
           .child(button("wf-pr-viewed", seen ? "Viewed" : "Unviewed", t, (cx) => this.toggleViewed(k, f.path, cx), { on: seen })))
+        .when(writable, (el) => el.child(div().text_size(11).text_color(t.dim)
+          .child(`click a line to comment, shift-click to extend (${saved.filter((c) => barePath(c.path) === barePath(f.path)).length} saved)`)))
         .child(v_flex().min_w(0).rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(this.prDiff(t, k, f, threads, site)));
+    } else if (reviewing) {
+      this.prReviewScreen(t, k, d, cur, body, site);
     } else {
       body
         .child(div().text_size(16).font_semibold().text_color(t.foreground).child(cur.title))
@@ -2157,7 +2460,7 @@ export default class Wayfindr extends View {
         .when(rv?.status === "error", (el) => el.child(div().text_size(12).text_color(t.blocked).child(rv.error)))
         .when(!d && entry.status === "loading", (el) => el.child(skeletonPr(t)));
     }
-    if (d && !f) {
+    if (d && !f && !reviewing) {
       const general = (d.comments ?? []).filter((c) => !c.path);
       const checks = [...(d.checks?.list ?? [])].sort((a, b) => (CHECK_ORDER[a.state] ?? 4) - (CHECK_ORDER[b.state] ?? 4));
       const unplaced = unplacedThreads(threads, files, (x) => (x.binary || x.patch == null ? [] : this.rowsOf(x).rows));
@@ -2224,11 +2527,17 @@ export default class Wayfindr extends View {
       .on_key_down((e, cx) => {
         if (e.key === "escape") {
           // In a text box Esc only leaves it: a title edit is cancelled, a comment draft is kept.
-          if (this.typing) {
+          const pk = this.selectedPr?.pr.key;
+          if (this.typing === "pr" || (this.view === "prs" && pk && this.prOpen[pk])) {
+            if (pk) this.closePrBox(pk); // the comment box: cancelled, before anything else (D5)
+            this.typing = false; this.handle.focus();
+          } else if (this.typing) {
             if (this.typing === "title") this.editing = null;
             this.typing = false;
             this.handle.focus();
           } else if (this.moveOpen) this.moveOpen = null;
+          else if (this.view === "prs" && pk && this.prConfirm === pk) this.prConfirm = null;
+          else if (this.view === "prs" && pk && this.prShown[pk] === REVIEW_SCREEN) this.prShown[pk] = null; // back to the Overview (D7)
           else if (this.view === "prs" && this.selectedPr) this.closePr();
           else if (this.selected) this.closeTicket(); else this.close_();
           cx.notify(); return;
