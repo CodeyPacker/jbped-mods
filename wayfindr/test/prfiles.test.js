@@ -31,6 +31,7 @@ test("applyViewed keeps the marks only for the same head", () => {
   assert.deepEqual(applyViewed(saved, "def"), {});
   assert.deepEqual(applyViewed(null, "abc"), {});
   assert.deepEqual(applyViewed({ head: "abc", files: [] }, "abc"), {});
+  assert.deepEqual(applyViewed({ head: "abc", files: { "/src/x.cs": true } }, "abc"), { "src/x.cs": true }); // Azure's API path
 });
 
 const rows = diffRows("@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n\\ No newline at end of file");

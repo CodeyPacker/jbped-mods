@@ -23,15 +23,17 @@ export function viewedKey(pr) {
   return `${pr?.repo ?? ""}-pr-${number}`.replace(/[^A-Za-z0-9._-]+/g, "_");
 }
 
-// The saved marks ({ head, files }) when they were made on this head, else none: a new push unmarks every file.
+// Azure's paths start with "/", git's and GitHub's don't: threads and viewed marks compare paths without it.
+export const barePath = (p) => String(p ?? "").replace(/^\/+/, "");
+const bare = barePath;
+
+// The saved marks ({ head, files }), keyed by bare path, when they were made on this head, else none: a new push unmarks every file.
 export function applyViewed(saved, head) {
   if (!saved || typeof saved !== "object" || saved.head !== head) return {};
   const files = saved.files && typeof saved.files === "object" && !Array.isArray(saved.files) ? saved.files : {};
-  return Object.fromEntries(Object.entries(files).filter(([, v]) => v === true));
+  return Object.fromEntries(Object.entries(files).filter(([, v]) => v === true).map(([k]) => [bare(k), true]));
 }
 
-// Azure's paths start with "/", git's and GitHub's don't.
-const bare = (p) => String(p ?? "").replace(/^\/+/, "");
 
 // The threads that sit under one diff row: same file, same line, and the old side for a "-" row, the new side
 // for the others. Hunk headers and "\ No newline" rows have no number and match nothing.

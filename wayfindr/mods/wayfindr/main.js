@@ -4,7 +4,7 @@
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup } from "gpui-base";
+import { v_flex, h_flex, TextView, InputState, Input, TextareaState, Textarea, Popup, Scrollbar } from "gpui-base";
 import * as fs from "fs/promises";
 import { run, layout, shared, setShared, theme, settings, home, appHome, readTextFile, writeTextFile, nextCommand, notify, spaces, machines, pickFolder, window as herdrWindow } from "herdr";
 import { parseConfig, defaultRunner } from "./config.js";
@@ -16,7 +16,7 @@ import { DEFAULT_LAUNCH, DEFAULT_REVIEW, resolveTemplate, agentArgv, launchPromp
 import { shellInvocation } from "./command.js";
 import { sameRepo, scanRoots } from "./clones.js";
 import { diffRows, longestLine } from "./prdiff.js";
-import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads } from "./prfiles.js";
+import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads, barePath } from "./prfiles.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
@@ -732,9 +732,10 @@ export default class Wayfindr extends View {
     });
   }
 
-  // Marks or unmarks one file, and saves at once when there is a head. Saves run one after another.
-  toggleViewed(key, path, cx) {
-    const v = (this.prViewed[key] ??= { head: null, files: {}, file: null, text: null });
+  // Marks or unmarks one file, and saves at once when there is a head. Saves run one after another. Marks are
+  // keyed by the path without a leading "/", so the API's Azure paths and the clone's match.
+  toggleViewed(key, filePath, cx) {
+    const v = (this.prViewed[key] ??= { head: null, files: {}, file: null, text: null }), path = barePath(filePath);
     if (v.files[path]) delete v.files[path]; else v.files[path] = true;
     cx.notify();
     if (!v.file) return;
@@ -1992,7 +1993,7 @@ export default class Wayfindr extends View {
       if (s.has(id)) s.delete(id); else s.add(id);
       cx.notify();
     };
-    const box = v_flex().id(`wf-pr-th-${k}-${id}`).ml(56).mr(10).my(3).max_w(640).px(10).py(6).gap(6).rounded(7)
+    const box = v_flex().id(`wf-pr-th-${k}-${id}`).min_w(0).ml(56).mr(10).my(3).max_w(640).px(10).py(6).gap(6).rounded(7)
       .border_1().border_color(t.border).bg(t.raised).text_size(12);
     if (th.resolved && !open) {
       return box.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => flip(cx))
@@ -2004,9 +2005,9 @@ export default class Wayfindr extends View {
         .child(div().flex_1().min_w(0).truncate().child(`Resolved · on ${site}`))
         .child(div().id(`wf-pr-th-fold-${k}-${id}`).flex_none().text_color(t.accent).cursor_pointer().hover((s) => s.text_color(t.foreground))
           .on_mouse_down("left", stop).on_click((_e, cx) => flip(cx)).child("Fold"))))
-      .children(th.comments.map((c, i) => v_flex().gap(1).when(i > 0, (el) => el.pl(10).border_l_2().border_color(t.border))
+      .children(th.comments.map((c, i) => v_flex().min_w(0).gap(1).when(i > 0, (el) => el.pl(10).border_l_2().border_color(t.border))
         .child(div().text_size(11).font_semibold().text_color(t.muted).child(`${c.author} · ${String(c.createdAt ?? "").slice(0, 10)}`))
-        .child(div().text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-th-${k}-${id}-${i}`, c.body ?? "").selectable(true)))));
+        .child(div().min_w(0).text_size(12).text_color(t.foreground).child(TextView.markdown(`wf-pr-th-${k}-${id}-${i}`, c.body ?? "").selectable(true)))));
   }
 
   // One file's diff rows (#23) with its review threads under their lines (#25). The first DIFF_LINES rows show,
@@ -2032,8 +2033,13 @@ export default class Wayfindr extends View {
       for (const th of threadsOn(threads, f.path, r)) items.push(this.prThread(t, k, th, site));
     }
     const i = (this.prDetails[k]?.data?.files ?? []).indexOf(f);
-    return v_flex().w_full()
-      .child(v_flex().id(`wf-pr-diff-${k}-${i}`).w_full().py(4).overflow_x_scrollbar().children(items))
+    // A plain sideways scroll area with the bar drawn over it (Tourist's way): overflow_x_scrollbar sizes its
+    // content to the longest row, which would make the threads as wide as it too.
+    const sid = `wf-pr-diff-${k}-${i}`;
+    return v_flex().w_full().min_w(0)
+      .child(div().relative().w_full().min_w(0)
+        .child(v_flex().id(sid).w_full().min_w(0).py(4).overflow_x_scroll().children(items))
+        .child(Scrollbar.horizontal(sid).absolute().inset_0()))
       .when(shown.length < rows.length, (el) => el.child(h_flex().id(`wf-pr-more-${k}-${i}`).h(26).px(8).items_center().border_t(1).border_color(t.border)
         .cursor_pointer().text_size(12).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop).on_click((_e, cx) => { (this.prAll[k] ??= {})[f.path] = true; cx.notify(); })
@@ -2044,13 +2050,12 @@ export default class Wayfindr extends View {
   // generated ones. A row shows its file; its first cell marks it viewed. The strip on its right edge resizes it.
   prRail(t, k, d, threads) {
     const files = d?.files ?? [], g = groupFiles(files), shown = this.prShown[k] ?? null;
-    const marks = this.prViewed[k]?.files ?? {}, viewed = files.filter((f) => marks[f.path]).length;
-    const bare = (p) => String(p ?? "").replace(/^\/+/, "");
-    const counts = new Map();
+    const marks = this.prViewed[k]?.files ?? {}, viewed = files.filter((f) => marks[barePath(f.path)]).length;
+    const bare = barePath, counts = new Map();
     for (const th of threads) counts.set(bare(th.path), (counts.get(bare(th.path)) ?? 0) + 1);
     const label = (text) => div().pt(8).pb(2).px(8).text_size(11).text_color(t.dim).child(text);
     const fileRow = (f) => {
-      const i = files.indexOf(f), on = shown === f.path, seen = Boolean(marks[f.path]), n = counts.get(bare(f.path)) ?? 0;
+      const i = files.indexOf(f), on = shown === f.path, seen = Boolean(marks[barePath(f.path)]), n = counts.get(bare(f.path)) ?? 0;
       const slash = f.path.lastIndexOf("/"), folder = f.path.slice(0, slash + 1), name = f.path.slice(slash + 1);
       return h_flex().id(`wf-pr-rail-${k}-${i}`).h(26).flex_none().px(6).gap(6).items_center().rounded(5).cursor_pointer()
         .when(on, (el) => el.bg(t.selected)).when(!on, (el) => el.hover((s) => s.bg(t.hover)))
@@ -2060,8 +2065,9 @@ export default class Wayfindr extends View {
           .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.toggleViewed(k, f.path, cx); })
           .child(seen ? "✓" : FILE_STATUS[f.status] ?? "?"))
         .child(h_flex().flex_1().min_w(0).overflow_hidden().text_size(12)
-          .child(div().min_w(0).truncate().text_color(t.dim).child(folder))
-          .child(div().flex_none().text_color(seen ? t.dim : t.foreground).child(name)))
+          // The folder gives way first; a long name is cut after it.
+          .child(div().min_w(0).flex_shrink(100).truncate().text_color(t.dim).child(folder))
+          .child(div().min_w(0).truncate().text_color(seen ? t.dim : t.foreground).child(name)))
         .child(h_flex().flex_none().gap(4).text_size(11)
           .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
           .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)))
@@ -2114,7 +2120,7 @@ export default class Wayfindr extends View {
     const shownPath = this.prShown[k] ?? null, f = shownPath == null ? null : files.find((x) => x.path === shownPath) ?? null;
     const body = v_flex().id(`wf-pr-body-${k}-${f ? files.indexOf(f) : "o"}`).flex_1().min_w(0).min_h(0).p(14).gap(10).overflow_y_scrollbar();
     if (f) {
-      const seen = Boolean(this.prViewed[k]?.files[f.path]);
+      const seen = Boolean(this.prViewed[k]?.files[barePath(f.path)]);
       body
         .child(h_flex().gap(8).items_center()
           .child(div().w(12).flex_none().text_size(11).text_color(t.dim).child(FILE_STATUS[f.status] ?? "?"))
@@ -2124,7 +2130,7 @@ export default class Wayfindr extends View {
             .child(div().text_color(t.done).child(`+${f.additions ?? 0}`))
             .child(div().text_color(t.blocked).child(`−${f.deletions ?? 0}`)))
           .child(button("wf-pr-viewed", seen ? "Viewed" : "Unviewed", t, (cx) => this.toggleViewed(k, f.path, cx), { on: seen })))
-        .child(v_flex().rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(this.prDiff(t, k, f, threads, site)));
+        .child(v_flex().min_w(0).rounded(6).bg(t.surface).border_1().border_color(t.border).overflow_hidden().child(this.prDiff(t, k, f, threads, site)));
     } else {
       body
         .child(div().text_size(16).font_semibold().text_color(t.foreground).child(cur.title))
