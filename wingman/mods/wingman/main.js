@@ -65,6 +65,7 @@ import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab,
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
 import { isClaude } from "./sessionlog.js";
 import { GitActions, GIT_COMMANDS } from "./gitview.js"; // G6 in Changes: sync, branches, Discard change, Generate message
+import { noteAfterUndo } from "./hunkdiscard.js";
 
 const TABS_MIN = 140, SUBTITLE_MIN = 80; // px the file tabs and the header's subtitle keep when buttons fit around them
 const ROW = 20, GUTTER = 58, BTN_GAP = 6, BUTTONS = 4; // Reject, Accept, Ask (prompt now), Comment (review comment); their width: barfit.hunkButtons
@@ -2923,6 +2924,7 @@ export default class Review extends View {
       if (i >= 0) this.files[i] = snap;
     }
     this.sel = entry.snaps[0].key; this.error = null; this.settle(); this.reveal(); this.paint(cx);
+    this.commitNote = noteAfterUndo(this.commitNote, entry.note); // Changes: a discard undone takes its note with it
     this.enqueue(async () => {
       await entry.snaps[0].store.undo(entry.writes);
       for (const m of entry.feedback) await this.noteToClaude(m, () => withdrawFeedback(m.terminal, m.text, { on: m.on }));

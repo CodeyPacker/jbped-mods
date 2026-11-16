@@ -329,7 +329,8 @@ export class GitActions {
       entry.writes.push(...applied);
       if (e) await h.sendEditNotes(writes.map((w) => h.editNote(target, w)).filter(Boolean)).catch(() => {});
       const s = h.stateOf(space);
-      if (s) s.commitNote = `Discarded ${what} in ${f.rel}`;
+      entry.note = `Discarded ${what} in ${f.rel}`; // undo clears it (main.js undo)
+      if (s) s.commitNote = entry.note;
     }, cx, space);
     const queued = h.queue;
     cx.spawn(async (cx) => { await queued; if (h.spaceId === space) await h.loadChanges(cx); h.paint(cx); });

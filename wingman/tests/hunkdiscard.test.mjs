@@ -1,7 +1,7 @@
 // G6: Discard one change in Changes. The lines go back exactly as HEAD has them (CRLF, first and
 // last lines, no final newline), selected lines only when picked, and a file under review takes
 // the discard as the user's own edit: Review never shows it as the agent's change.
-import { discardText, lineSplice, baselineAt, reviewWrites, cantDiscard, discardQuestion, headAsCheckedOut } from "../mods/wingman/hunkdiscard.js";
+import { discardText, lineSplice, baselineAt, reviewWrites, cantDiscard, discardQuestion, headAsCheckedOut, noteAfterUndo } from "../mods/wingman/hunkdiscard.js";
 import { splitLines } from "../mods/wingman/model.js";
 import { check } from "../mods/wingman/edit.js";
 import { diffHunks } from "../mods/wingman/merge.js";
@@ -13,6 +13,15 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const row = async (head, disk, rel = "f.txt") => ({ rel, B: splitLines(head), C: splitLines(disk), Btext: head, Ctext: disk, hunks: await diffHunks(head, disk), created: false, inHead: true });
+
+// ctrl-z of a discard takes its "Discarded …" note with it; a newer note (a commit since) stays.
+{
+  const n = "Discarded change 1 of 1 (line 7) in crlf.txt";
+  assert.equal(noteAfterUndo(n, n), null);
+  assert.equal(noteAfterUndo("Committed 2 files to r1", n), "Committed 2 files to r1");
+  assert.equal(noteAfterUndo(n, undefined), n); // an accept/reject step has no note
+  assert.equal(noteAfterUndo(null, n), null);
+}
 
 // Several changes: each one alone goes back, the others stay.
 {
