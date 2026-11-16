@@ -346,7 +346,13 @@ export default class Review extends View {
    * shown again), so a repo or tree found by a task stayed off screen. The 250 ms tick redraws
    * again, from its own cx, whenever this was asked since its last run.
    */
-  paint(cx) { this.paintAsk = true; cx.notify(); }
+  paint(cx) {
+    // The shown file's rows are built here, in the handler or task (about 500 ms allowed), not in
+    // render() (about 50 ms): a long file's wrapped rows can take longer than a render may.
+    // A failure here is render()'s to report (it builds them again): this only warms the cache.
+    try { if (this.role !== CONTROLLER && !this.form && this.files) { const f = this.file(); if (f) this.rowsOf(f); } } catch { /* render reports it */ }
+    this.paintAsk = true; cx.notify();
+  }
 
   /**
    * Whether this copy is the one that acts on command `name` (cmdroute.js): every copy that got it
@@ -877,10 +883,14 @@ export default class Review extends View {
 
   /** E5: a long line's row becomes one row per segment ({ seg, segs }; later ones have `cont`). */
   wrapRows(f, rows, w) {
+    // This runs for every line, often inside render() (Herdr stops a render after about 50 ms): a
+    // line that fits, by its length and without tabs, takes no more work.
     const out = [];
     for (const r of rows) {
       if (r.kind === "@") { out.push(r); continue; }
-      const segs = segments(body((r.side === "old" ? f.B : f.C)[r.line]), w);
+      const line = (r.side === "old" ? f.B : f.C)[r.line] ?? "";
+      if (line.length <= w && !line.includes("\t")) { out.push(r); continue; }
+      const segs = segments(body(line), w);
       if (segs.length === 1) out.push(r);
       else segs.forEach((seg, i) => out.push({ ...r, seg, segs, cont: i > 0 }));
     }
