@@ -123,11 +123,11 @@ async function azToken(account, io) {
   return t;
 }
 
-// GET (or POST with a body) a path under the organization. Rejects with a message fit to show.
-async function rest(org, tok, io, path, body, version = API_VERSION) {
+// GET (or POST with a body, or `method` with it) a path under the organization. Rejects with a message fit to show.
+async function rest(org, tok, io, path, body, version = API_VERSION, method = body ? "POST" : "GET") {
   const url = `${org}/${path}${path.includes("?") ? "&" : "?"}api-version=${version}`;
   const res = await send(io, url, {
-    method: body ? "POST" : "GET",
+    method,
     headers: { Authorization: tok.header, Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
@@ -351,10 +351,12 @@ export function mapThreads(threads) {
   // The threads on a file (#25), oldest first: line from the right side ("new"), else the left ("old"), else none.
   const fileThreads = kept.slice(0, PR_THREADS).filter(({ t }) => t.threadContext?.filePath).map(({ t, list }) => {
     const ctx = t.threadContext, right = ctx.rightFileStart?.line, left = ctx.leftFileStart?.line;
+    const root = list.find((c) => !c.parentCommentId) ?? list[0];
     return {
       id: t.id ?? null, path: String(ctx.filePath).replace(/^\/+/, ""),
       line: right != null ? right : left != null ? left : null, side: right == null && left != null ? "old" : "new",
       resolved: Object.hasOwn(RESOLVED, String(t.status)) ? RESOLVED[t.status] : null,
+      reply: Number.isInteger(t.id) && Number.isInteger(root?.id) ? { threadId: t.id, commentId: root.id } : null, // where a reply goes (#27)
       comments: list.map((c) => ({ author: c.author?.displayName ?? "", createdAt: c.publishedDate ?? null, body: safeMarkdown(String(c.content ?? "")) })),
     };
   });
@@ -377,13 +379,15 @@ export function mapChange(entry, oldItem, newItem) {
   return { file: { path, oldPath, status, additions: d.additions, deletions: d.deletions, patch: d.patch, binary: false }, truncated: d.truncated };
 }
 
-export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated, checks = { evaluations: [], statuses: [] } }) {
+// me: connectionData's authenticatedUser (the signed-in account), or null.
+export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated, checks = { evaluations: [], statuses: [] }, me = null }) {
   if (!pr?.sourceRefName) throw new Error("Azure DevOps didn't return this Pull Request");
   const { comments, moreComments, threads: fileThreads } = mapThreads(threads);
   const s = mapPrSummary(pr, org);
   return {
     key: s.key, id: s.id, title: s.title, url: s.url, repo: s.repo,
     state: PR_STATE[pr.status] ?? "open", draft: Boolean(pr.isDraft), author: s.author,
+    me: me?.id ? { id: me.id, name: me.providerDisplayName || me.customDisplayName || me.id } : null,
     branch: branchOf(pr.sourceRefName), target: branchOf(pr.targetRefName) || null,
     head: /^[0-9a-f]{40}$/i.test(String(pr.lastMergeSourceCommit?.commitId ?? "")) ? pr.lastMergeSourceCommit.commitId : null,
     createdAt: pr.creationDate ?? null, updatedAt: null, mergedAt: pr.status === "completed" ? (pr.closedDate ?? null) : null,
@@ -393,6 +397,30 @@ export function mapPrDetail(pr, { org, threads, files, moreFiles, truncated, che
     checks: mapChecks(checks),
   };
 }
+
+// Writing a review (#27). The vote each verdict casts: null casts none.
+const REVIEW_VOTE = { comment: null, approve: 10, changes: -10 };
+
+// A PrSummary's REST path: <project>/_apis/git/repositories/<repo id>/pullRequests/<n>.
+function azPrPath(pr) {
+  const [repoId, n] = String(pr?.key ?? "").split("!"), repo = String(pr?.repo ?? "");
+  if (!repoId || !/^\d+$/.test(n ?? "") || !repo.includes("/")) throw new Error("This row has no Pull Request to post to");
+  return `${seg(repo.slice(0, repo.lastIndexOf("/")))}/_apis/git/repositories/${seg(repoId)}/pullRequests/${n}`;
+}
+
+// A line comment as a new active thread. A range runs from startLine to line when both are on one side; a range
+// across sides is posted on its last line. Pure.
+export function newThread(c) {
+  const key = c.side === "old" ? "left" : "right";
+  const start = c.startLine != null && (c.startSide ?? c.side) === c.side ? c.startLine : c.line;
+  return {
+    comments: [{ parentCommentId: 0, content: c.body, commentType: 1 }], status: 1,
+    threadContext: { filePath: `/${String(c.path).replace(/^\/+/, "")}`, [`${key}FileStart`]: { line: start, offset: 1 }, [`${key}FileEnd`]: { line: c.line, offset: 1 } },
+  };
+}
+
+// The review's summary: a thread on no file.
+export const summaryThread = (body) => ({ comments: [{ parentCommentId: 0, content: String(body).trim(), commentType: 1 }], status: 1 });
 
 // Runs fn over items, at most `limit` at a time, keeping their order.
 async function pool(items, limit, fn) {
@@ -428,7 +456,7 @@ export function mapTicket(w, { org, project, columnField = null, parent = null, 
 
 export const azure = {
   id: "azure",
-  capabilities: ["boards", "board", "ticket", "images", "move", "update", "pullRequests", "prDetail", "review", "repos", "statuses", "signInState"],
+  capabilities: ["boards", "board", "ticket", "images", "move", "update", "pullRequests", "prDetail", "review", "repos", "statuses", "signInState", "postReview", "reply"],
 
   // Azure lists PRs one project at a time: two calls per project (the selected repos' projects, else
   // every project). The reviewer filter
@@ -496,6 +524,8 @@ export const azure = {
     // Checks (#26): each half failing on its own leaves that half empty. Evaluations need the project's id.
     const half = (p) => p.then((r) => r.value ?? [], () => []);
     const statusesP = half(rest(org, tok, io, `${prPath}/statuses`));
+    // Who is signed in (#27): the PR is the account's own when it is the author. Failing leaves me null.
+    const meP = rest(org, tok, io, "_apis/connectionData", null, PREVIEW).then((c) => c?.authenticatedUser ?? null, () => null);
     const [d, threads, iterations] = await Promise.all([
       rest(org, tok, io, prPath), rest(org, tok, io, `${prPath}/threads`), rest(org, tok, io, `${prPath}/iterations`),
     ]);
@@ -519,7 +549,7 @@ export const azure = {
         const status = fileStatus(e.changeType);
         return { path: e.item.path, oldPath: status === "renamed" ? (e.originalPath ?? e.sourceServerItem ?? null) : null, status, additions: 0, deletions: 0, patch: null, binary: false };
       });
-      return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: 0, truncated: false, checks: await checksP });
+      return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: 0, truncated: false, checks: await checksP, me: await meP });
     }
     let truncated = false;
     const files = await pool(entries.slice(0, PR_FILES), FILE_FETCHES, async (e) => {
@@ -536,7 +566,37 @@ export const azure = {
         return { path: e.item.path, oldPath: status === "renamed" ? oldPath : null, status, additions: 0, deletions: 0, patch: null, binary: false };
       }
     });
-    return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: Math.max(0, entries.length - PR_FILES), truncated, checks: await checksP });
+    return mapPrDetail(d, { org, threads: threads.value, files, moreFiles: Math.max(0, entries.length - PR_FILES), truncated, checks: await checksP, me: await meP });
+  },
+
+  // One review (#27): a thread per line comment, then the summary as a thread on no file, then the vote
+  // (approve 10, changes -10; a comment casts none). Each is its own request, so a failure says how far it got.
+  async postReview(account, pr, detail, review, io) {
+    const vote = REVIEW_VOTE[review?.event];
+    if (vote === undefined) throw new Error(`"${review?.event}" isn't a review verdict`);
+    const prPath = azPrPath(pr), org = orgUrl(account), tok = await token(account, io);
+    const posts = [...(review.comments ?? []).map(newThread), ...(String(review.body ?? "").trim() ? [summaryThread(review.body)] : [])];
+    let done = 0;
+    try {
+      for (const body of posts) { await rest(org, tok, io, `${prPath}/threads`, body); done++; }
+      if (vote !== null) {
+        const id = detail?.me?.id ?? (await rest(org, tok, io, "_apis/connectionData", null, PREVIEW)).authenticatedUser?.id;
+        if (!id) throw new Error("Azure DevOps didn't say who is signed in, so no vote was cast");
+        await rest(org, tok, io, `${prPath}/reviewers/${seg(id)}`, { vote, id }, API_VERSION, "PUT");
+      }
+    } catch (e) {
+      throw new Error(done ? `Posted ${done} of ${posts.length} threads, then: ${e.message ?? e}` : String(e.message ?? e));
+    }
+    return { url: detail?.url ?? pr.url ?? null };
+  },
+
+  // A reply under a thread (#27): thread.reply is { threadId, commentId } (its first comment).
+  async reply(account, pr, _detail, thread, text, io) {
+    const body = String(text ?? "").trim(), r = thread?.reply;
+    if (!body) throw new Error("Write a reply first");
+    if (!Number.isInteger(r?.threadId) || !Number.isInteger(r?.commentId)) throw new Error("This thread can't take replies here");
+    const prPath = azPrPath(pr), org = orgUrl(account), tok = await token(account, io);
+    await rest(org, tok, io, `${prPath}/threads/${r.threadId}/comments`, { parentCommentId: r.commentId, content: body, commentType: 1 });
   },
 
   // A Review's data (D16): the branches, the description, and the acceptance criteria of every linked

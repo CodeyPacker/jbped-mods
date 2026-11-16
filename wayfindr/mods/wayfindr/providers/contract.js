@@ -15,6 +15,12 @@
 //     downloadImage(account, url, path, io)         // "images": saves it to path, keeps a file already there
 //     pullRequests(account, io) -> { mine, needsReview } // "pullRequests"
 //     pullRequest(account, pr, io) -> PrDetail      // "prDetail": pr a PrSummary from pullRequests()
+//     postReview(account, pr, detail, review, io) -> { url } // "postReview" (#27): one review as the signed-in account
+//                  review: { event: "comment" | "approve" | "changes", body,
+//                            comments: [{ path, line, side, startLine?, startSide?, body }] }
+//                  path without a leading "/", side "new" | "old"; startLine/startSide only on a range.
+//                  url: the review's, or the PR's
+//     reply(account, pr, detail, thread, body, io)  // "reply" (#27): posts under thread, an entry of detail.threads
 //     repos(account, io) -> string[]                // "repos": what can be followed, "owner/name" or "project/repo"
 //     statuses(account, ref, io) -> string[]        // "statuses": a Board's states, for Tracked Statuses
 //     renameProfile(from, to, io)                   // optional: move what the Provider keeps per Profile
@@ -64,10 +70,13 @@
 //   description  markdown, safeMarkdown applied; "" when none
 //   reviewers  [{ name, state }]  state: "approved" | "changes" | "commented" | "pending" | "rejected" | "waiting"
 //   comments   [{ author, createdAt, body, path, line }], oldest first; path and line null unless on a file
-//   threads    [{ id, path, line, side, resolved, comments: [{ author, createdAt, body }] }]  review threads on a file (#25),
+//   threads    [{ id, path, line, side, resolved, reply, comments: [{ author, createdAt, body }] }]  review threads on a file (#25),
 //              oldest first by their first comment; also flattened into comments. path without a leading "/";
 //              line null when the thread is on no line or is outdated; side "new" | "old" (the side line counts on);
-//              resolved boolean, or null when the Provider doesn't say
+//              resolved boolean, or null when the Provider doesn't say; reply opaque, what reply() needs
+//              (GitHub the first comment's databaseId, Azure { threadId, commentId }), or null
+//   me         { id, name }: the signed-in account on the Provider (GitHub viewer, Azure connectionData), or null.
+//              The PR is the account's own when author.id === me.id
 //   head       the PR's head commit (GitHub headRefOid, Azure lastMergeSourceCommit; the clone's
 //              refs/wayfindr/pr-<n> replaces it), or null. Viewed marks are kept per head
 //   moreComments  how many comments weren't fetched
@@ -82,7 +91,7 @@
 //   url        an http(s) link to open, or null;  description  string or null
 //   truncated  true when any file's patch was cut for size
 
-export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "prDetail", "repos", "statuses", "signInState", "move", "update"];
+export const CAPABILITIES = ["boards", "board", "ticket", "images", "review", "pullRequests", "prDetail", "repos", "statuses", "signInState", "move", "update", "postReview", "reply"];
 
 export const NO_COLUMN = "__none__";
 

@@ -175,7 +175,7 @@ test("Azure pullRequest: PR, threads, iterations, changes and items, mapped to a
   const d = await azure.pullRequest({ org: ORG }, { key: "r1!5", repo: "P/web" }, io);
 
   const kinds = new Set(io.calls.map((c) => new URL(c).pathname.replace(/^\/acme\/P\/_apis\/git\/repositories\/r1\//, "").replace(/\/\d+(\/|$)/g, "/N$1")));
-  assert.deepEqual([...kinds].sort(), ["items", "pullRequests/N", "pullRequests/N/iterations", "pullRequests/N/iterations/N/changes", "pullRequests/N/statuses", "pullRequests/N/threads"]);
+  assert.deepEqual([...kinds].sort(), ["/acme/_apis/connectionData", "items", "pullRequests/N", "pullRequests/N/iterations", "pullRequests/N/iterations/N/changes", "pullRequests/N/statuses", "pullRequests/N/threads"]);
   assert.ok(io.calls.some((c) => c.includes("/changes?$top=100&")));
   assert.equal(io.calls.filter((c) => c.includes("/items?")).length, 8); // add and delete fetch one side only
   // The old side is the iteration's merge base, not the target branch's tip.
@@ -285,10 +285,10 @@ test("GitHub mapPrDetail: head from headRefOid, review threads with side, resolv
   const d = await github.pullRequest({ login: "me" }, { key: "PR_node", repo: "o/web" }, ghIo(node, []), { patches: false });
   assert.equal(d.head, "f".repeat(40));
   assert.deepEqual(d.threads, [
-    { id: "T1", path: "src/b.js", line: 3, side: "old", resolved: false, comments: [{ author: "dee", createdAt: "2026-11-01T04:00:00Z", body: "old line" }] },
-    { id: "T2", path: "src/a.js", line: 9, side: "new", resolved: true, comments: [
+    { id: "T1", path: "src/b.js", line: 3, side: "old", resolved: false, reply: null, comments: [{ author: "dee", createdAt: "2026-11-01T04:00:00Z", body: "old line" }] },
+    { id: "T2", path: "src/a.js", line: 9, side: "new", resolved: true, reply: null, comments: [
       { author: "cy", createdAt: "2026-11-01T05:00:00Z", body: "why" }, { author: "ann", createdAt: "2026-11-01T06:00:00Z", body: "x because" }] },
-    { id: "T3", path: "src/c.js", line: null, side: "new", resolved: false, comments: [{ author: "eve", createdAt: "2026-11-01T07:00:00Z", body: "stale" }] },
+    { id: "T3", path: "src/c.js", line: null, side: "new", resolved: false, reply: null, comments: [{ author: "eve", createdAt: "2026-11-01T07:00:00Z", body: "stale" }] },
   ]);
   assert.equal(d.comments.filter((x) => x.path).length, 4); // the flat list is unchanged
   assert.equal((await github.pullRequest({ login: "me" }, { key: "K", repo: "o/web" }, ghIo(ghNode(), []), { patches: false })).head, null);

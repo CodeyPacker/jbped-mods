@@ -255,6 +255,7 @@ export function mapReview(node) {
 const ISSUE_COMMENTS = 100, THREADS = 50, THREAD_COMMENTS = 20, FILE_PAGES = 3;
 const REST = "https://api.github.com";
 export const PR_DETAIL_QUERY = `query($id: ID!) {
+  viewer { login name }
   node(id: $id) { ... on PullRequest {
     number title url repository { nameWithOwner }
     body state isDraft mergedAt createdAt updatedAt headRefName headRefOid baseRefName changedFiles
@@ -262,7 +263,7 @@ export const PR_DETAIL_QUERY = `query($id: ID!) {
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login name } ... on Team { name } } } }
     latestReviews(first: 30) { nodes { author { login } state } }
     comments(first: ${ISSUE_COMMENTS}) { totalCount nodes { author { login } body createdAt } }
-    reviewThreads(first: ${THREADS}) { totalCount nodes { id path line isResolved isOutdated diffSide comments(first: ${THREAD_COMMENTS}) { totalCount nodes { author { login } body createdAt } } } }
+    reviewThreads(first: ${THREADS}) { totalCount nodes { id path line isResolved isOutdated diffSide comments(first: ${THREAD_COMMENTS}) { totalCount nodes { databaseId author { login } body createdAt } } } }
     ${CHECKS_FIELDS}
   } }
 }`;
@@ -279,8 +280,9 @@ export function mapPrFile(f) {
   };
 }
 
-// The detail query's node and the fetched files into a PrDetail. Pure.
-export function mapPrDetail(node, files, pr) {
+// The detail query's node and the fetched files into a PrDetail. viewer: the query's viewer (the signed-in
+// account), for me. Pure.
+export function mapPrDetail(node, files, pr, viewer = null) {
   if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
   const repo = node.repository?.nameWithOwner ?? pr.repo;
   const login = (a) => a?.login ?? "ghost";
@@ -303,6 +305,7 @@ export function mapPrDetail(node, files, pr) {
   const reviewThreads = threads.map((t) => ({
     id: t.id ?? null, path: String(t.path ?? "").replace(/^\/+/, ""), line: t.isOutdated ? null : (t.line ?? null),
     side: t.diffSide === "LEFT" ? "old" : "new", resolved: typeof t.isResolved === "boolean" ? t.isResolved : null,
+    reply: Number.isInteger(t.comments?.nodes?.[0]?.databaseId) ? t.comments.nodes[0].databaseId : null, // the REST id replies go under
     comments: (t.comments?.nodes ?? []).filter(Boolean).map((c) => ({ author: login(c.author), createdAt: c.createdAt ?? null, body: safeMarkdown(c.body ?? "") })),
   })).filter((t) => t.comments.length)
     .sort((a, b) => String(a.comments[0].createdAt).localeCompare(String(b.comments[0].createdAt)));
@@ -311,6 +314,7 @@ export function mapPrDetail(node, files, pr) {
     state: String(node.state).toLowerCase() === "merged" ? "merged" : String(node.state).toLowerCase() === "closed" ? "closed" : "open",
     draft: Boolean(node.isDraft),
     author: { id: login(node.author), name: node.author?.name || login(node.author) },
+    me: viewer?.login ? { id: viewer.login, name: viewer.name || viewer.login } : null,
     branch: node.headRefName, target: node.baseRefName ?? null,
     head: node.headRefOid ?? null,
     createdAt: node.createdAt ?? null, updatedAt: node.updatedAt ?? null, mergedAt: node.mergedAt ?? null,
@@ -336,6 +340,52 @@ async function restGet(io, url, t) {
   try { body = JSON.parse(text); } catch { throw new Error(`GitHub answered ${res.status}: ${text.slice(0, 200)}`); }
   if (!res.ok) throw new Error(body?.message ? `GitHub answered ${res.status}: ${body.message}` : `GitHub answered ${res.status}`);
   return body;
+}
+
+// A POST on the REST API with a JSON body (#27). Rejects with a message fit to show, never with the token.
+async function restPost(io, url, t, body) {
+  let res;
+  try {
+    res = await io.fetch(url, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${t}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "Content-Type": "application/json", "User-Agent": "herdr-wayfindr" },
+      body: JSON.stringify(body),
+    });
+  } catch { throw new Error("The request to GitHub failed before it was answered"); }
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch { /* not JSON */ }
+  if (!res.ok) {
+    const why = [data?.message, ...(Array.isArray(data?.errors) ? data.errors.map((e) => (typeof e === "string" ? e : e?.message)).filter(Boolean) : [])].filter(Boolean).join(": ");
+    throw new Error(why ? `GitHub answered ${res.status}: ${why}` : `GitHub answered ${res.status}`);
+  }
+  return data;
+}
+
+// Where a PR's REST resources are: owner/name and the number, from the detail. Checked before they go in a URL.
+function prRest(detail) {
+  const repo = String(detail?.repo ?? ""), number = String(detail?.id ?? "").split("#").pop();
+  if (!REPO_NAME.test(repo) || !/^\d+$/.test(number)) throw new Error("This Pull Request has no repo or number to post to");
+  return { repo, number };
+}
+
+const EVENT = { comment: "COMMENT", approve: "APPROVE", changes: "REQUEST_CHANGES" };
+const SIDE = { new: "RIGHT", old: "LEFT" };
+
+// A review's request body (#27). GitHub needs a body for COMMENT and REQUEST_CHANGES. Pure.
+export function reviewBody(detail, review) {
+  const event = EVENT[review?.event];
+  if (!event) throw new Error(`"${review?.event}" isn't a review verdict`);
+  const text = String(review.body ?? "").trim();
+  const comments = (review.comments ?? []).map((c) => ({
+    path: String(c.path).replace(/^\/+/, ""), line: c.line, side: SIDE[c.side] ?? "RIGHT", body: c.body,
+    ...(c.startLine !== undefined && c.startLine !== null ? { start_line: c.startLine, start_side: SIDE[c.startSide] ?? "RIGHT" } : {}),
+  }));
+  return {
+    ...(detail?.head ? { commit_id: detail.head } : {}), event,
+    ...(text ? { body: text } : event !== "APPROVE" ? { body: "See the inline comments." } : {}),
+    comments,
+  };
 }
 
 export const REPOS_QUERY = `query($after: String) {
@@ -385,7 +435,7 @@ async function needsScope(write, scope, what) {
 
 export const github = {
   id: "github",
-  capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "prDetail", "review", "repos", "signInState"],
+  capabilities: ["boards", "board", "ticket", "move", "update", "pullRequests", "prDetail", "review", "repos", "signInState", "postReview", "reply"],
 
   async signInState(account, io, needs = {}) {
     if (!GH_LOGIN.test(String(account.login))) return { ok: false, reason: `"${account.login}" isn't a GitHub user name`, command: null };
@@ -466,12 +516,12 @@ export const github = {
   // A PrDetail (#1). pr: a PrSummary from pullRequests(). Files: up to 3 pages of 100. opts.patches false:
   // no REST file pages, so no files (GraphQL gives only their count, in moreFiles); the caller has a clone.
   async pullRequest(account, pr, io, { patches = true } = {}) {
-    const node = (await graphql(account, io, PR_DETAIL_QUERY, { id: pr.key })).node;
+    const data = await graphql(account, io, PR_DETAIL_QUERY, { id: pr.key }), node = data.node, viewer = data.viewer ?? null;
     if (!node?.headRefName) throw new Error("GitHub didn't return this Pull Request");
     const repo = node.repository?.nameWithOwner ?? pr.repo;
     if (!REPO_NAME.test(String(repo)) || !Number.isInteger(node.number)) throw new Error("GitHub returned a Pull Request without a repo or number");
     const files = [];
-    if (patches === false) return mapPrDetail(node, files, pr);
+    if (patches === false) return mapPrDetail(node, files, pr, viewer);
     const t = await token(account, io);
     const pages = Math.min(FILE_PAGES, Math.ceil((node.changedFiles ?? PAGE * FILE_PAGES) / PAGE));
     for (let page = 1; page <= pages; page++) {
@@ -480,7 +530,27 @@ export const github = {
       files.push(...list);
       if (list.length < PAGE) break;
     }
-    return mapPrDetail(node, files, pr);
+    return mapPrDetail(node, files, pr, viewer);
+  },
+
+  // One review (#27): the verdict, the summary and every line comment in one POST, as the signed-in account.
+  async postReview(account, _pr, detail, review, io) {
+    const { repo, number } = prRest(detail), body = reviewBody(detail, review);
+    const url = `${REST}/repos/${repo}/pulls/${number}/reviews`;
+    const t = await token(account, io);
+    let r;
+    await needsScope((async () => { r = await restPost(io, url, t, body); })(), "repo", "post reviews");
+    return { url: typeof r?.html_url === "string" && /^https:\/\//.test(r.html_url) ? r.html_url : detail.url };
+  },
+
+  // A reply under a review thread (#27): thread.reply is its first comment's REST id.
+  async reply(account, _pr, detail, thread, text, io) {
+    const body = String(text ?? "").trim();
+    if (!body) throw new Error("Write a reply first");
+    if (!Number.isInteger(thread?.reply)) throw new Error("This thread can't take replies here");
+    const { repo, number } = prRest(detail), t = await token(account, io);
+    const url = `${REST}/repos/${repo}/pulls/${number}/comments/${thread.reply}/replies`;
+    await needsScope(restPost(io, url, t, { body }), "repo", "post replies");
   },
 
   async pullRequests(account, io) {
