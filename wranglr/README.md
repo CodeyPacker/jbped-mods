@@ -6,12 +6,18 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 
 ## Features
 
-- Repo groups: every clone and worktree of a Repo, on any Machine, in one group.
-- Workspace groups: named lists of Repos from a config file, shown even with no spaces open.
-- Custom groups and Subgroups. Drag spaces and groups, or move a space with `ctrl-shift-m`.
-- "+" on a group starts a space there: in the main checkout, in a new git worktree, or on another Machine.
-- New spaces are named `<ticket id> <words>` from their branch.
-- Agent status marks on each row, and four sorts: Recent, Kind, A-Z and Manual.
+- **Repo groups.** Every clone and worktree of a Repo, on any Machine, in one group.
+- **Workspace groups.** Named lists of Repos from the config file, shown even with no spaces open.
+- **Custom groups and Subgroups.** Groups you make and fill by hand. Any group can have Subgroups, such as Working and Review.
+- **Drag and drop.** Drag a space onto a row, a group or out of every group. Drag groups to reorder them.
+- **Start a space from a group.** "+" opens the Repo's main checkout or the Workspace home. Its right-click menu makes a new git worktree or picks the Machine.
+- **Worktree rules.** Where new worktrees go and which ref new branches start from, for all Repos or one.
+- **Automatic names.** New spaces are named `<ticket id> <words>` from their branch.
+- **Agent marks.** Each row shows agents that need you, are working or are done. Click the marks to go to the most urgent one.
+- **Machines.** A space on another Machine shows its name. An unreachable one is dimmed, with Connect below the list.
+- **Sorts and folding.** Recent, Kind, A-Z or Manual. Click a group's header to fold it.
+- **Editor file.** A `<name>.code-workspace` file in each Workspace home lists its Repos.
+- **Palette.** Every command is in the `palette` mod.
 
 ## Needs
 
@@ -34,4 +40,14 @@ Or by hand:
 3. Merge `keys.json` into `~/.config/herdr-app/keys.json`.
 4. Run `herdr-app check ~/.config/herdr-app/mods/wranglr`.
 
-It works with no config file. Workspaces, commands, the config file and limits: [`mods/wranglr/README.md`](mods/wranglr/README.md).
+## Use
+
+Click a row to go to the space. Right-click a row, a group or "+" for its menu. In the header, the sort button cycles the sorts, the folder adds a Custom group and the gear opens settings.
+
+| Key | Action |
+|---|---|
+| `alt-1` to `alt-9` | go to the space at that position in the list |
+| `ctrl-shift-pagedown` / `ctrl-shift-pageup` | next / previous space in the list's order |
+| `ctrl-shift-m` | move the focused space to a Group or Subgroup |
+
+It works with no config file. Workspaces, the config file, every command and limits: [`mods/wranglr/README.md`](mods/wranglr/README.md).

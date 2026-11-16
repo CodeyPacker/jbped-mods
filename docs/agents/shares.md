@@ -23,9 +23,10 @@ A fact lives in one of the two. The page's last line links to the reference and 
 Writing the page:
 
 - Summary: one sentence a person who has never seen the mod understands.
-- Features: what the person gets, one line each, the biggest first. Leave how it works to the reference.
+- Features: every feature a person can use, as `- **Name.** one or two sentences`, the biggest first. A person who reads only this list knows everything the mod offers. How it works goes in the reference.
 - Needs: programs, platforms, what it replaces or rebinds, then what it touches: programs it runs, files it reads or writes outside its own folder, network.
 - Install: the agent prompt, then the by-hand steps, ending on `herdr-app check`.
+- Use: how to open it and the mouse actions in a sentence or two, then a table of the keys a person needs on day one. The full key list goes in the reference.
 
 ## Updating a mod
 
@@ -33,7 +34,7 @@ Mods are edited in `~/.config/herdr-app/mods/`, where Herdr hot-reloads them, th
 
 1. `./sync.sh <share>` copies the mod from the config folder into the worktree.
 2. Update the reference for what changed.
-3. Update the page when the change adds or removes a feature, a need, something it touches or an install step.
+3. Update the page when the change adds, removes or alters a feature, a day-one key, a need, something it touches or an install step.
 4. Retake `preview.png` when the look changed.
 5. Update `RECIPE.md`, when the share has one, from the real files.
 6. `./check.sh` prints `ok`. Commit the root `README.md` when it wrote it.

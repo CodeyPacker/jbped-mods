@@ -6,11 +6,12 @@ A command palette that mods can add entries to: your entries, each mod's entries
 
 ## Features
 
-- Your own entries from `~/.config/herdr-app/palette.json`, listed first.
-- A mod adds entries with a `palette` list in its `mod.json`. The other mods in this repo do.
-- Every Herdr app command, grouped as Herdr groups them, with its key from `keys.json`.
-- Type to filter, and jump between groups from the sidebar.
-- A command with required arguments asks for them before it runs.
+- **Your entries.** Listed first, from `~/.config/herdr-app/palette.json`. No mod needs to change.
+- **Mod entries.** A mod adds entries with a `palette` list in its `mod.json`. The other mods in this repo do.
+- **Every Herdr command.** Grouped as Herdr groups them, each with its key from `keys.json`.
+- **Filter.** Type to filter. Every word must match.
+- **Group index.** A sidebar lists the groups. Click one to jump to it.
+- **Arguments.** A command with required arguments asks for them first: a value, or a JSON object.
 
 ## Needs
 
@@ -31,4 +32,14 @@ Or by hand:
 2. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-p`, which replaces Herdr's palette. Herdr's stays in the list as `app.palette`.
 3. Run `herdr-app check ~/.config/herdr-app/mods/palette`.
 
-Keys and the entry format: [`mods/palette/README.md`](mods/palette/README.md).
+## Use
+
+| Key | Action |
+|---|---|
+| `ctrl-shift-p` | open |
+| `up` / `down`, `pageup` / `pagedown` | move |
+| `shift-up` / `shift-down` | previous / next group |
+| `enter` | run |
+| `escape` | close, or go back from the argument prompt |
+
+The entry format, for your own entries and a mod's: [`mods/palette/README.md`](mods/palette/README.md).

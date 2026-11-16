@@ -10,7 +10,7 @@ set -eu
 repo=$(cd "$(dirname "$0")" && pwd)
 cd "$repo"
 
-max_lines=50
+max_lines=75
 max_summary=160
 fails=0
 rows=""
@@ -37,10 +37,12 @@ for dir in */; do
   grep -q '^!\[.*\](preview\.png)$' "$page" || fail "$share" "no ![Name](preview.png) line"
 
   heads=$(grep '^## ' "$page" | sed 's/^## //' | tr '\n' ',')
-  [ "$heads" = "Features,Needs,Install," ] || fail "$share" "sections are '$heads', want 'Features,Needs,Install,'"
+  [ "$heads" = "Features,Needs,Install,Use," ] || fail "$share" "sections are '$heads', want 'Features,Needs,Install,Use,'"
 
   bullets=$(awk '/^## /{ on = ($0 == "## Features") } on && /^- /{ n++ } END { print n + 0 }' "$page")
-  { [ "$bullets" -ge 3 ] && [ "$bullets" -le 6 ]; } || fail "$share" "Features has $bullets bullets, want 3 to 6"
+  named=$(awk '/^## /{ on = ($0 == "## Features") } on && /^- \*\*[^*]+\.\*\* /{ n++ } END { print n + 0 }' "$page")
+  { [ "$bullets" -ge 3 ] && [ "$bullets" -le 12 ]; } || fail "$share" "Features has $bullets bullets, want 3 to 12"
+  [ "$bullets" -eq "$named" ] || fail "$share" "every feature starts '- **Name.** '"
 
   lines=$(wc -l < "$page")
   [ "$lines" -le $max_lines ] || fail "$share" "$lines lines, over $max_lines"

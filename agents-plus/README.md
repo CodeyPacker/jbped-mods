@@ -6,9 +6,11 @@ Herdr's Agents list with Claude Code's in-process subagents nested under the ses
 
 ## Features
 
-- Each subagent shows its description under its parent, with a spinner while it works. The row goes when it finishes.
-- Click a subagent to open its view in Claude Code. Click the parent to go back to `main`.
-- The same on macOS, Linux, Windows and Windows with agents in WSL, with no hook to install.
+- **Subagent rows.** Each in-process subagent (Claude Code's Agent tool) shows its description under its parent. Herdr's own list nests only subagents started with `hc run`.
+- **Live state.** A spinner while the subagent works. The row goes when it finishes.
+- **Click to open.** Click a subagent to open its view in its Claude Code session. Click the parent to go back to `main`.
+- **Safe clicks.** When Claude Code's screen is not what the mod expects, it shows a warning and presses nothing.
+- **Every platform.** The same on macOS, Linux, Windows and Windows with agents in WSL, with no hook to install.
 
 ## Needs
 
@@ -30,5 +32,9 @@ Or by hand:
 1. Copy `mods/agents-plus/` to `~/.config/herdr-app/mods/`.
 2. In your own layout (clone a shipped one with `layout.clone`), set the agents block's `content.mod` to `agents-plus`.
 3. Run `herdr-app check ~/.config/herdr-app/mods/agents-plus`.
+
+## Use
+
+The list works as Herdr's Agents list does. The subagent rows and the two clicks above are the only additions.
 
 How it works and limits: [`mods/agents-plus/README.md`](mods/agents-plus/README.md). Modified from Herdr's `agents` mod (Apache-2.0, see `LICENSE`).
