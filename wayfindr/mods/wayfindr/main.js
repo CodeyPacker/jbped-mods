@@ -20,7 +20,8 @@ import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads, barePat
 import { COMMENTS_DIR, parseComments, commentsOn, coveredRows, openAt, extendOpen, saveComment, removeComment, linesOf, rowOf, verdictsFor, verdictLabel, canPost, toReview, confirmText } from "./prcomments.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
-import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due } from "./cache.js";
+import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due, POLL_MS } from "./cache.js";
+import { PR_CACHE_DIR, prCacheFile, parsePrCache, serializePrCache, detailStale, prunePrKeys } from "./prcache.js";
 
 const VIEW_KEY = "wayfindr.view.v1";
 const COLUMN_W = 280, PANEL_W = 460;
@@ -36,6 +37,7 @@ const PR_RAIL_KEY = "wayfindr.prRail", PR_RAIL_DEFAULT = 210, PR_RAIL_MIN = 140,
 // Viewed marks, one file per Pull Request: { head, files: { [path]: true } }, under Herdr's home.
 const VIEWED_DIR = "data/wayfindr/viewed";
 const viewedDir = () => `${appHome()}/${VIEWED_DIR}`.replace(/\\/g, "/");
+const prCacheDir = () => `${appHome()}/${PR_CACHE_DIR}`.replace(/\\/g, "/"); // the Pull Request detail cache (#31)
 // Line comments (#27), one file per Pull Request: [{ id, path, line, side, startLine?, startSide?, text, code }].
 // The save path is data/wayfindr/comments/<viewedKey>.json under Herdr's home (COMMENTS_DIR).
 const commentsDir = () => `${appHome()}/${COMMENTS_DIR}`.replace(/\\/g, "/");
@@ -277,7 +279,8 @@ export default class Wayfindr extends View {
     this.wranglr = null; // Wranglr's worktree rule (parseWranglr), read on reload and before each Launch and Review; null when Wranglr isn't set up
     this.cloneFind = {}; // settings: "<account id>:<repo>" -> { status: "loading" | "none" | "choose" | "error", hits, error }
     this.selectedPr = null; // { account, pr }: the Pull Request in the detail panel
-    this.prDetails = {}; // pr key -> { status, data, error }
+    this.prDetails = {}; // pr key -> { status, data, at, error }: at is when data was fetched (#31)
+    this.prCacheText = {}; // pr key -> the cache file's text last read or written, for compare-and-swap (#31)
     this.prAll = {}; // pr key -> { file path -> true }: every diff row shows, not only the first DIFF_LINES
     this.prShown = {}; // pr key -> the shown file's path, or null for the Overview (#24)
     this.prLast = null; // the last opened Pull Request's key: opening another shows its Overview
@@ -360,7 +363,7 @@ export default class Wayfindr extends View {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
         if (c === "focus") this.handle.focus();
-        else if (c === "refresh" && this.profile) this.fetchPr(cx);
+        else if (c === "refresh" && this.profile) this.fetchPr(cx, { force: true }); // Refresh always refetches (#31)
         cx.notify();
       }
     });
@@ -423,7 +426,7 @@ export default class Wayfindr extends View {
     else if (this.board) this.fetchBoard(this.board, cx);
     else cx.spawn((cx) => this.check(cx));
     if (this.fetchTicketLater) { this.fetchTicketLater = false; this.fetchTicket(cx); }
-    if (this.fetchPrLater) { this.fetchPrLater = false; this.fetchPr(cx); }
+    if (this.fetchPrLater) { this.fetchPrLater = false; this.fetchPr(cx, { force: true }); } // a reload (Refresh) refetches (#31)
   }
 
   // What a Provider gets: the runner, fetch, and the Profile's name (Azure keeps an az login per Profile).
@@ -622,7 +625,29 @@ export default class Wayfindr extends View {
       this.prs = { status: "ok", data, at, tried };
       cx.notify();
       await this.saveCache(profile, (c) => withPrs(c, prsKey(profile.accounts), data, at));
+      await this.prunePrFiles(data);
     });
+  }
+
+  // After a list fetch (#31): the cached details and viewed marks of PRs no longer listed (merged, closed, or no
+  // longer the person's) are deleted, on disk and in memory, except the open PR's. Comments files are kept: they
+  // are the person's own text. When an Account's list failed, nothing is pruned. Errors are swallowed: the next
+  // list fetch tries again.
+  async prunePrFiles(data) {
+    if (!Array.isArray(data) || data.some((r) => r?.error)) return;
+    const summaries = data.flatMap((r) => [...(r.mine ?? []), ...(r.needsReview ?? [])]);
+    for (const dir of [prCacheDir(), viewedDir()]) {
+      let names = [];
+      try { names = (await fs.readdir(dir)).map((e) => (typeof e === "string" ? e : e?.name)); } catch { continue; } // no folder yet
+      for (const name of prunePrKeys(names, summaries)) {
+        try { await fs.rm(`${dir}/${name}`, { force: true }); } catch { /* next list fetch */ }
+      }
+    }
+    const listed = new Set(summaries.map((s) => s.key)), open = this.selectedPr?.pr.key;
+    for (const key of new Set([...Object.keys(this.prDetails), ...Object.keys(this.prViewed)])) {
+      if (listed.has(key) || key === open) continue;
+      delete this.prDetails[key]; delete this.prViewed[key]; delete this.prCacheText[key];
+    }
   }
 
   // The view's data, when it has none yet, only a cached copy, or one older than a minute.
@@ -737,7 +762,8 @@ export default class Wayfindr extends View {
     }
     this.selectedPr = { account: accountId, pr };
     this.handle.focus(); // the row's click stops the root's, which would focus: Esc needs it
-    if (this.prDetails[pr.key]?.status !== "ok") this.fetchPr(cx);
+    // The cached copy shows at once; fetchPr refetches only when detailStale says the PR moved or the copy is old (#31).
+    if (this.prDetails[pr.key]?.status !== "loading") this.fetchPr(cx);
     cx.notify();
   }
 
@@ -757,15 +783,32 @@ export default class Wayfindr extends View {
     return soleClone(this.clonesOf(pr.repo))?.path ?? null;
   }
 
-  // The detail from the Provider. With a clone, its files and patches come from git there (#22); when git
-  // fails, the Provider's are fetched instead and gitError says why.
-  fetchPr(cx) {
+  // The detail (#31): the cached copy on disk shows at once, then the Provider is asked only when `force`
+  // (Refresh) or detailStale says so (no copy, an old copy, or the list row says the PR moved).
+  // From the Provider: with a clone, its files and patches come from git there (#22); when git
+  // fails, the Provider's are fetched instead and gitError says why. Each fetch is written to the cache file.
+  fetchPr(cx, { force = false } = {}) {
     const sel = this.selectedPr, p = this.profile;
     if (!sel || !p) return;
-    const key = sel.pr.key, clone = this.cloneForPr(sel.pr);
-    this.prDetails[key] = { status: "loading", data: this.prDetails[key]?.data ?? null };
+    const key = sel.pr.key, clone = this.cloneForPr(sel.pr), file = prCacheFile(appHome().replace(/\\/g, "/"), sel.pr);
     const io = this.io();
     cx.spawn(async (cx) => {
+      if (!this.prDetails[key]?.data) {
+        let text = null;
+        try { text = await readTextFile(file); } catch { /* none yet */ }
+        if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
+        this.prCacheText[key] = text;
+        const c = parsePrCache(text, key);
+        if (c && !this.prDetails[key]?.data) {
+          this.prDetails[key] = { status: "ok", data: c.data, at: c.at };
+          this.loadViewed(key, c.data, cx); this.loadPrComments(key, c.data, cx);
+          cx.notify();
+        }
+      }
+      const cur = this.prDetails[key];
+      if (!force && cur?.status !== "error" && !detailStale(cur?.data ? { at: cur.at, data: cur.data } : null, sel.pr, Date.now(), POLL_MS)) return;
+      this.prDetails[key] = { status: "loading", data: cur?.data ?? null, at: cur?.at ?? null };
+      cx.notify();
       let next;
       try {
         let data = await loadPullRequestDetail(p, sel.account, sel.pr, io, clone ? { patches: false } : {});
@@ -780,15 +823,30 @@ export default class Wayfindr extends View {
             data = { ...api, source: { kind: "api" }, gitError: String(e.message ?? e) };
           }
         }
-        next = { status: "ok", data };
+        next = { status: "ok", data, at: Date.now() };
       } catch (e) {
-        next = { status: "error", data: this.prDetails[key]?.data ?? null, error: String(e.message ?? e) };
+        next = { status: "error", data: this.prDetails[key]?.data ?? null, at: this.prDetails[key]?.at ?? null, error: String(e.message ?? e) };
       }
       if (this.profile?.name !== p.name) return; // a reload replaced the Profile meanwhile
       this.prDetails[key] = next;
       if (next.status === "ok") { this.loadViewed(key, next.data, cx); this.loadPrComments(key, next.data, cx); }
       cx.notify();
+      if (next.status === "ok") await this.writePrCache(key, file, serializePrCache(key, next.at, next.data));
     });
+  }
+
+  // Best effort (#31): compare-and-swap on the text read before; on a conflict, read again and write once more.
+  // A failed write leaves the old file, and the next fetch writes again.
+  async writePrCache(key, file, text) {
+    try {
+      await fs.mkdir(prCacheDir(), { recursive: true });
+      if (this.prCacheText[key] === undefined) { try { this.prCacheText[key] = await readTextFile(file); } catch { this.prCacheText[key] = null; } }
+      try { await writeTextFile(file, text, this.prCacheText[key] ?? null); } catch {
+        const now = await readTextFile(file);
+        await writeTextFile(file, text, now ?? null);
+      }
+      this.prCacheText[key] = text;
+    } catch { /* kept in memory only */ }
   }
 
   // The PR's saved line comments (#27), read once per PR when its detail first arrives. Comments made while the
@@ -903,7 +961,7 @@ export default class Wayfindr extends View {
         await replyToPrThread(p, sel.account, sel.pr, d, th, text, io);
         if (this.prReplying === R) this.prReplying = null;
         if (this.prOpen[key]?.reply === threadId) this.closePrBox(key);
-        if (this.selectedPr?.pr.key === key) this.fetchPr(cx);
+        if (this.selectedPr?.pr.key === key) this.fetchPr(cx, { force: true });
       } catch (e) {
         R.status = "error"; R.error = `Couldn't post the reply: ${e.message ?? e}`;
       }
@@ -928,7 +986,7 @@ export default class Wayfindr extends View {
         Object.assign(P, { status: "done", url: r?.url ?? d.url ?? null });
         const c = this.prComments[key];
         if (c) { c.list = c.list.filter((x) => !posted.has(x.id)); this.persistPrComments(key, cx); }
-        if (this.selectedPr?.pr.key === key) { this.prSummary.set_value(""); this.fetchPr(cx); }
+        if (this.selectedPr?.pr.key === key) { this.prSummary.set_value(""); this.fetchPr(cx, { force: true }); }
       } catch (e) {
         Object.assign(P, { status: "error", error: `Couldn't post the review: ${e.message ?? e}` });
         // Azure posts one thread per comment: the ones that went out leave the list, so a retry doesn't repeat them.
@@ -2497,7 +2555,7 @@ export default class Wayfindr extends View {
         .child(badge.text)))
       .when(Boolean(cur.draft), (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
       .child(div().flex_1())
-      .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
+      .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child(d ? "Refreshing…" : "Loading…")))
       // Post review (#27): the saved comments, a verdict and a summary, posted as one review.
       .when(writable, (el) => el.child(button("wf-pr-post-review", `Post review (${saved.length})`, t,
         (cx) => { this.prShown[k] = REVIEW_SCREEN; cx.notify(); }, { on: this.prShown[k] === REVIEW_SCREEN })))
