@@ -24,7 +24,7 @@ import { captureNotices } from "./captureplan.js";
 import { merge3, diffHunks, changedRanges, mapLine } from "./merge.js";
 import { createTree, setFolder, toggle, reveal, loaded, rows as treeRows, folderIndex, STATUS_TREE, parseStatus as parseTreeStatus, ignoredMatcher, PER_FOLDER, relistAfter, navMove } from "./filetree.js";
 import { ownerOf, nestedIn, holdsRoot, linkRows, caselessRoot, relUnder } from "./roots.js";
-import { viewShown } from "./panelview.js";
+import { viewShown, copyView } from "./panelview.js";
 import { listDir, join as pjoin, fingerprints, createFile, createDir, movePath, deleteFile, deleteTree, revealPath, chunkArgs, execOn } from "./fsx.js";
 import { checkRel, newTarget, renameTarget, parentOf, nameOf, under, windowsRoot, remap, within, copyPaths, countUnder, deleteQuestion, stemEnd } from "./fileops.js";
 import { sha256Hex } from "./sha256.js";
@@ -227,13 +227,16 @@ export default class Review extends View {
     this.fmtCaches = new Map(); // space -> what formatrun.js found for it (the formatter per folder), cleared with the space
     this.editNotes = new Map(); // file key -> the edit note last queued for it
     // Q48: Review (tabs are changed files) or Edit (file tree, tabs for changed and opened files).
-    this.view = ["review", "edit", "changes"].includes(props()?.view) ? props().view : null; // a panel copy for one view
+    // A panel copy shows one view; a tab or pane opened with props.view outside the panel layout starts in
+    // that view as a pane copy (panelview.copyView), so dialogs' jumps reach it.
+    const cv = copyView(props()?.view, layout());
+    this.view = cv.view; this.startMode = cv.mode;
     this.gotoSeen = Date.now(); this.dirtySig = ""; this.dirtyAt = 0; this.saveSeen = Date.now(); this.fileopSeen = Date.now();
     // Review comments per space (comments.js), loaded from their file when COMMENTS says it changed.
     this.cmts = new Map(); this.cmtSeen = new Map(); this.jumpSeen = Date.now(); this.anchorSeen = new Map();
     try { this.repoShut = new Set(JSON.parse(localStorage.getItem("repoShut") ?? "[]")); } catch { this.repoShut = new Set(); }
     try { this.repoOpen = new Set(JSON.parse(localStorage.getItem("repoOpen") ?? "[]")); } catch { this.repoOpen = new Set(); }
-    this.mode = this.view ?? "review"; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
+    this.mode = this.startMode; this.treeOn = true; this.trees = new Map(); this.ftrees = new Map();
     cx.spawn(async (cx) => { this.settings = await loadSettings(); syncPanels(shared, setShared, this.settings.hideHerdrPanels); this.paint(cx); }); // host reads only from a task, never from init itself
     this.setKeymap({});
     cx.spawn(async () => { this.setKeymap(await loadKeys()); await syncHerdrKeys(this.keymap); });

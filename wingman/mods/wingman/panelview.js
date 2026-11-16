@@ -29,6 +29,19 @@ export function viewShown(tree, view) {
   });
 }
 
+/**
+ * A copy's view and the mode it starts in, from its props.view. A panel copy (the layout has a
+ * Wingman block for that view) shows that one view. A Wingman tab or pane opened with props.view
+ * "review" or "edit" outside such a layout starts there as a pane copy: it switches between Review
+ * and Edit itself, so the comments and checkpoints dialogs' jumps (CMT_JUMP) land in it. "changes"
+ * stays the Changes view.
+ */
+export function copyView(propsView, tree) {
+  if (!["review", "edit", "changes"].includes(propsView)) return { view: null, mode: "review" };
+  if (propsView === "changes" || viewPath(tree, propsView)) return { view: propsView, mode: propsView };
+  return { view: null, mode: propsView };
+}
+
 /** Whether the layout has any Wingman block (a panel copy, whatever its view). */
 export function layoutHasWingman(tree) {
   const walk = (n) => !!n && typeof n === "object" && (n.content?.mod === "wingman" || (n.children ?? []).some(walk));
