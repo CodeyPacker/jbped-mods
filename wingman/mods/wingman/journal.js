@@ -18,6 +18,7 @@ import { notePrompt } from "./checkpoints.js";
 
 /** A UserPromptSubmit event (hook "prompt"): its prompt's first line titles the turn's checkpoint, nothing is reviewed. */
 const isPrompt = (event) => event?.hook_event_name === "UserPromptSubmit" && typeof event.prompt === "string";
+import { DEFAULT_COMMAND } from "./inlineedit.js";
 
 export const reviewDir = () => `${appHome()}/data/wingman`;
 const SPACES = () => `${reviewDir()}/spaces.json`;
@@ -87,12 +88,13 @@ export class Journal {
       try {
         const text = await readTextFile(path);
         if (text) {
-          const { terminal, event } = JSON.parse(text);
+          const { terminal, event, wingman } = JSON.parse(text);
           noteSession(terminal, event); // the session log's name for this Claude (sessionlog.js)
           if (isPrompt(event)) { notePrompt(terminal, event.prompt); this.log(`hook ${terminal} prompt`); }
           else {
-            const space = terminals().find((t) => t.address === terminal)?.labels?.["herdr.space"] ?? null;
-            const r = await this.apply(event, terminal);
+            // Wingman's own events (an inline edit, postEdit) name their space and machine; the hook's don't.
+            const space = terminals().find((t) => t.address === terminal)?.labels?.["herdr.space"] ?? wingman?.space ?? null;
+            const r = await this.apply(event, terminal, wingman?.on ?? null, wingman?.space ?? null);
             this.log(`hook ${terminal} ${event?.tool_name} ${event?.tool_input?.file_path ?? ""} -> ${r?.added ? "added" : r ? "already reviewed" : "not in a repo"}`);
             if (r && space) spaces.push([space, r.root]);
             if (r?.added) adopted++;
@@ -183,7 +185,7 @@ export class Journal {
    * event came from; its paths are that machine's (never converted) and `terminal` is Herdr's
    * address for the terminal there.
    */
-  async apply(event, terminal, on = null) {
+  async apply(event, terminal, on = null, inSpace = null) {
     const asSeen = event?.tool_input?.file_path ?? event?.tool_input?.notebook_path;
     const file = on ? remotePath(asSeen) : hostPath(asSeen);
     if (!file) return null;
@@ -205,7 +207,7 @@ export class Journal {
     const branch = await store.branch();
     parkStale(index, rel, branch); // an entry from another branch steps aside for this one
     if (index.files[rel]) {
-      if (!index.files[rel].by) {
+      if (!index.files[rel].by && terminal) {
         Object.assign(index.files[rel], { by: terminal, as: asSeen });
         await put(indexPath, JSON.stringify(index, null, 2) + "\n", before);
       }
@@ -215,12 +217,28 @@ export class Journal {
     const name = `c${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}.txt`;
     await put(`${store.dir}/baselines/${name}`, original, null);
     // `as`: the path as Claude wrote it (/mnt/c/... in WSL), so feedback names the file its way.
-    const space = agents().find((a) => a.address === terminal)?.space ?? null;
+    const space = agents().find((a) => a.address === terminal)?.space ?? inSpace;
     index.files[rel] = { baseline: name, created, by: terminal, as: asSeen, branch, head: await store.head(), ...(space ? { space } : {}) };
     await put(indexPath, JSON.stringify(index, null, 2) + "\n", before);
     this.log(`claude ${terminal}: ${store.root} ${rel}${created ? " (new)" : ""}${on ? ` on ${on}` : ""}`);
     return { root: store.root, added: true };
   }
+}
+
+/**
+ * Puts a file Wingman itself changes (an inline edit) under review the way a hook event does: an
+ * event in this computer's events/ folder that the capture leader applies in turn with the hook's
+ * (Journal.drain, never while a collect pass writes an index). `original`: the text the review
+ * baseline gets; `space`: the space the change shows in; `on`: the machine the file is on. An entry
+ * already there is kept as it is (its baseline stays). Resolves with the event file's path.
+ */
+export async function postEdit({ path, original, space, on = null }) {
+  const dir = `${reviewDir()}/events`;
+  await fs.mkdir(dir, { recursive: true }).catch(() => {});
+  const name = `${Date.now()}000000-wingman-${Math.random().toString(36).slice(2, 10)}.json`;
+  const event = { tool_name: "WingmanInlineEdit", tool_input: { file_path: path }, tool_response: { type: "update", originalFile: original } };
+  await writeTextFile(`${dir}/${name}`, JSON.stringify({ terminal: null, event, wingman: { space, on } }), null);
+  return `${dir}/${name}`;
 }
 
 // $1 data folder or "" (DIR_SH): makes its feedback/ and prints the folder, or "none" when the
@@ -317,7 +335,7 @@ const SETTINGS = () => `${reviewDir()}/settings.json`;
 export async function loadSettings() {
   const t = await readTextFile(SETTINGS());
   // autosave: save on focus loss and file switch; autosaveDelay: also after typing stops (s, 0 = off).
-  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", wordWrap: false, sessionLog: true, hideHerdrPanels: false, ...(t ? JSON.parse(t) : {}) };
+  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: DEFAULT_COMMAND, wordWrap: false, sessionLog: true, hideHerdrPanels: false, ...(t ? JSON.parse(t) : {}) };
 }
 /** The user's keyboard shortcuts: { "<action>": ["key", ...] }, only the ones changed from the defaults. */
 const KEYS = () => `${reviewDir()}/keys.json`;
