@@ -153,6 +153,18 @@ function stateMark(status, t) {
   return div().w(8).h(8).flex_none().rounded(4).bg(stateColor(status, t));
 }
 
+// A Pull Request's checks (#26): a mark and a colour per state, and the header badge's text.
+const CHECK_MARK = { fail: "✗", pending: "●", pass: "✓", skipped: "–" };
+const checkColor = (state, t) => state === "fail" ? t.blocked : state === "pending" ? t.working : state === "pass" ? t.done : t.dim;
+const CHECK_ORDER = { fail: 0, pending: 1, pass: 2, skipped: 3 };
+function checksBadge(checks) {
+  const n = (s) => (checks?.list ?? []).filter((c) => c.state === s).length;
+  if (n("fail")) return { state: "fail", text: `✗ ${n("fail")} failing` };
+  if (n("pending")) return { state: "pending", text: `● ${n("pending")} running` };
+  if (n("pass")) return { state: "pass", text: `✓ ${n("pass")} passed` };
+  return null;
+}
+
 // Where a Repo's worktrees go, as the Launch card says it. wr: Wranglr's parsed config, or null.
 const placementText = (w, wr) => w === "wranglr" ? (wr ? `Wranglr's rule (${wr.worktrees})` : "Herdr's worktrees folder (Wranglr isn't set up)")
   : w === "herdr" ? "Herdr's worktrees folder" : w === "beside" ? "beside the clone" : w;
@@ -177,6 +189,7 @@ function prRow(pr, t, review = null, select = null) {
       .on_mouse_down("left", stop).on_click((_e, cx) => select.onClick(cx)))
     .child(v_flex().flex_1().min_w(0).gap(4)
       .child(h_flex().gap(8).items_center().min_w(0)
+        .when(pr.checks != null && pr.checks !== "none" && pr.checks in CHECK_MARK, (el) => el.child(div().flex_none().text_size(11).text_color(checkColor(pr.checks, t)).child(CHECK_MARK[pr.checks])))
         .when(pr.draft, (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
         .child(div().min_w(0).truncate().text_size(13).text_color(t.foreground).child(pr.title)))
       .child(div().text_size(11).text_color(t.dim).truncate()
@@ -2106,9 +2119,15 @@ export default class Wayfindr extends View {
     const date = (s) => String(s ?? "").slice(0, 10);
     const review = this.reviewActions(sel.account, pr), rv = review.state;
     const site = PR_SITE[this.profile?.accounts.find((a) => a.id === sel.account)?.provider] ?? "the API";
+    const badge = checksBadge(d?.checks);
 
     const head = h_flex().h(40).px(14).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
       .child(div().min_w(0).text_size(12).text_color(t.muted).truncate().child([cur.id, cur.repo, cur.state].filter(Boolean).join(" · ")))
+      // The checks badge: a click shows the Overview, where the Checks section is.
+      .when(Boolean(badge), (el) => el.child(div().id("wf-pr-checks-badge").flex_none().px(6).rounded(9).text_size(11).cursor_pointer()
+        .text_color(checkColor(badge.state, t)).hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.prShown[k] = null; cx.notify(); })
+        .child(badge.text)))
       .when(Boolean(cur.draft), (el) => el.child(h_flex().h(18).px(6).flex_none().items_center().rounded(9).bg(t.selected).text_size(11).text_color(t.muted).child("Draft")))
       .child(div().flex_1())
       .when(entry.status === "loading", (el) => el.child(div().text_size(12).text_color(t.dim).child("Loading…")))
@@ -2140,6 +2159,7 @@ export default class Wayfindr extends View {
     }
     if (d && !f) {
       const general = (d.comments ?? []).filter((c) => !c.path);
+      const checks = [...(d.checks?.list ?? [])].sort((a, b) => (CHECK_ORDER[a.state] ?? 4) - (CHECK_ORDER[b.state] ?? 4));
       const unplaced = unplacedThreads(threads, files, (x) => (x.binary || x.patch == null ? [] : this.rowsOf(x).rows));
       const adds = files.reduce((n, x) => n + (x.additions ?? 0), 0), dels = files.reduce((n, x) => n + (x.deletions ?? 0), 0);
       const summary = [`${files.length} ${files.length === 1 ? "file" : "files"} · +${adds} −${dels}`,
@@ -2161,6 +2181,14 @@ export default class Wayfindr extends View {
         .child(section("Files"))
         .child(note(summary))
         .when(Boolean(d.gitError), (el) => el.child(note(`Diffs from ${site}: ${String(d.gitError).split("\n")[0]}`)))
+        .child(section("Checks"))
+        .when(checks.length === 0, (el) => el.child(note("No checks reported")))
+        .children(checks.map((c, i) => h_flex().id(`wf-pr-check-${k}-${i}`).h(24).gap(8).items_center().min_w(0).text_size(12)
+          .when(Boolean(c.url), (r) => r.cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(c.url)))
+          .child(div().w(12).flex_none().text_color(checkColor(c.state, t)).child(CHECK_MARK[c.state] ?? "?"))
+          .child(div().flex_none().max_w(320).truncate().text_color(t.foreground).child(c.group ? `${c.group} / ${c.name}` : c.name))
+          .when(Boolean(c.description), (r) => r.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(c.description)))))
         .child(section(`Comments (${general.length + (d.moreComments ?? 0)})`))
         .children(general.map((c, i) => card(`wf-pr-c-${k}-${i}`, c, null)))
         // Threads no diff row takes: on no line, outdated, or on a file or line the diff doesn't show.
