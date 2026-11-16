@@ -36,6 +36,7 @@ import { git, onWindows, toWsl } from "./git.js";
 import { cleanInstruction, target as inlineTarget, targetProblem, relocate, buildPrompt as inlinePrompt, cleanAnswer, replaceLines, expand as expandCommand, usesFile, failure as runFailure, words as commandWords, DEFAULT_COMMAND as INLINE_COMMAND, TIMEOUT_MS as INLINE_MS, MAX_PROMPT as INLINE_MAX_PROMPT } from "./inlineedit.js";
 import { plan as runPlan } from "./toolpath.js";
 import { toolWhere } from "./toolrun.js";
+import { unitOf, toElem, charWidth, colAtX, wrapColumns } from "./zoom.js";
 import { READ, STATUS, STATUS_V2, MAX_FILES, parseStatus, parseStatusV2, onDisk, statusLetter, reviewTag, discardCommands, inHeadArgs, inHeadOf, commitCommands, pathspecText, NUMSTAT, NUMSTAT_NO_HEAD, parseNumstat, countLines } from "./changes.js";
 import { compile, findAll, nextMatch, prevMatch, replacement, parseLine } from "./find.js";
 import { rank, parseQuery } from "./quickopen.js";
@@ -807,7 +808,7 @@ export default class Review extends View {
 
   /** E5: with line wrap on, the text columns a row holds (0: wrap off). */
   wrapCols() {
-    return this.settings.wordWrap ? Math.max(20, Math.floor(((this.viewW ?? 600) - GUTTER - 16) / this.cw())) : 0;
+    return this.settings.wordWrap ? wrapColumns(this.vw(), GUTTER, 16, this.cw()) : 0;
   }
 
   /** E5: a long line's row becomes one row per segment ({ seg, segs }; later ones have `cont`). */
@@ -865,7 +866,7 @@ export default class Review extends View {
 
   tabMax() {
     const total = this.visible().reduce((w, x) => w + this.tabWidth(x), 0);
-    return Math.max(0, total - (this.tabViewW ?? 0));
+    return Math.max(0, total - this.tabVW());
   }
 
   setTabOffset(px) { this.tabOffset = Math.max(0, Math.min(px, this.tabMax())); }
@@ -873,11 +874,12 @@ export default class Review extends View {
   /** Shifts the strip just enough to show `key`'s tab. */
   showTab(key) {
     if (!this.tabViewW) return; // not laid out yet; the size callback reveals it
+    const view = this.tabVW();
     let x0 = 0;
     for (const x of this.visible()) {
       const w = this.tabWidth(x);
       if (x.key === key) {
-        const off = this.tabOffset ?? 0, view = this.tabViewW ?? 0;
+        const off = this.tabOffset ?? 0;
         if (x0 < off) this.setTabOffset(x0);
         else if (x0 + w > off + view) this.setTabOffset(x0 + w - view);
         return;
@@ -888,7 +890,7 @@ export default class Review extends View {
 
   /** Either wheel axis, in pixels (lines count as 20 px). */
   tabWheel(ev, cx) {
-    const d = ev.delta_lines ? (ev.delta_lines.x || ev.delta_lines.y) * 20 : ev.delta.x || ev.delta.y;
+    const d = ev.delta_lines ? (ev.delta_lines.x || ev.delta_lines.y) * 20 : this.px(ev.delta.x || ev.delta.y);
     if (!d) return;
     this.setTabOffset((this.tabOffset ?? 0) - d);
     this.paint(cx);
@@ -1943,8 +1945,8 @@ export default class Review extends View {
       // kept from the area around it and a click (clickChange) tells the checkbox from the row by it.
       .child(div().id("chg-list").flex_1().min_h(0).pt(4).relative().overflow_hidden()
         .on_size_change((size, cx) => { if (!this.crumbSized) { this.crumbSized = true; crumb(`on_size_change: first Changes list size ${size.width}x${size.height}`, "changes"); } if (Math.abs((this.chgH ?? 0) - size.height) > 0.5) { this.chgH = size.height; this.paint(cx); } })
-        .on_mouse_move((ev) => { this.chgX = ev.local_position?.x ?? null; })
-        .on_mouse_down("left", (ev) => { this.chgX = ev.local_position?.x ?? null; })
+        .on_mouse_move((ev) => { this.chgX = ev.local_position ? this.px(ev.local_position.x) : null; })
+        .on_mouse_down("left", (ev) => { this.chgX = ev.local_position ? this.px(ev.local_position.x) : null; })
         .when(rows.length > 0, (e) => e
           .child(v_virtual_list("chg-rows", rows.length, rowSizes(rows), (i) => rows[i].key, (range) => { if (!this.crumbRange) { this.crumbRange = true; crumb(`virtual list: first range ${range.start}-${range.end} of ${rows.length}`, "changes"); } return rows.slice(range.start, range.end).map(row); })
             .w_full().h(Math.max(FILE_H, (this.chgH ?? 300) - 4)).track_scroll(this.chgScroll)
@@ -2673,7 +2675,7 @@ export default class Review extends View {
   // the top: the list reports no scroll position, and its rows can't take mouse handlers,
   // so this is what lets a pointer position map to a row (clicks, drags, the menu).
 
-  viewRows() { return Math.max(1, Math.floor((this.viewH ?? 400) / ROW)); }
+  viewRows() { return Math.max(1, Math.floor(this.vh() / ROW)); }
 
   /**
    * scroll_to_item only moves the list when the row is off screen, bringing it to the nearest
@@ -2708,13 +2710,13 @@ export default class Review extends View {
 
   wheel(ev, cx) {
     // Sideways (Shift+wheel, or a sideways swipe) scrolls long lines.
-    const dx = ev.delta_lines ? ev.delta_lines.x * 3 * this.cw() : ev.delta.x;
-    const sideways = ev.modifiers?.shift ? (ev.delta_lines ? ev.delta_lines.y * 3 * this.cw() : ev.delta.y) : dx;
-    if (ev.modifiers?.shift || Math.abs(dx) > Math.abs(ev.delta_lines?.y ?? ev.delta.y)) {
+    const dx = ev.delta_lines ? ev.delta_lines.x * 3 * this.cw() : this.px(ev.delta.x);
+    const sideways = ev.modifiers?.shift ? (ev.delta_lines ? ev.delta_lines.y * 3 * this.cw() : this.px(ev.delta.y)) : dx;
+    if (ev.modifiers?.shift || Math.abs(dx) > Math.abs(ev.delta_lines?.y ?? this.px(ev.delta.y))) {
       if (this.wrapCols()) return; // wrapped lines don't scroll sideways
       this.hx = Math.max(0, this.hx - sideways); this.paint(cx); cx.stop_propagation(); return;
     }
-    const lines = ev.delta_lines?.y ?? ev.delta.y / ROW;
+    const lines = ev.delta_lines?.y ?? this.px(ev.delta.y) / ROW;
     this.wheelAcc = (this.wheelAcc ?? 0) - lines;
     const step = Math.trunc(this.wheelAcc);
     if (!step) return;
@@ -2732,7 +2734,7 @@ export default class Review extends View {
     // A click in the editor closes the tree's name box or delete confirm (nothing is done).
     if (this.treeEdit && !this.treeEdit.busy) this.treeEdit = null;
     if (this.treeDel && !this.treeDel.busy) this.treeDel = null;
-    const f = this.file(), x = ev.local_position?.x ?? -1, y = ev.local_position?.y ?? -1, i = this.rowAt(y);
+    const f = this.file(), { x, y } = this.at(ev), i = this.rowAt(y);
     if (!f || i < 0) return;
     const r = this.rowsOf(f)[i];
     if (r.kind === "@") return this.mode === "changes" ? undefined : this.rowButton(r.hunk, x, cx);
@@ -2750,9 +2752,9 @@ export default class Review extends View {
    *  a row at a time near the top and bottom edges. */
   pointerMove(ev, cx) {
     if (!this.dragging) return;
-    this.dragY = ev.local_position.y; this.dragX = ev.local_position.x;
+    ({ x: this.dragX, y: this.dragY } = this.at(ev));
     if (this.dragY < ROW) this.scrollTo((this.top ?? 0) - 1);
-    else if (this.dragY > (this.viewH ?? 400) - ROW) this.scrollTo((this.top ?? 0) + 1);
+    else if (this.dragY > this.vh() - ROW) this.scrollTo((this.top ?? 0) + 1);
     this.dragTo(this.dragY);
     this.paint(cx);
   }
@@ -3531,7 +3533,18 @@ export default class Review extends View {
     this.error = `${this.mode === "changes" ? "Changes" : "Review"} is read-only: double-click a line to edit it in Edit`; this.paint(cx);
   }
 
-  cw() { return this.charW ?? 7.2; }
+  /** One character's width in the diff font, in element px (zoom.js: measured widths include the app's zoom). */
+  cw() { return charWidth(this.charPx, 100, this.unit) ?? 7.2; }
+
+  /** The diff's width and height in element px. */
+  vw() { return this.viewW == null ? 600 : this.px(this.viewW); }
+  vh() { return this.viewH == null ? 400 : this.px(this.viewH); }
+
+  /** The file tab strip's width in element px. */
+  tabVW() { return this.tabViewW ? this.px(this.tabViewW) : 0; }
+
+  /** A pointer event's position in its element, in element px ({ x: -1, y: -1 } when it has none). */
+  at(ev) { const p = ev.local_position; return p ? { x: this.px(p.x), y: this.px(p.y) } : { x: -1, y: -1 }; }
   hasTextSel() { return !!(this.anchor && this.cur && cmp(this.anchor, this.cur)); }
   ordered() { return cmp(this.anchor, this.cur) <= 0 ? [this.anchor, this.cur] : [this.cur, this.anchor]; }
 
@@ -3543,9 +3556,9 @@ export default class Review extends View {
   /** The position under x on row `r` (a line of the current file). */
   posAt(f, r, x) {
     const text = body(linesOf(f)[r.line]), seg = r.seg;
-    if (!seg) return { line: r.line, col: charAt(text, (x - GUTTER + this.hx) / this.cw()) };
+    if (!seg) return { line: r.line, col: charAt(text, colAtX(x, GUTTER, this.hx, this.cw())) };
     // A wrapped segment: its own columns; past its end stays on it (the last segment takes the line end).
-    const v = (x - GUTTER) / this.cw() - seg.ind + visualCol(text, seg.from);
+    const v = colAtX(x, GUTTER, 0, this.cw()) - seg.ind + visualCol(text, seg.from);
     return { line: r.line, col: Math.max(seg.from, Math.min(charAt(text, Math.max(0, v)), seg.to === text.length ? seg.to : seg.to - 1)) };
   }
 
@@ -3577,7 +3590,7 @@ export default class Review extends View {
     if (row != null) this.ensureVisible(row);
     if (this.wrapCols()) { this.hx = 0; return; }
     const x = visualCol(body(linesOf(f)[this.cur.line]), this.cur.col) * this.cw();
-    const view = Math.max(60, (this.viewW ?? 600) - GUTTER - 40);
+    const view = Math.max(60, this.vw() - GUTTER - 40);
     if (x < this.hx) this.hx = Math.max(0, x - 60);
     else if (x > this.hx + view) this.hx = x - view + 60;
   }
@@ -5214,7 +5227,7 @@ export default class Review extends View {
    * selecting is left-click only. A line in a hunk, or its button row, makes that hunk current.
    */
   openMenu(ev, cx) {
-    const f = this.file(), i = this.rowAt(ev.local_position?.y ?? -1);
+    const f = this.file(), i = this.rowAt(this.at(ev).y);
     if (!f || i < 0) return;
     this.handle.focus(); this.treeFocus = false; this.searchFocus = false; this.problemsFocus = false; // a right-click in the file gives it the keyboard
     const r = this.rowsOf(f)[i], inHunk = r.hunk != null, sel = this.selection(f), hasSel = !!sel;
@@ -5512,10 +5525,10 @@ export default class Review extends View {
   }
 
   /** The change header row's buttons for the diff's width now (barfit.hunkButtons). */
-  hunkBtns() { return hunkButtons(this.px(this.viewW), GUTTER, BTN_GAP, BUTTONS); }
+  hunkBtns() { return hunkButtons(this.vw(), GUTTER, BTN_GAP, BUTTONS); }
 
   /** A measured size (on_size_change: screen px) in element px, as w() and the bars' estimates use. */
-  px(measured) { return measured / (this.unit ?? 1); }
+  px(measured) { return toElem(measured, this.unit); }
 
   button(id, label, bg, onClick) {
     return div().id(id).h(22).px(10).flex().items_center().rounded(5).cursor_pointer().bg(bg).text_size(11)
@@ -5625,7 +5638,7 @@ export default class Review extends View {
       // Sizes come back in screen px, the app's zoom included (w(100) measures 120 at zoom 1.2), and
       // the bars are laid out in element px: this 100 px probe gives the ratio (px()).
       .child(div().id("unit-probe").absolute().top(0).left(0).w(100).h(0)
-        .on_size_change((size, cx) => { const u = size.width / 100; if (u > 0 && Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
+        .on_size_change((size, cx) => { const u = unitOf(size.width); if (Math.abs(u - (this.unit ?? 1)) > 0.001) { this.unit = u; this.paint(cx); } }))
       .track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx))
       .child(h_flex().h(40).flex_none().px(12).gap(10).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Wingman"))
@@ -5667,7 +5680,7 @@ export default class Review extends View {
           .when(this.mode !== "changes", (e) => e.child(h_flex().absolute().top(0).bottom(0).left(-(this.tabOffset ?? 0)).children(vis.map((x) => this.tab(x, t)))))
           // Position indicator, only when the tabs don't all fit.
           .when(this.tabMax() > 0, (e) => {
-            const total = this.tabMax() + (this.tabViewW ?? 0), view = this.tabViewW ?? 0;
+            const view = this.tabVW(), total = this.tabMax() + view;
             return e.child(div().absolute().bottom(1).h(2).rounded(1).bg(t.dim)
               .left(((this.tabOffset ?? 0) / total) * view).w(Math.max(24, (view / total) * view)));
           }))
@@ -5695,9 +5708,9 @@ export default class Review extends View {
         .when(!this.stores.length && !!this.spaceId, (e) => e.child(this.button("open-folder", "Add repo…", t.raised, (cx) => this.openFolder(cx)).flex_none()))))
       .when(!!f, (e) => e.child(div().id("review-diff").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(12)
         .on_size_change((size, cx) => { this.viewH = size.height; this.viewW = size.width; this.paint(cx); })
-        // One character's width in the diff font, for cursor columns (the font is monospace).
+        // 100 characters' width in the diff font (screen px; cw() makes one in element px), for cursor columns (the font is monospace).
         .child(div().absolute().top(0).left(0).opacity(0).whitespace_nowrap().child("0".repeat(100))
-          .on_size_change((size, cx) => { const w = size.width / 100; if (w > 0 && Math.abs(w - (this.charW ?? 0)) > 0.001) { this.charW = w; this.paint(cx); } }))
+          .on_size_change((size, cx) => { const w = size.width; if (w > 0 && Math.abs(w - (this.charPx ?? 0)) > 0.05) { this.charPx = w; this.paint(cx); } }))
         .child(v_virtual_list("review-rows", rows.length, ROW, (i) => rows[i].kind === "@" ? `h${rows[i].hunk}` : `r${i}`,
           (range) => {
             // The list calls this twice a frame: once with [0, 1) to measure a row, then with
