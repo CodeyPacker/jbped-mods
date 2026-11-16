@@ -111,9 +111,9 @@ test("pr: files, viewed, checks, post, fullscreen, browser, copy, review, refetc
   assert.equal(a("pr", "enter"), null);
 });
 
-test("pr in the pane copy: no fullscreen, no Review, q does nothing", () => {
+test("pr in the pane copy: f zooms the pane, no Review, q does nothing", () => {
   const pane = { ...ALL_FACTS, pane: true };
-  assert.equal(a("pr", "f", pane), null);
+  assert.equal(a("pr", "f", pane), "zoom");
   assert.equal(a("pr", "s", pane), null);
   assert.equal(a("pr", "q", pane), null);
   assert.equal(a("pr", "j", pane), "next");
@@ -179,7 +179,7 @@ test("coreHints: the few per layer, then ? when it works", () => {
 
 test("keyHints lists every key that works, and drops the rest", () => {
   const labels = keyHints("pr", { ...ALL_FACTS, pane: true }).map(([k]) => k);
-  assert.ok(!labels.includes("f") && !labels.includes("s") && !labels.includes("q"));
+  assert.ok(labels.includes("f") && !labels.includes("s") && !labels.includes("q"));
   assert.ok(labels.includes("v") && labels.includes("o") && labels.includes("?"));
   assert.deepEqual(keyHints("help", ALL_FACTS).map(([k]) => k), ["?", "q"]);
 });

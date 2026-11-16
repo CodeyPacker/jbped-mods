@@ -1353,6 +1353,7 @@ export default class Wayfindr extends View {
     else if (action === "checks") this.prShown[k] = null;
     else if (action === "post") this.prShown[k] = REVIEW_SCREEN;
     else if (action === "full") this.toggleFull();
+    else if (action === "zoom") run("pane.zoom", {}); // the pane copy holds the keyboard, so the zoom is its own pane
     else if (action === "browser" && url) cx.open_url(url);
     else if (action === "copy" && url) { cx.write_to_clipboard(url); this.flash("Copied", cx); }
     else if (action === "review") this.reviewActions(sel.account, sel.pr).start(cx);

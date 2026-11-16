@@ -6,7 +6,7 @@
 // card open), "prs" (the Pull Request list), "pr" (the overlay or the pane copy), "review" (the Post review
 // screen), "confirm" (the Post confirm), "help" (the "?" list), "settings".
 // Facts, all booleans: url, canLaunch, canReview, canUpdate, canMove, canComment, canPost, pane, full,
-// hasFile (a file is shown, not the Overview), hasRows, vim. In "review", canPost means the review is ready to post.
+// hasFile (a file is shown, not the Overview), hasRows, vim. In "pr", f is "full" (the overlay) or "zoom" (the pane copy). In "review", canPost means the review is ready to post.
 // `vim` is the "vimKeys" setting (D13). Off, only the keys Wayfindr had before work: arrows, home, end, enter,
 // esc, shift-left/right, ctrl-n/ctrl-p, and v/p/f in the overlay. No letters, q, g/G, ? or letter jumps.
 
@@ -69,7 +69,7 @@ export function keyAction(layer, k, facts = {}) {
     if (k === "v") return when(f.hasFile, "viewed");
     if (k === "c") return act("checks");
     if (k === "p") return when(f.canPost, "post");
-    if (k === "f") return when(!f.pane, "full");
+    if (k === "f") return act(f.pane ? "zoom" : "full"); // the pane copy: Herdr's pane zoom is its fullscreen
     if (k === "o") return when(f.url, "browser");
     if (k === "y") return when(f.url, "copy");
     if (k === "s") return when(f.canReview && !f.pane, "review");
