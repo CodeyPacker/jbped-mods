@@ -209,6 +209,25 @@ export async function loadPullRequestDetail(profile, accountId, pr, io, opts = {
   return provider.pullRequest(account, pr, io, opts);
 }
 
+// Posts one review on a Pull Request (#27) as the signed-in account: review { event, body, comments } (see the
+// contract). Resolves with { url }.
+export async function postPrReview(profile, accountId, pr, detail, review, io, registry = PROVIDERS) {
+  const account = profile.accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error(`No account "${accountId}" in this profile`);
+  const provider = providerFor(account, registry);
+  if (!can(provider, "postReview")) throw new Error(`Posting reviews on ${account.provider} isn't supported yet`);
+  return provider.postReview(account, pr, detail, review, io);
+}
+
+// Posts a reply under one of the detail's review threads (#27).
+export async function replyToPrThread(profile, accountId, pr, detail, thread, text, io, registry = PROVIDERS) {
+  const account = profile.accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error(`No account "${accountId}" in this profile`);
+  const provider = providerFor(account, registry);
+  if (!can(provider, "reply")) throw new Error(`Replies on ${account.provider} aren't supported yet`);
+  return provider.reply(account, pr, detail, thread, text, io);
+}
+
 // Moves a Ticket to a Column on its Board (#15). columnId: a Column of the Board as shown.
 export async function moveTicket(profile, boardCfg, data, ticket, columnId, io, registry = PROVIDERS) {
   const { account, provider } = resolve(profile, boardCfg, registry);
