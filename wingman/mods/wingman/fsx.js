@@ -10,7 +10,7 @@ import { exec, readTextFile, writeTextFile, appHome } from "herdr";
 import { inside } from "./fileops.js";
 import { onWindows, toWsl, distroOf } from "./git.js";
 import { byteLength, chunkBytes, sha256Hex } from "./sha256.js";
-import { withTimeout, LIMITS } from "./remote.js";
+import { withTimeout, LIMITS, pause } from "./remote.js";
 
 // ---- paths (pure) ---------------------------------------------------------------
 
@@ -346,6 +346,16 @@ async function staleOrForeign(path, expected, on) {
 
 const token = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+/** A local write is tried this many times when it fails for a moment, this far apart (ms). */
+export const WRITE_TRIES = 3, WRITE_PAUSE_MS = 150;
+
+/**
+ * A local write that failed only for a moment: Windows refusing the atomic replace while another
+ * reader has the file open (seen on a \\wsl.localhost repo: "Access is denied. (os error 5)" on an
+ * Accept, which dropped the undo history). Compare-and-swap is checked again before each try.
+ */
+export const transientWrite = (e) => /access is denied|os error (5|32)\b|sharing violation|being used by another process|\bEBUSY\b/i.test(String(e?.message ?? e ?? ""));
+
 /**
  * Writes `text` to `path` only if the file still has the content `expected` (null: only if absent).
  * Local: writeTextFile. On another machine: a temp file beside the target, a hash check, then an
@@ -354,10 +364,13 @@ const token = () => `${Date.now().toString(36)}${Math.random().toString(36).slic
  */
 export async function writeText(path, text, expected, { on = null } = {}) {
   if (!on) {
-    const now = await readTextFile(path);
-    if (now !== expected) throw staleError(path);
-    await writeTextFile(path, text, expected);
-    return;
+    for (let tries = 1; ; tries++) {
+      const now = await readTextFile(path);
+      if (now !== expected) throw staleError(path);
+      try { await writeTextFile(path, text, expected); return; }
+      catch (e) { if (tries >= WRITE_TRIES || !transientWrite(e)) throw e; }
+      await pause(WRITE_PAUSE_MS);
+    }
   }
   const [want, calls] = await Promise.all([hashOf(expected), plan(text, path, on)]), k = token();
   if (calls.length === 1) {

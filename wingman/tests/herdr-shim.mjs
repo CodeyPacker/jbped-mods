@@ -52,7 +52,10 @@ export const readTextFile = (p, opts = {}) => {
   return stat(p).then((s) => { if (s.isFile() && s.size > READ_LIMIT) throw new Error("Text file exceeds 1 MiB"); }, () => {})
     .then(() => readFile(p, "utf8").catch(() => null));
 };
+/** Errors the next writeTextFile calls throw, one each (a test pushes them). */
+export const writeFaults = [];
 export async function writeTextFile(p, text, expected) {
+  if (writeFaults.length) throw new Error(writeFaults.shift());
   if ((await readTextFile(p)) !== expected) throw new Error("stale snapshot");
   await writeFile(p + ".tmp", text); await rename(p + ".tmp", p); return null;
 }

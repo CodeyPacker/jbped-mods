@@ -78,6 +78,12 @@ export const LIMITS = { read: 20000, grace: 10000 };
 /** Registers a way to wait `ms` (a copy's cx.sleep); returns a function that removes it. */
 export function addSleeper(fn) { sleepers.add(fn); return () => sleepers.delete(fn); }
 
+/** Waits about `ms` with a copy's sleeper; at once when no copy lent one (tests). */
+export async function pause(ms) {
+  const sleep = [...sleepers].at(-1);
+  if (sleep) await sleep(ms).catch(() => {});
+}
+
 async function watch() {
   if (watching) return;
   watching = true;
