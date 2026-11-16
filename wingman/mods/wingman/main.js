@@ -4763,7 +4763,7 @@ export default class Review extends View {
             ...r.files.slice(0, 200).map((f, i) => div().id(`cp-f-${i}`).h(18).flex().items_center().px(4).rounded(3).cursor_pointer().font_family(mono).text_size(11.5)
               .hover((s) => s.bg(t.raised)).on_click((_e, cx) => { this.cpOpenFile(f); this.paint(cx); }).child(div().min_w(0).truncate().child(multi ? `${f.name}/${f.rel}` : f.rel))),
             ...(r.count > Math.min(200, r.files.length) ? [div().text_size(11).text_color(t.dim).child(`… ${r.count - Math.min(200, r.files.length)} more`)] : []),
-            ...(!r.count ? [div().text_size(11).text_color(t.dim).child("No files changed in this turn (yet).")] : []),
+            ...(!r.count && r.kind !== "restore" ? [div().text_size(11).text_color(t.dim).child("No files changed in this turn (yet).")] : []),
           ]))
           .child(h_flex().gap(6).items_center().pt(2)
             .child(this.button("cp-restore", "Restore to before this turn", t.ansi3 + "55", (cx) => this.cpAsk(cx)).flex_none().whitespace_nowrap())

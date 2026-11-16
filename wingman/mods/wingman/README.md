@@ -11,6 +11,20 @@ When you reject a change, the agent that made it gets a short factual note on it
 
 **Review comments** collect notes to send as one prompt. Add one with a change's **Comment** button in Review, **+ Comment** or `alt-m` on the cursor's line or the selection in Edit, or the right-click menu (**Add review comment**, **Reject and add review comment…**, which rejects the change and quotes it). The header's **Comments N** (`alt-shift-m`) lists the space's comments: jump to one, edit, delete, **Clear all**, **Copy prompt**, and **Send to agent**, which types them into the agent's terminal as your message with `hc send` (paste and Enter) and clears the list; **Undo clear** puts the last sent or cleared batch back until you add a comment. Send goes to the agent that made the commented changes when they all name the same live one, else the space's only agent, else it asks which; a working agent asks first. Comments are kept per space in `data/wingman/comments/` and follow their code when the file changes; one whose lines can't be found again is marked "moved or changed". At most 50 comments per space and 2,000 characters per comment; control characters are dropped.
 
+### Checkpoints
+
+Each time an agent starts a turn, the snapshot capture takes of each repo is also kept as a **checkpoint**: what every file was just before the turn. The header's **Checkpoints N** in Review (command `wingman.checkpoints`) lists the space's turns, newest first: time, agent, how many files the turn changed and a title. The title is the first line of the prompt (at most 80 characters, control characters dropped) when the Claude hook saw it (`UserPromptSubmit`), else "no prompt seen". A turn over several repos is one row. Pick a row to see the files the turn changed; a click on one opens it in Review, or in Edit when it has nothing to review.
+
+**Restore to before this turn** puts every file that changed since that checkpoint back to what the checkpoint has, in each repo of the turn: modified files are rewritten, files created since are deleted, files deleted since come back. That includes changes made after the turn, by any agent or by you. It asks first, naming the number of files and what is deleted or comes back. Each write is compare-and-swap, as Reject's: a file that changed after you confirmed isn't written and is named. Binary files, links, submodules and texts over 1 MB can't be restored and are named in the question. It is refused, with the reason, when:
+- a file it would change has unsaved edits in Edit (any Wingman copy): save or discard them first,
+- an agent is working in the repo (its turn is still being captured): restore once the turn ends,
+- the repo is on another branch than the checkpoint: switch back to that branch first,
+- the checkpoint's files are gone from git (its ref was deleted by hand).
+
+A restore isn't a Ctrl+Z step. Before it writes, it keeps a checkpoint **Before restore to <time>** of the working tree as it was, listing the files the restore changes; restoring that one goes forward again. This was chosen over undo because a restore can touch any number of files of any size (undo keeps the newest 200 steps and about 24 MB of text per space, in memory, and is dropped when a write fails), while a checkpoint costs one git call, survives a reload, and works the same on another machine. Afterwards each Claude whose turns the restore undid gets a factual note, as for a rejection (off with **Auto note on rejections**). The dialog's commands, for keys and tests: `wingman.cpNext`, `wingman.cpPrev`, `wingman.cpOpen`, `wingman.cpRestore`, `wingman.cpConfirm`, `wingman.cpCancel`.
+
+Each repo keeps the newest 30 checkpoints in `<git-dir>/wingman/checkpoints.json`. Each checkpoint's tree is named by a ref, `refs/wingman/checkpoints/<id>`, so `git gc` keeps it; the oldest go with their refs. These refs point at trees: they are not branches, tags or stash entries, `git log --all` leaves them out, and nothing else of yours (index, `HEAD`, branches, stash) is touched. A repo on another machine works the same, through the same calls there. To drop them all: `git for-each-ref --format='delete %(refname)' refs/wingman/checkpoints/ | git update-ref --stdin`, and delete `checkpoints.json`.
+
 Syntax highlighting (Prism 1.30, MIT, vendored in `prism.js` and `grammars.js`) covers JavaScript, TypeScript (`.ts .mts .cts .d.ts`), React (`.jsx .tsx`, and JSX in `.js`), Vue (`.vue`), Angular (`.ts` and `.html` templates with `{{ }}`), HTML, C#, JSON, Markdown, Dockerfiles, YAML (including `docker-compose.yml`) and `.env` files. CSS (`.css`) and SCSS (`.scss`) are covered too. In HTML and Vue files, `<script>` blocks use the grammar their `lang` names and `<style>` blocks use CSS or SCSS. Vue and Angular template syntax is recognized: `v-if`, `v-for`, `:prop`, `@event`, `#slot`, `[prop]`, `(event)`, `[(ngModel)]`, `*ngFor`, `#ref`, `@if`/`@for`/`@switch`/`@defer` blocks and `{{ }}`, with the expressions inside highlighted as JavaScript. Other files show as plain text.
 
 Review shows only what belongs to this space and branch:
@@ -126,7 +140,7 @@ Herdr's own layouts (`layout:<name>` in `installed.json`) are copied once to `<n
 
 ## Uninstall
 
-Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/`.
+Run the same installer with `uninstall`. It removes only what install added: its hook entries, `HERDR_WINGMAN_DIR`, and its two `WSLENV` entries. Then delete this folder. To clear review data, delete `~/.config/herdr-app/data/wingman*` and any repo's `.git/wingman/` and `refs/wingman/` refs (see Checkpoints).
 
 On another machine: **⚙ Settings** › **Claude hook on <machine>** › **Remove**. It removes the two entries it added (a backup first; entries it didn't add, such as this PC's WSL setup's, stay), the hook copy and its record, and the folders it made, with any events and notes still waiting in them. A settings file Install created and that is left empty goes too.
 
@@ -312,8 +326,9 @@ Settings are kept in `~/.config/herdr-app/data/wingman/settings.json`.
 
 | Where | What |
 |---|---|
-| `<git-dir>/wingman/` | `index.json`, `baselines/`, `capture.json`, `sums.json` (what each reviewed file had while it differed from `HEAD`), `snap.<pid>.index` while a snapshot runs (per repo) |
-| `~/.config/herdr-app/data/wingman/` | `events/` (from the hook, removed once read), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
+| `<git-dir>/wingman/` | `index.json`, `baselines/`, `capture.json`, `sums.json` (what each reviewed file had while it differed from `HEAD`), `checkpoints.json` (see Checkpoints), `snap.<pid>.index` while a snapshot runs (per repo) |
+| the repo's refs | `refs/wingman/checkpoints/<id>`, one tree per checkpoint (see Checkpoints) |
+| `~/.config/herdr-app/data/wingman/` | `events/` (from the hook, removed once read: edits, and prompts of at most 64 KB for checkpoint titles), `feedback/` (notes for Claude), `outbox/` (comments waiting for an idle agent), `spaces.json` (repos agents used, per space), `hidden.json` (repos removed by hand, per space), `workspaces/` (workspace files Wingman made), `settings.json` |
 | the space's folder | `<folder>.code-workspace`, when you add a second repo and the folder isn't inside a repo |
 | `~/.config/herdr-app/data/wingman-leader.json`, `wingman-capture.log` | which copy runs capture (see The capture controller), and its log |
 | another machine's `~/.config/herdr-app/data/wingman/` | with the Claude hook installed there: `wingman-hook.sh`, `wingman-install.json`, `events/` (removed once read), `feedback/` |
