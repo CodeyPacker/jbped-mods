@@ -1476,7 +1476,7 @@ export default class Wayfindr extends View {
     // A second Launch selects the space it made (D18), found by the Ticket's id: a title edit renames the Ticket.
     const name = launchSpaceName(tk);
     const open = spaces().find((x) => x.name?.startsWith(`${tk.id} `) || x.name === name);
-    if (open) { run("space.select", { id: open.id }); this.launch = null; return; }
+    if (open) { run("space.select", { id: open.id }); this.launch = null; this.close_(); return; }
     const repos = this.launchRepos().filter((r) => L.selected.includes(r.id));
     let argv;
     const tpl = this.launchTemplate();
@@ -1494,6 +1494,7 @@ export default class Wayfindr extends View {
         const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, argv);
         run("space.new", { name, ...target, task: launchPrompt(tk, info, tpl) });
         if (this.launch === L) this.launch = null;
+        this.close_(); // the space is what you came for
       } catch (e) {
         L.status = "error"; L.error = `Launch failed: ${e.message ?? e}`;
       }
@@ -1595,7 +1596,7 @@ export default class Wayfindr extends View {
     if (this.reviews[pr.key]?.status === "busy") return;
     const name = reviewSpaceName(pr);
     const open = spaces().find((x) => x.name === name);
-    if (open) { run("space.select", { id: open.id }); return; }
+    if (open) { run("space.select", { id: open.id }); this.close_(); return; }
     // The Profile as the Review started: a reload during an await must not mix in another's.
     const p = this.profile;
     if (!p) return;
@@ -1639,6 +1640,7 @@ export default class Wayfindr extends View {
         const made = await makeReviewWorktree(reviewFolder(pr), { ...repo, name: repoName(repo) }, info.branch, io, repo.checkout ?? "worktree", wr);
         const target = spaceTarget(runner, herdrWindow().platform, p.machine, machines().map((m) => m.name), made.path, made.space, agentArgv(tpl));
         run("space.new", { name, ...target, task: reviewPrompt(pr, info, made.path, tpl) });
+        this.close_();
         const notes = [...(st.error ? [st.error] : []), ...(made.notes?.length ? [`Note: ${made.notes.join(" ")}`] : [])];
         if (notes.length) this.reviews[pr.key] = { status: "error", error: notes.join(" ") };
         else delete this.reviews[pr.key];
