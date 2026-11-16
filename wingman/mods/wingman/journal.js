@@ -335,7 +335,7 @@ const SETTINGS = () => `${reviewDir()}/settings.json`;
 export async function loadSettings() {
   const t = await readTextFile(SETTINGS());
   // autosave: save on focus loss and file switch; autosaveDelay: also after typing stops (s, 0 = off).
-  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: DEFAULT_COMMAND, wordWrap: false, sessionLog: true, hideHerdrPanels: false, ...(t ? JSON.parse(t) : {}) };
+  return { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: DEFAULT_COMMAND, wordWrap: false, sessionLog: true, hideHerdrPanels: false, problems: true, problemsAfterTurn: false, problemsCommands: {}, ...(t ? JSON.parse(t) : {}) };
 }
 /** The user's keyboard shortcuts: { "<action>": ["key", ...] }, only the ones changed from the defaults. */
 const KEYS = () => `${reviewDir()}/keys.json`;
