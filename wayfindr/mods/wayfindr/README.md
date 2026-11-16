@@ -27,7 +27,7 @@ Every `minutes` (default 5), Wayfindr refreshes the Profile's Pull Requests and 
 
 ## Keys
 
-The keys follow CodeyPacker's mods (`run`, `jump`, `branch`) and Dockr, so they are the same letters you use there. `ctrl-shift-g` (or the palette's `Wayfindr: Toggle`) shows Wayfindr and gives it the keyboard, and pressed again while Wayfindr holds the keyboard it hides Wayfindr and gives a terminal the keyboard. While Wayfindr holds the keyboard its border is the accent color, every Pull Request row has a letter, and a legend at the bottom shows the few keys that apply now. `?` lists every key that works now. A click outside Wayfindr hands the keyboard back. In a text box letters type: `esc` leaves the box and keeps a comment draft (a title edit is cancelled), `ctrl-enter` saves it.
+The keys follow CodeyPacker's mods (`run`, `jump`, `branch`) and Dockr, so they are the same letters you use there. The letter keys are off until you tick **Vim keys** in Settings (`"vimKeys": true` at the top of `wayfindr.json`, default false). Off, only arrows, `home`/`end`, `enter`, `esc`, `shift-left`/`shift-right`, `ctrl-n`/`ctrl-p` and the overlay's `v`/`p`/`f` work, Pull Request rows have no letters, and the legend lists the arrow keys. The table below applies with it on. `ctrl-shift-g`, the accent border and the legend work either way. `ctrl-shift-g` (or the palette's `Wayfindr: Toggle`) shows Wayfindr and gives it the keyboard, and pressed again while Wayfindr holds the keyboard it hides Wayfindr and gives a terminal the keyboard. While Wayfindr holds the keyboard its border is the accent color, every Pull Request row has a letter, and a legend at the bottom shows the few keys that apply now. `?` lists every key that works now. A click outside Wayfindr hands the keyboard back. In a text box letters type: `esc` leaves the box and keeps a comment draft (a title edit is cancelled), `ctrl-enter` saves it.
 
 | Key | Action |
 |---|---|
@@ -110,6 +110,7 @@ In the detail panel, Edit beside the title changes it (Enter or Save), and the b
 
 The Settings icon (the gear) in the header edits `wayfindr.json` for you, and each change is saved at once:
 
+- Vim keys: turns on the letter keys (Keys, above), saved as `"vimKeys"` at the top of `wayfindr.json`.
 - Profiles: add, show, rename, reorder (the switcher follows this order) or remove (with a second click). The last Profile stays. A rename moves the Profile's `az` login folder and copies its cache to the new name (Herdr can't delete files, so the old cache file stays until you remove it).
 - Accounts in the shown Profile: add a GitHub user name or an Azure DevOps organization URL, or remove one (its Boards go with it). An Account that needs signing in shows the command.
 - Active Boards: the Boards Wayfindr shows. Untick one to stop following it. For an Azure Board, "Edit displayed statuses" lists its states: tick the ones to show as Columns and order them with the arrows (Tracked Statuses). None ticked means the board's own Columns.

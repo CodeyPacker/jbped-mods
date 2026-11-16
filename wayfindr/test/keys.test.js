@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { keyAction, keyHints, coreHints, HINT_KEYS, RESERVED } from "../mods/wayfindr/keys.js";
 
-const ALL_FACTS = { url: true, canLaunch: true, canReview: true, canUpdate: true, canMove: true, canComment: true, canPost: true, hasFile: true, hasRows: true, pane: false, full: false };
+const ALL_FACTS = { url: true, canLaunch: true, canReview: true, canUpdate: true, canMove: true, canComment: true, canPost: true, hasFile: true, hasRows: true, pane: false, full: false, vim: true };
+const PLAIN = { ...ALL_FACTS, vim: false };
 const NONE = {};
 const LAYERS = ["board", "ticket", "move", "launch", "prs", "pr", "review", "confirm", "help", "settings"];
 const a = (layer, k, facts = ALL_FACTS) => keyAction(layer, k, facts)?.action ?? null;
@@ -151,7 +152,7 @@ test("unknown layers do nothing", () => {
 // The Dockr invariant: the legend and the "?" list name only keys that do something now.
 for (const layer of LAYERS) {
   test(`hints in ${layer} name only keys keyAction does something with`, () => {
-    for (const facts of [ALL_FACTS, NONE, { ...ALL_FACTS, pane: true }, { hasRows: true }]) {
+    for (const facts of [ALL_FACTS, NONE, { ...ALL_FACTS, pane: true }, { hasRows: true, vim: true }, PLAIN, { ...PLAIN, pane: true }]) {
       const hints = keyHints(layer, facts), core = coreHints(layer, facts);
       for (const [label] of [...hints, ...core]) {
         assert.notEqual(keyAction(layer, HINT_KEYS[label] ?? label, facts), null, `${layer} ${label} ${JSON.stringify(facts)}`);
@@ -171,7 +172,7 @@ test("coreHints: the few per layer, then ? when it works", () => {
   assert.deepEqual(labels("confirm"), ["y", "n", "?"]);
   assert.deepEqual(labels("settings"), ["q"]);
   assert.deepEqual(labels("pr", { ...ALL_FACTS, pane: true, hasFile: false }), ["j/k", "p", "?"]);
-  assert.deepEqual(labels("board", NONE), ["q", "?"]);
+  assert.deepEqual(labels("board", { vim: true }), ["q", "?"]);
 });
 
 test("keyHints lists every key that works, and drops the rest", () => {
@@ -179,4 +180,51 @@ test("keyHints lists every key that works, and drops the rest", () => {
   assert.ok(!labels.includes("f") && !labels.includes("s") && !labels.includes("q"));
   assert.ok(labels.includes("v") && labels.includes("o") && labels.includes("?"));
   assert.deepEqual(keyHints("help", ALL_FACTS).map(([k]) => k), ["?", "q"]);
+});
+
+// D13: with vim off, only the keys Wayfindr had before, plus ctrl-n/ctrl-p.
+for (const layer of LAYERS) {
+  test(`vim off: ${layer} lists and takes no letter keys but the overlay's v/p/f`, () => {
+    for (const facts of [PLAIN, { ...PLAIN, pane: true }, NONE]) {
+      const allowed = layer === "pr" ? ["v", "p", "f"] : [];
+      for (const [label] of [...keyHints(layer, facts), ...coreHints(layer, facts)]) {
+        const k = HINT_KEYS[label] ?? label;
+        assert.ok(!/^[a-z?]$|^shift-[a-z/]$/.test(k) || allowed.includes(k), `${layer} hint ${label}`);
+      }
+      for (const c of "abcdefghijklmnopqrstuvwxyz") {
+        if (!allowed.includes(c)) assert.equal(keyAction(layer, c, facts), null, `${layer} ${c}`);
+        assert.equal(keyAction(layer, `shift-${c}`, facts), null, `${layer} shift-${c}`);
+      }
+      for (const k of ["?", "shift-/"]) assert.equal(keyAction(layer, k, facts), null, `${layer} ${k}`);
+    }
+  });
+}
+
+test("vim off: arrows, home/end, enter, esc, shift-arrows and ctrl-n/ctrl-p still work", () => {
+  assert.equal(a("board", "down", PLAIN), "next");
+  assert.equal(a("board", "ctrl-n", PLAIN), "next");
+  assert.equal(a("board", "ctrl-p", PLAIN), "prev");
+  assert.equal(a("board", "left", PLAIN), "colPrev");
+  assert.equal(a("board", "home", PLAIN), "first");
+  assert.equal(a("board", "end", PLAIN), "last");
+  assert.equal(a("board", "enter", PLAIN), "open");
+  assert.equal(a("board", "escape", PLAIN), "close");
+  assert.equal(a("board", "shift-right", PLAIN), "moveRight");
+  assert.equal(a("pr", "up", PLAIN), "prev");
+  assert.equal(a("pr", "home", PLAIN), "first");
+  for (const [k, act] of [["v", "viewed"], ["p", "post"], ["f", "full"]]) assert.equal(a("pr", k, PLAIN), act);
+  assert.equal(a("prs", "enter", PLAIN), "open");
+  assert.equal(a("move", "enter", PLAIN), "pick");
+  assert.equal(a("confirm", "escape", PLAIN), "no");
+  assert.equal(a("settings", "escape", PLAIN), "back");
+});
+
+test("vim off: the legend lists arrow keys and esc, and no ?", () => {
+  const labels = (layer, facts = PLAIN) => coreHints(layer, facts).map(([k]) => k);
+  assert.deepEqual(labels("board"), ["up/down", "left/right", "enter", "esc"]);
+  assert.deepEqual(labels("prs"), ["up/down", "enter", "esc"]);
+  assert.deepEqual(labels("pr"), ["up/down", "v", "p", "esc"]);
+  assert.deepEqual(labels("pr", { ...PLAIN, pane: true }), ["up/down", "v", "p"]);
+  // With vim on, the arrow labels give way to j/k and the rest.
+  assert.ok(!keyHints("board", ALL_FACTS).some(([k]) => k === "up/down" || k === "esc"));
 });

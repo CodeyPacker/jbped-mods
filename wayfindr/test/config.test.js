@@ -127,3 +127,18 @@ test("a Profile's machine is null when absent, a string when set, and an error o
   assert.equal(parse({ profiles: { p: { machine: "" } } }).profile.machine, "");
   assert.ok(parse({ profiles: { p: { machine: 3 } } }).errors.some((e) => /machine/.test(e)));
 });
+
+test("vimKeys: a top-level boolean, default false, anything else an error (D13)", async () => {
+  const { parseConfig } = await import("../mods/wayfindr/config.js");
+  const { setVimKeys } = await import("../mods/wayfindr/settings.js");
+  const base = { profiles: { work: { runner: "native", accounts: [], repos: [], boards: [] } } };
+  assert.equal(parseConfig(JSON.stringify(base), "windows").vimKeys, false);
+  assert.equal(parseConfig(JSON.stringify({ ...base, vimKeys: true }), "windows").vimKeys, true);
+  const bad = parseConfig(JSON.stringify({ ...base, vimKeys: "yes" }), "windows");
+  assert.ok(bad.errors.some((e) => e.startsWith("vimKeys:")));
+  const on = setVimKeys(base, true);
+  assert.equal(on.vimKeys, true);
+  assert.equal(base.vimKeys, undefined); // the original stays as read
+  assert.equal(setVimKeys(on, false).vimKeys, false);
+  assert.equal(parseConfig(JSON.stringify(on), "windows").errors.length, 0);
+});

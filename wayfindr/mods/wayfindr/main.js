@@ -1189,8 +1189,14 @@ export default class Wayfindr extends View {
     return "board";
   }
 
-  // What keyAction needs to know in `layer`.
-  keyFacts(layer) {
+  // The "vimKeys" setting (D13): off, only arrows, home, end, enter, esc, shift-arrows, ctrl-n/ctrl-p and the
+  // overlay's v/p/f work, and Pull Request rows have no letters.
+  get vim() { return this.state.status === "ok" && this.state.vimKeys === true; }
+
+  // What keyAction needs to know in `layer`, with the vim setting.
+  keyFacts(layer) { return { ...this.layerFacts(layer), vim: this.vim }; }
+
+  layerFacts(layer) {
     const p = this.profile;
     if (!p) return {};
     if (layer === "board" || layer === "ticket") {
@@ -1242,7 +1248,7 @@ export default class Wayfindr extends View {
     if (!this.handle.is_focused()) return; // a Settings box or another element has the keyboard
     const layer = this.layerNow(), m = e.modifiers ?? {};
     // A Pull Request row's letter (D7), as Dockr's panelKey: only letters no key of the list uses.
-    if (layer === "prs" && /^[a-z]$/.test(e.key) && !m.shift && !m.control && !m.alt && !m.platform && !RESERVED.includes(e.key)) {
+    if (layer === "prs" && this.vim && /^[a-z]$/.test(e.key) && !m.shift && !m.control && !m.alt && !m.platform && !RESERVED.includes(e.key)) {
       const rows = this.prListRows();
       const state = { at: Math.max(0, rows.findIndex((r) => r.pr.key === this.prCursor)), typed: this.typed };
       const nav = navigateByLetter(state, e, rows);
@@ -1558,7 +1564,7 @@ export default class Wayfindr extends View {
     // Another active Profile or runner needs a full reload. Otherwise the change applies in place.
     const reload = s.status !== "ok" || parsed.profile.name !== s.profile.name || parsed.profile.runner !== s.profile.runner;
     if (!reload && !after) {
-      this.state = { ...s, text, config: parsed.config, profile: parsed.profile, profileNames: parsed.profileNames };
+      this.state = { ...s, text, config: parsed.config, profile: parsed.profile, profileNames: parsed.profileNames, vimKeys: parsed.vimKeys };
       if (this.prs) this.prs = { ...this.prs, status: "cached" }; // followed repos may have changed: refetch on show
     }
     // The chain only orders the file writes. What follows a write runs in this call's own task, with its own cx.
@@ -1605,6 +1611,14 @@ export default class Wayfindr extends View {
     };
     const out = [];
     if (this.settingsError) out.push(note(this.settingsError, t.blocked));
+
+    // Vim keys (D13): the whole file's, above the Profiles.
+    if (s.status === "ok") {
+      out.push(card("wf-set-vim", [
+        checkRow("wf-vim", this.vim, "Vim keys", t, (cx) => this.saveConfig((raw) => edits.setVimKeys(raw, !this.vim), cx)),
+        note("j/k/h/l move, enter opens, q closes, ? lists every key, letters jump to Pull Requests"),
+      ]));
+    }
 
     // Profiles: order is the switcher's order.
     const names = s.profileNames ?? [];
@@ -2527,7 +2541,7 @@ export default class Wayfindr extends View {
     // The key cursor and letters (D6, D7): the cursor starts on the first row. No scroll handle follows it.
     const rows = this.prListRows(), hintOf = new Map(rows.map((r) => [r.pr.key, r.hint]));
     if (rows.length && !rows.some((r) => r.pr.key === this.prCursor)) this.prCursor = rows[0].pr.key;
-    const keyed = this.kb && !this.selectedPr;
+    const keyed = this.kb && !this.selectedPr, lettered = keyed && this.vim;
     const section = (title, field) => {
       const total = ok.reduce((n, l) => n + l[field].length, 0);
       const groups = ok.filter((l) => l[field].length > 0).flatMap((l) => {
@@ -2538,7 +2552,7 @@ export default class Wayfindr extends View {
             .child(div().px(12).py(6).text_size(12).font_semibold().text_color(t.foreground).child(g.repo))
             .children(g.prs.map((pr) => prRow(pr, t, this.reviewActions(l.account, pr),
               { selected: this.selectedPr?.pr.key === pr.key || (keyed && this.prCursor === pr.key), inert, onClick: (cx) => this.openPr(l.account, pr, cx) },
-              keyed && hintOf.has(pr.key) ? letterBadge(t, hintOf.get(pr.key), this.typed, this.prCursor === pr.key) : null)))),
+              lettered && hintOf.has(pr.key) ? letterBadge(t, hintOf.get(pr.key), this.typed, this.prCursor === pr.key) : null)))),
           ...(l.more?.[field] ? [note(`${l.more[field]} more not shown`)] : []),
         ];
       });

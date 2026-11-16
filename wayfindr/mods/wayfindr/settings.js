@@ -109,6 +109,13 @@ export function setNotifications(raw, profileName, { enabled, minutes } = {}) {
   });
 }
 
+// The top-level "vimKeys" switch (keys.js): written as true or false.
+export function setVimKeys(raw, on) {
+  const out = clone(raw ?? {});
+  out.vimKeys = Boolean(on);
+  return out;
+}
+
 // Repos to list for a search: ticked ones first, then up to `limit` matches.
 export function repoRows(all, ticked, query, limit = 50) {
   const q = String(query ?? "").trim().toLowerCase();

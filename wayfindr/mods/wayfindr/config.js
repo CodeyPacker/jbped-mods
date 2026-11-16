@@ -123,6 +123,7 @@ export function parseConfig(text, platform) {
   const errors = [];
   if (!isObj(raw)) return { config: null, profile: null, errors: ["The file must hold a JSON object"] };
   findSecrets(raw, "$", errors);
+  if (raw.vimKeys != null && typeof raw.vimKeys !== "boolean") errors.push("vimKeys: true or false (j/k/h/l, q, ? and letters as keys)");
   if (!isObj(raw.profiles) || Object.keys(raw.profiles).length === 0) {
     errors.push("profiles: add at least one profile");
     return { config: raw, profile: null, errors };
@@ -133,5 +134,5 @@ export function parseConfig(text, platform) {
   if (!profiles[active]) errors.push(`activeProfile: no profile "${active}"`);
   if (raw.templates != null && !isObj(raw.templates)) errors.push("templates: must be an object");
   else for (const k of ["launch", "review"]) errors.push(...templateErrors(raw.templates?.[k], `templates.${k}`));
-  return { config: raw, profile: errors.length ? null : profiles[active], profileNames: Object.keys(profiles), templates: isObj(raw.templates) ? raw.templates : {}, errors };
+  return { config: raw, profile: errors.length ? null : profiles[active], profileNames: Object.keys(profiles), templates: isObj(raw.templates) ? raw.templates : {}, vimKeys: raw.vimKeys === true, errors };
 }
