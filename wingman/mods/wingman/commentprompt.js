@@ -92,6 +92,16 @@ export function chooseTarget(comments, agents, live) {
   return { error: "No agent in this space to send to" };
 }
 
+/**
+ * Types `prompt` into the agent's terminal as the user's message: `hc send` with the prompt as one
+ * argument, no shell (hc pastes it and presses Enter). `hcFn` is Herdr's hc(). Rejects with hc's
+ * own message when it fails. Review comments and Problems both send through this.
+ */
+export async function sendToAgent(hcFn, address, prompt) {
+  const r = await hcFn(["send", address, prompt]);
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send exited with ${r.code}`).trim().slice(0, 300));
+}
+
 /** Why the prompt can't be sent as it is, or null. */
 export function promptProblem(prompt) {
   return prompt.length > MAX_PROMPT ? `The prompt is ${prompt.length} characters; at most ${MAX_PROMPT} can be sent at once. Delete some comments or shorten them.` : null;

@@ -12,7 +12,7 @@ import { v_flex, h_flex, Scrollbar, v_virtual_list, VirtualListScrollHandle, Scr
 import { theme, settings, props, readTextFile, writeTextFile, panes, spaces, machines, agents, terminals, appHome, exec, pickFolder, openOverlay, closeOverlay, nextCommand, run, layout, shared, setShared, hc } from "herdr";
 import * as fs from "fs/promises";
 import { MAX_BATCH, MAX_TEXT as MAX_COMMENT, makeComment, checkText, addComment, editComment, deleteComment, clearComments, undoClear, relocateFile, spansOn, snippetOf, loadComments, updateComments } from "./comments.js";
-import { buildPrompt, chooseTarget, isWslArgv, promptProblem } from "./commentprompt.js";
+import { buildPrompt, chooseTarget, isWslArgv, promptProblem, sendToAgent } from "./commentprompt.js";
 import { rows as buildRows, acceptAt, rejectAt, acceptAll, rejectAll, partialAt } from "./model.js";
 import { Store, PlainRoot, norm, shows, swap, MAX_TEXT } from "./store.js";
 import { highlight, highlightLines, languageOf, color } from "./highlight.js";
@@ -57,6 +57,7 @@ import { crumb, openCrumbs, ALIVE_MS } from "./crumbs.js";
 import { stateFor, failIn, loadFailed, loadOk } from "./spacestate.js";
 import { fitBar, hunkButtons, withKey } from "./barfit.js";
 import { AgentFiles } from "./agentview.js"; // session log source: Agent files list, Review backfill note
+import { Problems, PROBLEMS_REQ } from "./problemsview.js"; // the Problems tab, gutter marks and checker runs
 import { parse as parseCheckpoints, turnRows, agentsSince, timeLabel, confirmText, restoreNote, planSig, planRestore, applyRestore } from "./checkpoints.js";
 import { isClaude } from "./sessionlog.js";
 
@@ -212,7 +213,7 @@ export default class Review extends View {
     if (props()?.role === CONTROLLER) return this.initController(cx);
     this.id = Math.random().toString(36).slice(2);
     this.dropSleeper = addSleeper((ms) => cx.sleep(ms)); // time limits on calls to other machines (remote.withTimeout)
-    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: INLINE_COMMAND, wordWrap: false, hideHerdrPanels: false, formatOnSave: false };
+    this.settings = { autoNote: true, editNote: true, autosave: true, autosaveDelay: 0, editor: "wingman", autoPairs: true, autoTags: true, externalEditor: "code", externalCommand: "", inlineCommand: INLINE_COMMAND, wordWrap: false, hideHerdrPanels: false, formatOnSave: false, problems: true, problemsAfterTurn: false, problemsCommands: {} };
     this.formatting = new Set(); // "<space>|<file key>" of the formats running
     this.fmtCaches = new Map(); // space -> what formatrun.js found for it (the formatter per folder), cleared with the space
     this.editNotes = new Map(); // file key -> the edit note last queued for it
@@ -234,6 +235,10 @@ export default class Review extends View {
         const c = String(await nextCommand()).replace(/^wingman\./, "");
         if (c === "focus") { if (this.treeEdit && !this.treeEdit.busy) this.focusTreeInput(true); else this.handle.focus(); }
         else if (/^tree[A-Z]/.test(c)) this.treeMenuCmd(c, cx);
+        // Problems' commands act in one copy: the Edit panel's, else a pane copy with no Edit panel (as inlineEdit).
+        else if (c === "checkProblems") { if (this.problems.owner()) this.problems.checkNow(cx); }
+        else if (/^problems[A-Z]/.test(c)) this.problems.command(c, cx);
+        else if (c === "openSettings") { if (this.problems.owner()) this.openSettings(); }
         else if (c === "inlineEdit" || c.startsWith("inlineEdit:")) {
           // Inline edit as a command (the right-click menu, keys.json, `herdr-app do
           // "wingman.inlineEdit:<instruction>"`, which also runs it): every copy gets it, so the Edit
@@ -306,6 +311,8 @@ export default class Review extends View {
     cx.timer.every(5000, (cx) => this.mode === "edit" && (this.treeOn || this.nvim()) && this.refreshTrees(cx));
     // Session log source (agentview.js): reads only while this copy shows Agent files or Review.
     this.agentFiles = new AgentFiles(this); cx.timer.every(5000, (cx) => this.agentFiles.tick(cx));
+    // Problems (problemsview.js): runs and shows in the owner copy only; its tick watches agents' turns.
+    this.problems = new Problems(this, { log, agentLabel, hasView }); cx.timer.every(1000, (cx) => this.problems.tick(cx));
     // Watch events would be the fast path, but they did not fire on Windows in testing,
     // so a 2 s content check is what catches outside edits. "#index" keeps the index
     // checked even when no files are listed (e.g. right after a reset).
@@ -326,7 +333,7 @@ export default class Review extends View {
     this.stores = stores; this.files = []; this.sel = null; this.current = 0; this.history = [];
     this.deferred = new Set(); this.indexTexts = {}; this.error = null; this.loadError = null;
     this.cur = null; this.anchor = null; this.redo = []; this.hx = 0; this.opened = [];
-    this.search = newSearch(); this.searchFocus = false;
+    this.search = newSearch(); this.searchFocus = false; this.problemsFocus = false;
     this.treeCur = this.treeEdit = this.treeDel = null; this.treeFocus = false;
     // Changes (P5) and the workspace panel: the commit box's text is restored from commitMsg on a switch.
     this.committed = []; this.changeSig = null; this.unchecked = new Set(); this.commitRoot = this.commitNote = this.discardKey = null; this.commitMsg = "";
@@ -460,7 +467,7 @@ export default class Review extends View {
   snapshotView() {
     const { stores, files, sel, current, history, indexTexts, error, loadError, status, redo, opened, search, changeSig, unchecked, commitRoot, commitNote } = this;
     for (const f of this.committed ?? []) this.unloadRow(f);
-    const v = { stores, files, sel, current, history, indexTexts, error, loadError, status, redo, opened, search, searchFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
+    const v = { stores, files, sel, current, history, indexTexts, error, loadError, status, redo, opened, search, searchFocus: false, problemsFocus: false, cur: null, anchor: null, hx: 0, deferred: new Set(),
       treeCur: null, treeEdit: null, treeDel: null, treeFocus: false,
       committed: this.committed ?? [], changeSig, unchecked: unchecked ?? new Set(), committedOpen: this.committedOpen ?? new Set(), commitRoot, commitNote, commitMsg: this.commitInput?.value() ?? this.commitMsg ?? "", discardKey: null,
       ws: this.ws?.kind === "path" ? null : this.ws ?? null };
@@ -892,7 +899,7 @@ export default class Review extends View {
       .child(h_flex().w_full().h(26).px(10).gap(6).items_center().rounded(6).overflow_hidden().cursor_pointer()
         .when(x.key === this.sel, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
         .when(this.stores.length > 1, (e) => e.child(div().text_size(10).text_color(t.dim).whitespace_nowrap().child(base(x.store.root))))
-        .child(div().text_size(12).whitespace_nowrap().child(base(x.rel)))
+        .child(div().text_size(12).whitespace_nowrap().when(!!this.problems.mark(x.store, x.rel), (e) => e.text_color(this.problems.mark(x.store, x.rel) === "error" ? t.ansi1 : t.ansi3)).child(base(x.rel)))
         .when(this.dirty(x), (e) => e.child(div().text_size(10).text_color(t.accent).child("●")))
         .child(div().text_size(10).whitespace_nowrap().text_color(x.error ? t.ansi1 : t.muted).child(this.tabTag(x)))
         .when(this.closable(x), (e) => e.child(div().id(`close-${x.key}`).px(3).rounded(3).text_size(11).text_color(t.dim)
@@ -934,9 +941,11 @@ export default class Review extends View {
       if (this.spaceId !== space || this.files.some((x) => x.key === key)) return;
       this.files.push(f);
     }
-    if (!this.opened.includes(key)) this.opened.push(key);
+    const fresh = !this.opened.includes(key); // a tab opened now (not one shown again): its file-scope checkers run
+    if (fresh) this.opened.push(key);
     this.pick(key, cx);
     const f = this.file();
+    if (fresh && f?.key === key) this.problems.opened(f.store, f.rel, cx);
     if (f && at && f.key === key) { this.cur = this.clampPos(f, at); this.anchor = null; this.showCursor(); this.paint(cx); }
     if (f && this.nvim()) this.toNvim(f, at?.line ?? f.hunks[0]?.n ?? 0, cx);
   }
@@ -2150,7 +2159,7 @@ export default class Review extends View {
   /** P1: a link row's click, or Enter or Right on it: its root's header, opened, selected and in view. */
   gotoRoot(target, cx) {
     if (this.rootShut(target)) this.toggleRepo(target, cx);
-    this.treeCur = this.treeItem(target, "", true); this.treeFocus = true; this.searchFocus = false; this.treeDel = null;
+    this.treeCur = this.treeItem(target, "", true); this.treeFocus = true; this.searchFocus = false; this.problemsFocus = false; this.treeDel = null;
     this.treeScrollTo = `${target.root}|`; this.handle.focus(); this.paint(cx);
   }
 
@@ -2221,7 +2230,7 @@ export default class Review extends View {
           .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openTreeMenu(st, row.rel, row.dir, cx); })
           .child(div().w(10).flex_none().text_size(10).text_color(t.dim).child(row.dir ? (row.open ? "▾" : "▸") : ""))
           .child(div().flex_1().min_w(0).truncate().text_size(12)
-            .text_color(row.ignored || gone ? t.dim : row.dir ? t.muted : t.foreground)
+            .text_color(row.ignored || gone ? t.dim : row.dir ? t.muted : { error: t.ansi1, warning: t.ansi3 }[this.problems.mark(st, row.rel)] ?? t.foreground)
             .when(row.ignored, (e) => e.opacity(0.7)).when(gone, (e) => e.line_through()).child(row.name))
           .when(!!row.dirty, (e) => e.child(div().flex_none().text_size(10).text_color(t.accent).child("●")))
           .when(!!row.n, (e) => e.child(div().flex_none().text_size(10).text_color(t.ansi3).child(String(row.n))))
@@ -2261,7 +2270,7 @@ export default class Review extends View {
 
   /** A left click on a row: it's selected, and the tree has the keyboard. Open name boxes and confirms close. */
   selectTreeRow(st, row, cx) {
-    this.treeCur = this.treeItem(st, row.rel, row.dir); this.treeFocus = true; this.searchFocus = false;
+    this.treeCur = this.treeItem(st, row.rel, row.dir); this.treeFocus = true; this.searchFocus = false; this.problemsFocus = false;
     this.treeDel = null;
     if (this.treeEdit && !this.treeEdit.busy) this.endTreeEdit(cx, false);
     this.handle.focus(); this.paint(cx);
@@ -2272,7 +2281,7 @@ export default class Review extends View {
     if (this.treeEdit?.busy) return;
     const it = this.treeItem(st, rel, dir), local = !st.on;
     if (!it.root) this.treeCur = it;
-    this.treeFocus = true; this.searchFocus = false; this.treeDel = null; this.menuItem = it;
+    this.treeFocus = true; this.searchFocus = false; this.problemsFocus = false; this.treeDel = null; this.menuItem = it;
     if (this.treeEdit) this.endTreeEdit(cx, false);
     this.handle.focus();
     setShared(TREE_MENU, { copy: this.id, stamp: Date.now() });
@@ -2717,7 +2726,7 @@ export default class Review extends View {
   // ---- pointer: click, Shift+click, drag, right-click ------------------------
 
   pointerDown(ev, cx) {
-    this.handle.focus(); this.searchFocus = false; this.treeFocus = false;
+    this.handle.focus(); this.searchFocus = false; this.problemsFocus = false; this.treeFocus = false;
     // A click in the editor closes the tree's name box or delete confirm (nothing is done).
     if (this.treeEdit && !this.treeEdit.busy) this.treeEdit = null;
     if (this.treeDel && !this.treeDel.busy) this.treeDel = null;
@@ -2807,7 +2816,7 @@ export default class Review extends View {
       if (old && this.settings.autosave && this.dirty(old) && !old.conflict) this.save(cx, old);
       this.cur = this.anchor = null; this.hx = 0;
     }
-    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.reveal(); this.paint(cx);
+    this.sel = key; this.current = 0; this.top = 0; this.showTab(key); this.handle.focus(); this.searchFocus = false; this.problemsFocus = false; this.reveal(); this.paint(cx);
     if (this.mode === "changes") { const f = this.file(); if (f) f.usedAt = Date.now(); this.loadRow(f, cx); } // a row's texts load when it's picked
   }
 
@@ -3467,7 +3476,9 @@ export default class Review extends View {
   openSettings() {
     // A space on another machine adds the "Claude hook on <machine>" section.
     const machine = this.machine();
-    openOverlay({ mod: "wingman", props: { form: "settings", ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 1060 + (machine ? 150 : 0) });
+    // The space's repos, for the Problems command (kept per repo).
+    const repos = this.repos().map((st) => ({ id: idOf(st), name: this.repoName(st) }));
+    openOverlay({ mod: "wingman", props: { form: "settings", repos, ...(machine ? { machine } : {}) }, kind: "dialog", width: 460, height: 990 + (machine ? 150 : 0) });
   }
 
   /** Every 250 ms (Q46). Herdr has no blur event, so focus is polled: the pane losing the
@@ -3838,14 +3849,14 @@ export default class Review extends View {
     this.quickInput.on("change", (_e, cx) => { this.rankQuick(); this.paint(cx); });
     this.quickInput.on("submit", (_e, cx) => this.chooseQuick(this.qo?.sel ?? 0, cx));
     for (const i of [this.findInput, this.replaceInput, this.lineInput, this.quickInput, this.pathInput, this.inlineInput]) {
-      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.problemsFocus = false; this.treeFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
     }
     // The tree's name box for New File…, New Folder… and Rename…: Enter does it, Esc cancels.
     this.treeInput = InputState.new({ placeholder: "" });
     this.treeInput.on("submit", (_e, cx) => this.commitTreeEdit(cx));
     this.treeInput.on("change", (_e, cx) => { if (this.treeEdit?.error) { this.treeEdit.error = null; this.paint(cx); } });
-    this.treeInput.on("focus", () => { this.inBar = this.treeInput; this.searchFocus = false; });
+    this.treeInput.on("focus", () => { this.inBar = this.treeInput; this.searchFocus = false; this.problemsFocus = false; });
     this.treeInput.on("blur", () => { if (this.inBar === this.treeInput) this.inBar = null; });
     // Typing a query jumps to the first match from where the search started (VS Code's incremental find).
     this.findInput.on("change", (_e, cx) => { this.findFrom ??= this.cur; this.findStep(0, cx); });
@@ -3980,7 +3991,7 @@ export default class Review extends View {
     this.searchInputs = [this.searchInput, this.sReplaceInput, this.includeInput, this.excludeInput];
     const fields = [["query", this.searchInput], ["replace", this.sReplaceInput], ["include", this.includeInput], ["exclude", this.excludeInput]];
     for (const [k, i] of fields) {
-      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.treeFocus = false; });
+      i.on("focus", () => { this.inBar = i; this.searchFocus = false; this.problemsFocus = false; this.treeFocus = false; });
       i.on("blur", () => { if (this.inBar === i) this.inBar = null; });
       i.on("change", (_e, cx) => {
         const s = this.search, v = i.value();
@@ -4003,6 +4014,7 @@ export default class Review extends View {
 
   /** Whether the Search column is on screen. */
   searchShown() { return this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search?.left === "search"; }
+  problemsShown() { return this.mode === "edit" && (this.treeOn || this.treeOnly()) && this.search?.left === "problems"; }
 
   /** ctrl-shift-f: the Edit tab's Search, its box taking a one-line selection as the query. Other panel copies hand off. */
   openSearch(cx) {
@@ -4019,7 +4031,7 @@ export default class Review extends View {
 
   showSearch(q, cx) {
     const s = this.search;
-    s.left = "search"; this.treeOn = true; this.searchFocus = false;
+    s.left = "search"; this.treeOn = true; this.searchFocus = false; this.problemsFocus = false;
     if (q) { s.query = q; s.note = null; this.searchInput.set_value(q); }
     this.searchInput.focus();
     if (q || (s.query && !s.results && !s.running)) this.runSearch(cx);
@@ -4028,10 +4040,11 @@ export default class Review extends View {
 
   /** The left column's switch: "explorer" or "search". */
   setLeft(which, cx) {
-    this.search.left = which; this.searchFocus = false;
+    this.search.left = which; this.searchFocus = false; this.problemsFocus = false;
     if (which === "search") this.searchInput.focus();
     else { this.handle.focus(); this.refreshTrees(cx); }
     if (which === "agent") this.agentFiles.show(cx);
+    if (which === "problems") this.handle.focus();
     this.paint(cx);
   }
 
@@ -4270,6 +4283,7 @@ export default class Review extends View {
       { id: "explorer", labels: ["Explorer"], drop: Infinity, size: 11.5, pad: 16 },
       { id: "search", labels: [withKey("Search", this.kl("searchFiles")), "Search"], drop: Infinity, size: 11.5, pad: 16 },
       { id: "agent", labels: ["Agent files", "Agent files", "Agent"], drop: Infinity, size: 11.5, pad: 16 }, // keeps its full label while only the Search key goes
+      { id: "problems", labels: [`Problems ${this.problems.count()}`], drop: Infinity, size: 11.5, pad: 16 },
     ];
     const fit = fitBar(width, items, 12, 2);
     return items.filter((it) => fit.has(it.id)).map((it) => [it.id, fit.get(it.id)]);
@@ -4277,15 +4291,16 @@ export default class Review extends View {
 
   /** The Edit tab's left column: the Explorer / Search / Agent files switch over the tree, the Search view or the agent's files. */
   renderLeft(t, full = false) {
-    const on = this.search.left === "search";
+    const on = this.search.left === "search" || this.search.left === "problems"; // the wider column
+    this.leftW = full ? this.px(this.paneW) : on ? 300 : 260; // problemsview fits its buttons to it
     const tab = (id, label, here) => div().id(`left-${id}`).h(22).px(8).flex().items_center().rounded(4).text_size(11.5).cursor_pointer()
       .text_color(here ? t.foreground : t.muted).when(here, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover))
       .on_click((_e, cx) => this.setLeft(id, cx)).child(label);
     return v_flex().id("left-column").h_full().min_h(0)
-      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(on ? 300 : 240).flex_none().border_r(1).border_color(t.border))
+      .when(full, (e) => e.flex_1().min_w(0)).when(!full, (e) => e.w(this.leftW).flex_none().border_r(1).border_color(t.border))
       .child(h_flex().h(30).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
-        .children(this.leftTabs(full ? this.px(this.paneW) : on ? 300 : 240).map(([id, label]) => tab(id, label, this.search.left === id))))
-      .child(on ? this.renderSearch(t) : this.search.left === "agent" ? this.agentFiles.render(t) : this.renderTree(t, full));
+        .children(this.leftTabs(this.leftW).map(([id, label]) => tab(id, label, this.search.left === id))))
+      .child(this.search.left === "search" ? this.renderSearch(t) : this.search.left === "problems" ? this.problems.render(t) : this.search.left === "agent" ? this.agentFiles.render(t) : this.renderTree(t, full));
   }
 
   renderSearch(t) {
@@ -4385,7 +4400,7 @@ export default class Review extends View {
   // ---- format on save ----------------------------------------------------------
 
   /** ctrl-s and the Save button: formats first when Settings has Format on save on. Autosave never does (save). */
-  saveKey(cx) { if (this.settings.formatOnSave) this.formatThenSave(cx, false); else this.save(cx); }
+  saveKey(cx) { if (this.settings.formatOnSave) this.formatThenSave(cx, false); else this.save(cx, this.file(), true); }
 
   /** The format command (alt-shift-f): format and save, whatever Format on save says. */
   formatNow(cx) { this.formatThenSave(cx, true); }
@@ -4402,7 +4417,7 @@ export default class Review extends View {
     const canEdit = this.editable(f) && this.view !== "review" && this.mode !== "changes" && !this.nvim() && !!f.store;
     if (!canEdit || f.conflict) {
       if (explicit && !f.conflict) { this.error = "Format works on a file open in the Edit view"; this.paint(cx); return; }
-      return this.save(cx);
+      return this.save(cx, f, true);
     }
     const space = this.spaceId, key = f.key, text = f.Ctext, mark = `${space}|${key}`;
     if (this.formatting.has(mark)) return;
@@ -4419,7 +4434,7 @@ export default class Review extends View {
       catch (e) { // the buffer still holds the user's text: save it as it is
         failIn(this, space, `Not formatted (${String(e?.message ?? e).slice(0, 120)}). Saved as is`);
         const g = space === this.spaceId ? this.files.find((x) => x.key === key) : null;
-        if (g) this.save(cx, g);
+        if (g) this.save(cx, g, true);
         this.paint(cx);
       }
     });
@@ -4451,16 +4466,16 @@ export default class Review extends View {
         this.settle(); if (shown) this.showCursor(); this.retokenize(cx);
       }
     }
-    this.save(cx, this.files.find((x) => x.key === key));
+    this.save(cx, this.files.find((x) => x.key === key), true);
     if (msg) { failIn(this, space, msg); this.fmtNote = msg; }
     this.paint(cx);
   }
 
-  save(cx, f = this.file()) {
+  save(cx, f = this.file(), explicit = false) {
     if (!f) return;
     if (f.conflict) { this.error = "The file changed on disk while you were editing: pick Keep mine or Take agent's first"; this.paint(cx); return; }
     const writes = this.saveWrites(f);
-    if (!writes.length) return;
+    if (!writes.length) { if (explicit) this.problems.saved(f, this.queue, cx); return; } // Ctrl+S on a saved file checks it again
     const notes = writes.map((w) => this.editNote(f, w)).filter(Boolean);
     this.replace(f, { ...f, diskC: f.Ctext, diskB: f.Btext });
     this.paint(cx);
@@ -4476,6 +4491,7 @@ export default class Review extends View {
         throw e;
       }
     }, cx);
+    if (explicit) this.problems.saved(f, this.queue, cx); // its checkers run once this write is done
   }
 
   /** Q45: a passive note to the agent that changed a file, naming the lines a save changed. */
@@ -4527,7 +4543,7 @@ export default class Review extends View {
     const b = this.inBar;
     if (b) return b === this.quickInput ? "quick" : b === this.commitInput ? "commit" : b === this.pathInput ? "path" : b === this.inlineInput ? "inline"
       : b === this.treeInput ? "treeName" : this.searchInputs?.includes(b) ? "search" : "find";
-    return this.searchFocus ? "results" : this.treeFocus ? "tree" : "editor";
+    return this.searchFocus || this.problemsFocus ? "results" : this.treeFocus ? "tree" : "editor";
   }
 
   /**
@@ -4544,7 +4560,7 @@ export default class Review extends View {
       return true;
     }
     if (focus === "quick") { this.moveQuick(1, cx); return true; }
-    if (focus === "results") this.searchFocus = false; // the action has the keyboard back in the editor
+    if (focus === "results") { this.searchFocus = false; this.problemsFocus = false; } // the action has the keyboard back in the editor
     this.runAction(id, cx);
     return true;
   }
@@ -4571,6 +4587,9 @@ export default class Review extends View {
       findNext: () => this.findStep(1, cx), findPrev: () => this.findStep(-1, cx),
       findCase: () => this.findFlag("cased", cx), findWord: () => this.findFlag("word", cx), findRegex: () => this.findFlag("regex", cx),
       replaceAll: () => this.replaceAll(cx), searchFiles: () => this.openSearch(cx),
+      // Problems: Check runs in the owner copy (another copy's key asks it through PROBLEMS_REQ).
+      checkProblems: () => (this.problems.owner() ? this.problems.checkNow(cx) : setShared(PROBLEMS_REQ, { space: this.spaceId, stamp: Date.now() })),
+      nextProblem: () => this.problems.owner() && this.problems.step(1, cx), prevProblem: () => this.problems.owner() && this.problems.step(-1, cx),
       // Only while the tree has the keyboard (Delete in the editor deletes text), and never while a
       // name box is open: F2 there would start the rename again and drop what was typed.
       renameItem: () => { if (this.treeFocus && this.treeCur && !this.treeEdit && !this.inBar) this.startTreeEdit("rename", this.treeCur, cx); },
@@ -4619,6 +4638,7 @@ export default class Review extends View {
       return;
     }
     if (this.searchFocus && this.resultsKey(k, cx)) return done();
+    if (this.problemsFocus && this.problems.key(k, cx)) return done();
     if (this.treeFocus && this.treeKey(e, cx)) return done();
     if (this.cur && this.editable(f)) {
       const id = this.kIdx.edit.get(k);
@@ -4664,7 +4684,14 @@ export default class Review extends View {
         const v = this.ieInput.value(); this.ieTyped = v;
         cx.timer.after(500, (cx) => { if (this.ieTyped === v && v !== (this.st?.inlineCommand ?? "")) this.setSetting({ inlineCommand: v }, cx); });
       });
-      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.ieInput.set_value?.(this.st.inlineCommand ?? INLINE_COMMAND); this.paint(cx); });
+      // The Problems command of the picked repo, saved the same way.
+      this.pcRepo = this.form.repos?.[0]?.id ?? null;
+      this.pcInput = InputState.new({ placeholder: "e.g. npx vue-tsc --noEmit, or ruff check --output-format concise {file}" });
+      this.pcInput.on("change", (_e, cx) => {
+        const v = this.pcInput.value(), repo = this.pcRepo; this.pcTyped = v;
+        cx.timer.after(500, (cx) => { if (this.pcTyped === v && repo === this.pcRepo && v !== (this.st?.problemsCommands?.[repo]?.command ?? "")) this.setProblemsCommand(repo, { command: v }, cx); });
+      });
+      cx.spawn(async (cx) => { this.st = await loadSettings(); this.extInput.set_value?.(this.st.externalCommand ?? ""); this.ieInput.set_value?.(this.st.inlineCommand ?? INLINE_COMMAND); this.pcInput.set_value?.(this.st.problemsCommands?.[this.pcRepo]?.command ?? ""); this.paint(cx); });
       if (this.form.machine) this.hookAction(null, cx);
       return;
     }
@@ -4898,9 +4925,7 @@ export default class Review extends View {
     cx.spawn(async (cx) => {
       let sent = false;
       try {
-        // One argument, no shell: hc pastes the text into the agent's terminal and presses Enter.
-        const r = await hc(["send", address, prompt]);
-        if (r.code !== 0) throw new Error((r.stderr || r.stdout || `hc send exited with ${r.code}`).trim().slice(0, 300));
+        await sendToAgent(hc, address, prompt);
         sent = true;
         this.cs = await changeComments(space, (s) => clearComments(s, "sent", Date.now(), ids));
         this.cSeen = shared(COMMENTS)?.[space] ?? 0;
@@ -5203,7 +5228,7 @@ export default class Review extends View {
   openMenu(ev, cx) {
     const f = this.file(), i = this.rowAt(ev.local_position?.y ?? -1);
     if (!f || i < 0) return;
-    this.handle.focus(); this.treeFocus = false; this.searchFocus = false; // a right-click in the file gives it the keyboard
+    this.handle.focus(); this.treeFocus = false; this.searchFocus = false; this.problemsFocus = false; // a right-click in the file gives it the keyboard
     const r = this.rowsOf(f)[i], inHunk = r.hunk != null, sel = this.selection(f), hasSel = !!sel;
     if (inHunk) this.current = r.hunk;
     // With changed lines selected, Accept/Reject act on those lines only; otherwise on the hunk.
@@ -5230,6 +5255,14 @@ export default class Review extends View {
   // ---- settings popup (Q47) ---------------------------------------------------
 
   /** Saves one setting; the pane copy rereads them through wingman.settings. */
+  /** Settings: a repo's Problems command ({ command, parser }); an empty command removes it. */
+  setProblemsCommand(repo, patch, cx) {
+    if (!repo) return;
+    const all = { ...(this.st?.problemsCommands ?? {}) }, next = { parser: "generic", ...(all[repo] ?? {}), ...patch };
+    if (String(next.command ?? "").trim()) all[repo] = next; else delete all[repo];
+    this.setSetting({ problemsCommands: all }, cx);
+  }
+
   setSetting(patch, cx) {
     this.st = { ...this.st, ...patch };
     const next = this.st;
@@ -5345,7 +5378,7 @@ export default class Review extends View {
       .child(v_flex().flex_1().min_w(0).child(div().text_size(13).child(label)).child(div().text_size(11).text_color(t.dim).child(hint))); // the hint wraps instead of running past the dialog
     return v_flex().id("wingman-settings").track_focus(this.formHandle)
       .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(overlay); cx.stop_propagation(); } })
-      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground)
+      .size_full().p(18).gap(10).bg(t.popover).text_color(t.foreground).overflow_y_scrollbar() // Problems rows make it taller than most windows
       .child(h_flex().items_center().gap(8).child(div().flex_1().text_size(15).font_semibold().child("Settings"))
         .child(this.button("open-keys", "Keyboard shortcuts…", t.raised, () => { closeOverlay(overlay); openOverlay({ mod: "wingman", props: { form: "keys" }, kind: "dialog", width: 700, height: 620 }); }))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
@@ -5386,7 +5419,27 @@ export default class Review extends View {
             .when((st.inlineCommand ?? INLINE_COMMAND) !== INLINE_COMMAND, (e) => e.child(this.button("ie-default", "Default", t.raised, (cx) => { this.ieInput.set_value?.(INLINE_COMMAND); this.setSetting({ inlineCommand: INLINE_COMMAND }, cx); }).flex_none())))
           .child(Input.new(this.ieInput))
           .child(div().text_size(11).text_color(t.dim).child('Runs once per edit, where the repo\'s git runs (WSL for a WSL repo). {prompt} is the whole prompt as one argument, {promptFile} a temp file holding it; neither: the prompt goes last. "quotes" keep spaces. No shell reads it.')))
+        .child(this.problemsSettings(t, toggle))
         .when(!!this.form.machine, (e) => e.child(this.hookSection(t))));
+  }
+
+  /** Settings: Problems on or off, Check after each agent turn, and the shown space's repos' Problems command. */
+  problemsSettings(t, toggle) {
+    const st = this.st, repos = this.form.repos ?? [], cur = st.problemsCommands?.[this.pcRepo] ?? null, parser = cur?.parser ?? "generic";
+    const chip = (id, label, on, fn) => div().id(id).h(24).px(10).flex().items_center().rounded(5).text_size(12).cursor_pointer()
+      .bg(on ? t.accent + "77" : t.raised).hover((s) => s.opacity(0.85)).on_click((_e, cx) => fn(cx)).child(label);
+    return v_flex().gap(4).pt(4)
+      .child(toggle("set-problems", "Problems", "Run the project's own checkers and mark what they report: eslint on a file when it's opened or saved; tsc and dotnet build with Check (ctrl-shift-m). Nothing runs where none is found.", st.problems ?? true, (cx) => this.setSetting({ problems: !(st.problems ?? true) }, cx)))
+      .child(toggle("set-problems-turn", "Check after each agent turn", "Check (tsc, dotnet build, the Problems command) when an agent in the space finishes a turn. A build can be slow.", st.problemsAfterTurn ?? false, (cx) => this.setSetting({ problemsAfterTurn: !(st.problemsAfterTurn ?? false) }, cx)))
+      .child(v_flex().gap(6).pt(4).when(!(st.problems ?? true), (e) => e.opacity(0.4))
+        .child(div().text_size(12).text_color(t.muted).child(repos.length ? `Problems command${repos.length === 1 ? ` for ${repos[0].name}` : ""}` : "Problems command (open a space with a git repo to set one)"))
+        .when(repos.length > 1, (e) => e.child(h_flex().gap(4).flex_wrap().children(repos.map((r, i) => chip(`pc-repo-${i}`, r.name, r.id === this.pcRepo, (cx) => {
+          this.pcRepo = r.id; this.pcInput.set_value?.(this.st?.problemsCommands?.[r.id]?.command ?? ""); this.paint(cx); })))))
+        .when(repos.length > 0, (e) => e.child(Input.new(this.pcInput))
+          .child(h_flex().gap(4).items_center().child(div().text_size(11).text_color(t.dim).pr(4).child("Output"))
+            .children([["tsc", "tsc-style"], ["eslint-json", "eslint JSON"], ["generic", "path:line:col: message"]].map(([v, label]) =>
+              chip(`pc-parser-${v}`, label, parser === v, (cx) => this.setProblemsCommand(this.pcRepo, { parser: v, command: this.pcInput.value() }, cx)))))
+          .child(div().text_size(11).text_color(t.dim).child('Runs in the repo\'s top folder, where its git runs, as an argument list: no shell reads it. "quotes" keep spaces. With {file} (the file\'s path in the repo) it runs per file on open and save, else with Check.'))));
   }
 
   /** Settings: the Claude hook on the space's machine, with Install and Remove. */
@@ -5500,6 +5553,10 @@ export default class Review extends View {
     }
     // A line with a review comment on it: its number on a tinted background (paler when the comment's code moved or changed).
     const cm = r.side === "new" && !r.cont ? (this.cmtSpans ?? []).find((s) => r.line >= s.a && r.line <= s.b) : null;
+    // Problems on this line (problemsview.forFile): a bar on the line number in the error or warning
+    // colour, and each range underlined; dimmed while the line was edited since the check (stale).
+    const pd = r.side === "new" ? this.pb?.lines.get(r.line) ?? null : null;
+    const pc = pd ? (pd.some((d) => d.severity === "error" && !d.stale) ? t.ansi1 : pd.some((d) => !d.stale) ? t.ansi3 : t.dim) : null;
     const spans = expandTabs(spansOf((r.side === "old" ? f.oldTok : f.newTok)?.[r.line]));
     const text = r.side === "new" ? body(linesOf(f)[r.line]) : r.seg ? body(f.B[r.line]) : "";
     // E5: a wrapped segment shows its own columns, after the wrapping indent.
@@ -5526,13 +5583,21 @@ export default class Review extends View {
     return h_flex().w_full().h(ROW).flex_none().whitespace_nowrap()
       .when(r.kind === "+", (e) => e.bg(t.ansi2 + "22")).when(r.kind === "-", (e) => e.bg(t.ansi1 + "22"))
       .when(selected, (e) => e.bg(t.selection).border_l(2).border_color(t.accent))
-      .child(div().w(44).flex_none().pr(8).text_right().text_color(onLine || cm ? t.foreground : t.dim).when(!!cm, (e) => e.bg(t.ansi5 + (cm.stale ? "26" : "55"))).child(r.cont ? "" : String(r.num)))
+      .child(div().w(44).flex_none().pr(8).text_right().text_color(onLine || cm ? t.foreground : t.dim).when(!!cm, (e) => e.bg(t.ansi5 + (cm.stale ? "26" : "55")))
+        .when(!!pc && !r.cont, (e) => e.border_l(3).border_color(pc)).child(r.cont ? "" : String(r.num)))
       .child(div().w(14).flex_none().text_color(r.kind === "+" ? t.ansi2 : r.kind === "-" ? t.ansi1 : t.dim).child(r.kind === " " || r.cont ? "" : r.kind))
       .child(div().flex_1().h_full().relative().overflow_hidden()
         .children(hits.map((k) => { const [a, b] = clip(found.ms[k].from, found.ms[k].to); return div().absolute().top(1).h(ROW - 2).rounded(2).left(x(a)).w(Math.max(2, x(b) - x(a)))
           .bg(k === onHit ? t.ansi3 + "88" : t.ansi3 + "38"); }))
         .children(bm.map(([a, b]) => div().absolute().top(1).h(ROW - 2).left(x(a)).w(Math.max(2, x(b) - x(a))).rounded(2).border_1().border_color(t.dim).bg(t.raised)))
         .when(!!mark, (e) => e.child(div().absolute().top(0).h(ROW).left(mark.left).w(mark.w).bg(t.selection)))
+        .children((pd ?? []).filter((d) => !d.stale).slice(0, 8).flatMap((d) => {
+          const a0 = Math.min(Math.max(0, d.col - 1), text.length), b0 = d.endLine === d.line && d.endCol > d.col ? Math.min(d.endCol - 1, text.length) : d.endLine > d.line ? text.length : Math.min(a0 + 1, text.length);
+          const [a, b] = clip(a0, Math.max(b0, a0 + (text.length > a0 ? 1 : 0)));
+          if (a > b || (seg && a0 >= seg.to)) return [];
+          const c = d.severity === "error" ? t.ansi1 : t.ansi3, w = Math.max(cw, x(b) - x(a));
+          return [div().absolute().top(0).h(ROW).left(x(a)).w(w).bg(c + "1c"), div().absolute().top(ROW - 3).h(2).left(x(a)).w(w).bg(c + "cc")];
+        }))
         .child(seg
           ? div().absolute().top(0).h(ROW).left(ind * cw).w((visualCol(text, seg.to) - v0) * cw).overflow_hidden()
             .child(h_flex().absolute().top(0).h(ROW).left(-v0 * cw).children(spans.map((s) => div().text_color(color(s.type, t)).child(s.text))))
@@ -5559,6 +5624,9 @@ export default class Review extends View {
     this.bm = f ? this.bracketPair(f) : null; // D2: read by row()
     const ncomments = this.comments().length;
     this.cmtSpans = f && ncomments ? spansOn(this.comments(), f.key) : []; // read by row()
+    this.pb = f && this.mode !== "changes" ? this.problems.forFile(f) : null; // read by row()
+    const strip = this.pb && this.mode === "edit" && this.cur ? this.problems.strip(f, this.cur.line) : null;
+    const stripStale = !!(strip && strip.stale), stripErr = !!(strip && strip.severity === "error");
     const picked = (this.mode === "changes" ? this.visible() : this.files).find((x) => x.key === this.sel); // an error tab shows its error
     const away = this.machine(), fb = this.fileBar(f, vis), hb = this.headerBar(total, ncomments);
     // An inline edit of this space; its target lines show selected while the box is open (ij.t, current lines).
@@ -5660,7 +5728,13 @@ export default class Review extends View {
           .on_mouse_down("right", (ev, cx) => this.openMenu(ev, cx))
           .on_scroll_wheel((ev, cx) => this.wheel(ev, cx)))
         .child(Scrollbar.vertical("review-rows").viewport_from_layout().absolute().inset_0())
-        .when(!!sel, (e) => e.child(this.selectionBar(f, sel, t))))))))
+        .when(!!sel, (e) => e.child(this.selectionBar(f, sel, t)))))
+      // The cursor line's problems, one line (no hover API: this is where their messages show).
+      .when(!!strip, (e) => e.child(h_flex().id("problem-strip").h(22).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border).bg(t.raised).text_size(11.5)
+        .when(stripStale, (e) => e.opacity(0.6))
+        .child(div().flex_none().text_color(stripErr ? t.ansi1 : t.ansi3).child(stripErr ? "●" : "▲"))
+        .child(div().flex_1().min_w(0).truncate().child(strip ? strip.text : ""))
+        .when(stripStale, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("edited since the check"))))))))
       // Quick Open floats over everything, so it's the root's last child.
       .when(!!this.qo, (e) => e.child(this.quickOpen(t)));
   }

@@ -56,6 +56,10 @@ export const ACTIONS = [
   { id: "findWord", label: "Toggle whole word (find bar)", group: "Find", scope: "find", keys: ["alt-w"] },
   { id: "findRegex", label: "Toggle regular expression (find bar)", group: "Find", scope: "find", keys: ["alt-r"] },
   { id: "replaceAll", label: "Replace all (find bar)", group: "Find", scope: "find", keys: ["ctrl-alt-enter"] },
+  // Problems
+  { id: "checkProblems", label: "Check for problems: run the project's checkers (tsc, dotnet build, the Problems command)", group: "Problems", scope: "pane", keys: ["ctrl-shift-m"] },
+  { id: "nextProblem", label: "Next problem (in the file, then the next file)", group: "Problems", scope: "pane", keys: ["f8"] },
+  { id: "prevProblem", label: "Previous problem", group: "Problems", scope: "pane", keys: ["shift-f8"] },
 ];
 
 export const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));

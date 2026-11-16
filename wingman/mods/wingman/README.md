@@ -201,6 +201,8 @@ Wingman finds a space's repos from its terminals' folders and from the files the
 | Quick Open | `ctrl-p`: find a file by name across the space's repos (fuzzy, as in VS Code). `name:12` or `name:12:5` opens it at that line; `:12` goes to a line in the current file. With no query it lists recent and changed files. Up and down choose, Tab fills in the chosen path (then add `:line`), Enter opens, Esc closes. |
 | Comment on the last rejection | `ctrl-r` (or the header's Comment last rejection) |
 | Search in files | `ctrl-shift-f`: the Edit tab's Search, with a one-line selection as the query (see Search) |
+| Check for problems (tsc, dotnet build, the Problems command) | `ctrl-shift-m` (see Problems) |
+| Next / previous problem | `f8` / `shift-f8` |
 
 ## Views
 
@@ -313,6 +315,35 @@ Comment, Accept and Reject act on the lines a text selection covers. Clicking th
 - With text in **Replace**, each match shows its replacement (`$1`, `$&` and the like insert groups in regex mode) and **Replace All** appears. It asks first ("Replace 12 occurrences in 4 files?"), then rewrites only the lines the results list, from each file as it is on disk then. A file under review is changed the way a saved edit of yours is: on unchanged lines the review baseline takes the same edit, inside the agent's added lines the change stays pending, and the agent gets the edit note. Each write is compare-and-swap: a file changed since it was read is skipped and named. Files with unsaved edits in any Wingman tab block it until they're saved or discarded. Afterwards open files reload and the search runs again. Replace All is not undoable from Wingman.
 - Each space keeps its own query, options, results and which mode the left column shows.
 
+## Problems
+
+Wingman marks what the project's own checkers report. It holds no language server: each checker runs once, as a command, and its output is read.
+
+- **eslint**, on one file: when the file has an eslint config (`eslint.config.*` or `.eslintrc*`) at or above it and eslint installed (`node_modules/eslint`) at or above that config, inside the repo. It runs when the file is opened in a tab and after `ctrl-s` (or **Save**), with `--format json`, in the config's folder. One run per file at a time.
+- **tsc**, for a project: the nearest `tsconfig.json` at or above the file (or at the repo's top), with `node_modules/typescript` at or above it. `vue-tsc` is used instead when it's installed there. `--noEmit --pretty false -p tsconfig.json`, in the tsconfig's folder.
+- **dotnet build**, for a project: the nearest folder holding a `.sln`/`.slnx` (preferred) or `.csproj`, for C# files and for the repo's top. `dotnet build <file> --no-restore -nologo -v:q -tl:off -clp:NoSummary` (flags checked with `dotnet build --help`, .NET SDK 10.0.401). It doesn't restore: a project never restored reports that as its failure line.
+- **Problems command** (Settings), per repo: your own command, with the output read as tsc-style lines, eslint JSON, or `path:line:col: message`. With `{file}` (the file's path in the repo) it runs per file, on open and save; without, with Check. It replaces the built-in checkers of its kind: a per-file command replaces eslint, a project command replaces tsc and dotnet build. It runs in the repo's top folder.
+
+eslint and tsc run as `node <the package's own script>` (what `node_modules/.bin/<name>` points to), so they need `node` where they run. Project checkers run with **Check**: `ctrl-shift-m` (command `wingman.checkProblems`), the Problems tab's **Check** button, and, with **Check after each agent turn** on in Settings (off by default: a build can be slow), whenever an agent of the space finishes a turn. Check runs the project checkers found at the repo's top and from files opened, plus the current file's own. Nothing runs in a repo where no checker is found ("No checker found in …"), nothing is installed, and plain folders (no git) aren't checked. **Problems** in Settings (on by default) turns all of it off.
+
+Where they run follows the repo's git, as Inline edit's command does: `sh -lc` with a fixed script on Linux, macOS and another machine; on Windows, `wsl.exe` for a repo WSL owns, else the native `node.exe` or `dotnet.exe` found with `where`. Every command is an argument list: no shell ever reads a file name, a setting or checker output. A checker's time limit is 20 s for one file and 180 s for a project. The same checker never runs twice at once in a repo: a request while it runs makes it run exactly once more after. A run that can't start, times out, or exits with an error and nothing readable shows one line in the tab ("tsc: timed out after 180 s"), and the last good list stays. WSL repos often fail with "node isn't on the PATH where the repo's tools run": a login shell's `PATH` doesn't include a Node installed with nvm. Add it to `~/.profile`, or set a Problems command with node's full path.
+
+Output is read as data: at most 2 MB of it, paths outside the repo (or climbing out with `..`) dropped, messages cut at 300 characters with control and bidirectional characters removed, and at most 1,000 problems per repo, errors first ("… N more not shown").
+
+Where they show:
+- **Editor**: a bar on the line number of each line with a problem (the theme's error or warning colour), the range underlined over a light tint, and the cursor line's messages in a strip under the editor. There is no hover: the mod API has no tooltips. While you edit, marks below an added or removed line move with it; marks on edited lines are dimmed until the next run.
+- **Problems** in the Edit tab's left column, with its count ("Problems 3"): grouped by file, files with errors first, then **Check**, **Send to agent**, **Send file** (the selected row's file) and **Copy**. Up and Down move, Left and Right fold, Enter or a click opens the file at the line and column.
+- **File tree and tabs**: a file with problems has its name in the error or warning colour.
+- `f8` / `shift-f8`: the next or previous problem, in the file and then the next file.
+
+**Send to agent** builds one prompt: each problem's place (relative to the agent's folder, `/mnt/...` paths for an agent in WSL), severity, code, checker and message, with its source line quoted, at most 30,000 characters (the rest is counted). It goes the way review comments do: the space's only agent, else you pick; a working agent asks first; `hc send` types it in. **Copy** puts the same prompt on the clipboard.
+
+On another machine, detection is one `sh` call there and checkers run there. A machine without `sh` (Windows) shows "Problems need sh on <machine>". Only this computer has been tried (a Windows drive and WSL's own files).
+
+Problems run and show in one Wingman copy: the Edit panel's, else a pane copy when the layout has no Edit panel. `ctrl-shift-m` pressed in another copy asks that one. Commands for keys and tests: `wingman.checkProblems`, `wingman.nextProblem`, `wingman.prevProblem`, `wingman.problemsShow`, `wingman.problemsUp`, `wingman.problemsDown`, `wingman.problemsEnter`, `wingman.problemsSend`, `wingman.problemsSendFile`, `wingman.problemsCopy`, `wingman.problemsConfirm`, `wingman.openSettings`.
+
+Measured on this PC (the sample project: two files, three tsc errors, three eslint problems): on a Windows drive with Windows Node, eslint on one file 5.4 to 6.5 s and tsc 2.5 to 2.9 s; in WSL's own files through `wsl.exe`, eslint 0.9 s and tsc 1.8 s; `dotnet build` of a one-file console app 7.4 s.
+
 ## Neovim as the editor
 
 Set **Editor** to **Neovim** in Settings to edit in Neovim instead of Wingman's own editor. Wingman stays the review: clicking a line of the diff, `ctrl-o`, the **Neovim** button, or a file in the tree opens that file at that line in a Neovim pane beside Wingman. In the Edit view, Wingman then shows only the file tree, full width, and a click opens the file in Neovim at its first change. Each space gets one Neovim, started with `--listen`, and later files open in the same one. Buffers reload when the agent writes to a file, unless they hold unsaved edits. Wingman picks up Neovim's saves within 2 seconds.
@@ -356,6 +387,9 @@ The header's **⚙ Settings** opens:
 - **Auto-close tags**: the tag rules under Editing. On by default.
 - **External editor**: VS Code (default), Cursor, Windsurf, Zed, Sublime Text, or a custom command with `{path}`, `{line}` and `{col}`. VS Code, Cursor and Windsurf open WSL files through Remote - WSL. On Windows a `.cmd` launcher runs through cmd.exe, which refuses paths containing `& | < > ^ % ! " , ; =`.
 - **Inline edit command**: the command `ctrl-k` runs (see Inline edit), with **Default** to put the default back.
+- **Problems**: run the project's checkers and mark what they report (see Problems). On by default.
+- **Check after each agent turn**: Check when an agent of the space finishes a turn. Off by default.
+- **Problems command** (per repo of the shown space, with a repo choice when there are several): your own checker and how its output reads (see Problems). The dialog scrolls: these rows are at its end.
 - **Editor**: Wingman (the built-in editor, the default) or Neovim (see Neovim as the editor).
 - **Hide Herdr's Files and Changes buttons**: takes `files` and `changes` out of Herdr's `workspace.panels` setting, so the tab bar shows only Wingman's Review, Edit and Changes. Off by default. Wingman records which entries it removed in the shared key `wingman.panelsHidden` and, when turned off (or on uninstall), puts back only those, in their old order. An entry you or another mod (herdr-nvim) had already removed stays removed.
 - **Format on save**: `ctrl-s` (and the Save button) format the file with the repo's formatter first, then save. Off by default. Autosave never formats, because it saves while you are elsewhere and formatting moves text. See Format on save.
