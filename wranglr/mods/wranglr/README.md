@@ -27,7 +27,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 - Click a row to go to the space. Right-click it for Pin to the top, Show tabs, Move to group, Rename and Close. More opens the shipped space menu.
 - A pinned space leaves its Group and shows under Pinned at the top of the list, in the order pinned. Unpin it, or move it to a Group, and it returns to the Group it belongs in. Pinned spaces come first for the select keys.
 - A space with more than one tab shows a count at the end of its row. Click it to list the space's tabs under the row. Click a tab to show the space at that tab. Settled tabs are left out.
-- A space's row ends with marks for what its agents are doing: `!` for agents that need you, a spinner for working ones and a dot for done ones, each with a count above one. Idle agents show nothing. Hover for the list. Click the marks to go to the most urgent agent's pane.
+- Between a space's icon and its name are marks for what its agents are doing: `!` for agents that need you, a spinner for working ones and a dot for done ones, each with a count above one. Idle agents show nothing. Hover for the list. Click the marks to go to the most urgent agent's pane.
 - Drag a row onto another row (it lands above, or below when you release on the row's lower half), onto a Group or Subgroup header (it goes to the end), or onto the empty area under the list (it leaves every Group).
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
 - Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group), Close group and Settings.
