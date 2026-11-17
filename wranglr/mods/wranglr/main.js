@@ -5,7 +5,7 @@
 // runs the effects and draws the Tree. The copy in the layout owns the state; overlay copies
 // of this mod (move dialog, menus, text input) send their action to it through shared state.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import {
   spaces, machines, panes, agents, focused, run, openOverlay, closeOverlay, props, exec, hc, theme,
@@ -791,16 +791,24 @@ export default class Wranglr extends View {
     const w = live.get(r.id) ?? r.space;
     return (w?.tabs ?? []).filter((x) => !x.settled).map((tab) => {
       const lead = d.leads.get(tab.id);
-      const status = lead?.program?.agent ? lead.status : null;
+      // An agent's tab shows the agent's own icon and always its state. A plain terminal shows neither.
+      const agent = lead?.program?.agent ? lead.program : null;
+      const status = agent ? lead.status ?? "idle" : null;
+      const pic = agent?.icon
+        ? (agent.tint ? svg(agent.icon).size(13).flex_none().text_color(t.muted) : image(agent.icon).size(13).flex_none())
+        : svg(icon(agent ? "square" : "terminal")).size(11).flex_none().text_color(t.dim);
       const on = !!w.active && !!tab.active;
       return h_flex().id(`tab-${tab.id}`).h(24).flex_none().pl(indent + 35).pr(8).gap(7).items_center().rounded(6)
         .text_size(12).text_color(on ? t.foreground : t.muted).cursor_pointer()
         .when(on, (el) => el.bg(t.hover))
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => { cx.stop_propagation(); run("space.select", { id: r.id }); run("tab.select", { id: tab.id }); })
-        .child(svg(icon(lead?.program?.agent ? "square" : "terminal")).size(11).flex_none().text_color(t.dim))
+        .child(h_flex().w(13).flex_none().justify_center().child(pic))
         .child(div().flex_1().min_w(0).truncate().child(tabLabel(tab, lead)))
-        .when(status === "blocked" || status === "working" || status === "done", (el) => el.child(this.agentStatus(t, status)));
+        .when(Boolean(agent), (el) => el.tooltip(`${agent.name ?? "Agent"}: ${{ blocked: "needs you", working: "working", done: "done" }[status] ?? "idle"}`)
+          .child(status === "blocked" || status === "working" || status === "done"
+            ? this.agentStatus(t, status)
+            : div().size(7).mx(2).flex_none().rounded(4).border_1().border_color(t.dim)));
     });
   }
 
