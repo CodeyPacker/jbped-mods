@@ -452,14 +452,18 @@ export default class Wranglr extends View {
   keyHelp(t) {
     const box = v_flex().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim);
     if (!this.help) return box.child(div().truncate().child("j/k move · enter open · ? keys"));
+    // One job per key here. h/l and enter also fold a header, as c does.
     const keys = [
-      ["j/k", "move"], ["g/G", "first, last"], ["enter", "open, or fold a group"], ["h/l", "fold, unfold, show tabs"],
-      ["c", "fold this group"], ["C", "fold or open all groups"], ["n", "new space in this group"], ["f", "find a space"],
-      ["s/a", "Spaces, Agents"], ["esc/q", "back to the terminal"], ["?", "hide this list"],
+      ["Move"], ["j/k", "down, up"], ["g/G", "top, bottom"],
+      ["Spaces"], ["enter", "open it"], ["h/l", "hide, show its tabs"], ["n", "new space here"], ["f", "find a space"],
+      ["Groups"], ["c", "fold or open this group"], ["C", "fold or open all groups"],
+      ["Sidebar"], ["s/a", "Spaces list, Agents list"], ["esc", "back to the terminal"], ["?", "hide these keys"],
     ];
-    return box.gap(2).border_t(1).border_color(t.border).pt(6).children(keys.map(([key, what]) => h_flex().gap(8)
-      .child(div().w(36).flex_none().text_color(t.muted).child(key))
-      .child(div().flex_1().min_w(0).truncate().child(what))));
+    return box.gap(2).border_t(1).border_color(t.border).pt(6).children(keys.map(([key, what], i) => what === undefined
+      ? div().mt(i ? 5 : 0).text_color(t.muted).font_semibold().child(key)
+      : h_flex().gap(8)
+        .child(div().w(36).flex_none().text_color(t.foreground).child(key))
+        .child(div().flex_1().min_w(0).truncate().child(what))));
   }
 
   // The keyboard goes back to the pane beside the sidebar.
