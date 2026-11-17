@@ -461,7 +461,7 @@ export default class Wranglr extends View {
     ];
     return box.gap(2).border_t(1).border_color(t.border).pt(6).children(keys.map(([key, what], i) => what === undefined
       ? div().mt(i ? 5 : 0).text_color(t.muted).font_semibold().child(key)
-      : h_flex().gap(8)
+      : h_flex().pl(10).gap(8)
         .child(div().w(36).flex_none().text_color(t.foreground).child(key))
         .child(div().flex_1().min_w(0).truncate().child(what))));
   }
