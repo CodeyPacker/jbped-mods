@@ -90,7 +90,7 @@ test("KEYS lists the footer keys with labels", () => {
   const byKey = Object.fromEntries(KEYS.map((k) => [k.key, k.type]));
   assert.equal(byKey["ctrl-o"], "checkout");
   assert.equal(byKey["ctrl-w"], "worktree");
-  assert.equal(byKey["ctrl-x"], "remove");
+  assert.equal(byKey["ctrl-u"], "remove");
   assert.ok(KEYS.every((k) => typeof k.label === "string" && k.label));
 });
 

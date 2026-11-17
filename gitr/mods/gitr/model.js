@@ -35,7 +35,7 @@ export const KEYS = [
   { key: "ctrl-n", type: "newFrom", label: LABELS.newFrom },
   { key: "ctrl-d", type: "delete", label: LABELS.delete },
   { key: "ctrl-r", type: "rename", label: LABELS.rename },
-  { key: "ctrl-x", type: "remove", label: LABELS.remove },
+  { key: "ctrl-u", type: "remove", label: LABELS.remove },
   { key: "ctrl-f", type: "fetch", label: LABELS.fetch },
   { key: "ctrl-l", type: "refresh", label: LABELS.refresh },
   { key: "ctrl-k", type: "cleanup", label: LABELS.cleanup },

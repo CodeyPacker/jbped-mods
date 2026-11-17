@@ -1,0 +1,1 @@
+{ "place": "none", "title": "Gitr", "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 860, "height": 0.75 }, "palette": [{ "title": "Gitr: Open", "command": "mod.open", "args": { "name": "gitr" }, "about": "Branches and Worktrees of the focused space's Repo, with their spaces (alt-shift-g)" }] }
