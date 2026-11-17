@@ -1194,7 +1194,13 @@ export default class Wayfindr extends View {
   get vim() { return this.state.status === "ok" && this.state.vimKeys === true; }
 
   // What keyAction needs to know in `layer`, with the vim setting.
-  keyFacts(layer) { return { ...this.layerFacts(layer), vim: this.vim }; }
+  keyFacts(layer) { return { ...this.layerFacts(layer), nextProfile: this.nextProfileName(), vim: this.vim }; }
+
+  // The Profile P switches to, or null with one Profile.
+  nextProfileName() {
+    const s = this.state, names = s.status === "ok" ? s.profileNames : [];
+    return names.length > 1 ? names[(names.indexOf(s.profile.name) + 1) % names.length] : null;
+  }
 
   layerFacts(layer) {
     const p = this.profile;
@@ -1292,7 +1298,8 @@ export default class Wayfindr extends View {
     if (action === "hide") { this.help = false; return; }
     if (action === "close" || action === "back" || action === "no") return this.closeStep(cx);
     if (action === "refresh") return layer === "pr" || layer === "review" ? this.fetchPr(cx, { force: true }) : this.reload(cx);
-    if (action === "viewBoard" || action === "viewPrs") { this.showView(action === "viewBoard" ? "board" : "prs", cx); return; }
+    if (action === "toggleView") { this.showView(this.view === "prs" ? "board" : "prs", cx); return; }
+    if (action === "profile") { cx.spawn(async (cx) => { await this.nextProfile(cx); cx.notify(); }); return; }
     if (action === "settings") { this.openSettings(cx); return; }
     if (layer === "board" || layer === "ticket") {
       if (nav || ["colPrev", "colNext", "moveLeft", "moveRight"].includes(action)) { this.boardAct(action, cx); return; }

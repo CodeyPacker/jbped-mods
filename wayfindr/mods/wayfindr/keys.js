@@ -7,11 +7,11 @@
 // screen), "confirm" (the Post confirm), "help" (the "?" list), "settings".
 // Facts, all booleans: url, canLaunch, canReview, canUpdate, canMove, canComment, canPost, pane, full,
 // hasFile (a file is shown, not the Overview), hasRows, vim. In "pr", f is "full" (the overlay) or "zoom" (the pane copy). In "review", canPost means the review is ready to post.
-// `vim` is the "vimKeys" setting (D13). Off, only the keys Wayfindr had before work: arrows, home, end, enter,
+// `nextProfile` is a string, the Profile that P switches to, or null with one Profile. `vim` is the "vimKeys" setting (D13). Off, only the keys Wayfindr had before work: arrows, home, end, enter,
 // esc, shift-left/right, ctrl-n/ctrl-p, and v/p/f in the overlay. No letters, q, g/G, ? or letter jumps.
 
 /** The letters the "prs" layer's own keys use, so no Pull Request row gets one as its hint. */
-export const RESERVED = "jkghlbpsoyrqnv";
+export const RESERVED = "jkghlsoyrqnv";
 
 const NAV = {
   j: "next", down: "next", "ctrl-n": "next",
@@ -82,8 +82,8 @@ export function keyAction(layer, k, facts = {}) {
     if (k === "o") return when(f.url, "browser");
     if (k === "y") return when(f.url, "copy");
     if (k === "s") return when(f.canReview, "review");
-    if (k === "b") return act("viewBoard");
-    if (k === "p") return act("viewPrs");
+    if (k === "tab") return act("toggleView");
+    if (k === "shift-p") return when(Boolean(f.nextProfile), "profile");
     if (k === ",") return act("settings");
     if (k === "r") return act("refresh");
     if (k === "q" || k === "escape") return act("close");
@@ -99,8 +99,8 @@ export function keyAction(layer, k, facts = {}) {
     if (k === "o") return when(f.url, "browser");
     if (k === "y") return when(f.url, "copy");
     if (k === "s") return when(f.canLaunch, "launch");
-    if (k === "b") return act("viewBoard");
-    if (k === "p") return act("viewPrs");
+    if (k === "tab") return act("toggleView");
+    if (k === "shift-p") return when(Boolean(f.nextProfile), "profile");
     if (k === ",") return act("settings");
     if (k === "r") return act("refresh");
     if (k === "q" || k === "escape") return act("close");
@@ -115,7 +115,7 @@ export function keyAction(layer, k, facts = {}) {
 }
 
 /** The keystroke a hint's label stands for, where the label is not itself one. */
-export const HINT_KEYS = { "j/k": "j", "g/G": "g", "h/l": "h", "H/L": "shift-h", "a letter": "a", "?": "?",
+export const HINT_KEYS = { "j/k": "j", "g/G": "g", "h/l": "h", "H/L": "shift-h", P: "shift-p", "a letter": "a", "?": "?",
   "up/down": "down", "left/right": "left", "home/end": "home", "shift-left/right": "shift-left", esc: "escape" };
 // The labels the legend uses with vim off. With it on, j/k, h/l, g/G, H/L and q say the same.
 const PLAIN_LABELS = new Set(["up/down", "left/right", "home/end", "shift-left/right", "esc"]);
@@ -124,15 +124,15 @@ const PLAIN_LABELS = new Set(["up/down", "left/right", "home/end", "shift-left/r
 const ALL = {
   board: [["up/down", "card"], ["left/right", "column"], ["home/end", "first / last"], ["shift-left/right", "move card"], ["esc", "close"],
     ["j/k", "card"], ["h/l", "column"], ["g/G", "first / last"], ["enter", "open"], ["H/L", "move card"],
-    ["s", "launch"], ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
+    ["s", "launch"], ["o", "browser"], ["y", "copy URL"], ["tab", "Pull Requests"], ["P", "profile"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   ticket: [["up/down", "card"], ["left/right", "column"], ["home/end", "first / last"], ["shift-left/right", "move card"], ["esc", "close"],
     ["j/k", "card"], ["h/l", "column"], ["g/G", "first / last"], ["enter", "open"], ["H/L", "move card"],
     ["c", "comment"], ["e", "edit title"], ["m", "move to"], ["s", "launch"], ["o", "browser"], ["y", "copy URL"],
-    ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
+    ["tab", "Pull Requests"], ["P", "profile"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   move: [["up/down", "column"], ["esc", "close"], ["j/k", "column"], ["g/G", "first / last"], ["enter", "move here"], ["q", "close"]],
   launch: [["enter", "launch"], ["esc", "close"], ["q", "close"]],
   prs: [["up/down", "move"], ["home/end", "first / last"], ["esc", "close"], ["j/k", "move"], ["a letter", "open that row"], ["g/G", "first / last"], ["enter", "open"], ["s", "review"],
-    ["o", "browser"], ["y", "copy URL"], ["b", "Board"], ["p", "Pull Requests"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
+    ["o", "browser"], ["y", "copy URL"], ["tab", "Board"], ["P", "profile"], [",", "Settings"], ["r", "refresh"], ["q", "close"]],
   pr: [["up/down", "file"], ["home/end", "Overview / last file"], ["esc", "close"], ["j/k", "file"], ["g/G", "Overview / last file"], ["v", "viewed"], ["c", "checks"], ["p", "post review"],
     ["s", "review"], ["f", "fullscreen"], ["o", "browser"], ["y", "copy URL"], ["r", "refetch"], ["q", "close"]],
   review: [["up/down", "file"], ["esc", "back"], ["p", "post"], ["enter", "post"], ["j/k", "file"], ["r", "refetch"], ["q", "back"]],
@@ -157,11 +157,11 @@ const CORE_PLAIN = {
 
 // The few each layer's legend shows with vim on.
 const CORE = {
-  board: ["h/l", "j/k", "enter", "s", "q"],
+  board: ["h/l", "j/k", "enter", "s", "P", "q"],
   ticket: ["j/k", "c", "s", "m", "q"],
   move: ["j/k", "enter", "q"],
   launch: ["enter", "q"],
-  prs: ["j/k", "a letter", "enter", "s", "q"],
+  prs: ["j/k", "a letter", "enter", "s", "P", "q"],
   pr: ["j/k", "v", "p", "s", "q"],
   review: ["p", "q"],
   confirm: ["y", "n"],
@@ -179,7 +179,8 @@ const works = (layer, label, facts) => keyAction(layer, HINT_KEYS[label] ?? labe
  */
 export function keyHints(layer, facts = {}) {
   const vim = Boolean(facts?.vim);
-  const out = (ALL[layer] ?? []).filter(([label]) => (vim ? !PLAIN_LABELS.has(label) : true) && works(layer, label, facts));
+  const out = (ALL[layer] ?? []).filter(([label]) => (vim ? !PLAIN_LABELS.has(label) : true) && works(layer, label, facts))
+    .map(([label, what]) => (label === "P" && typeof facts?.nextProfile === "string" ? [label, facts.nextProfile] : [label, what]));
   // esc closes, so it goes last, as q does.
   out.sort((x, y) => (x[0] === "esc") - (y[0] === "esc"));
   if (layer !== "help" && works(layer, "?", facts)) out.push(["?", "all keys"]);

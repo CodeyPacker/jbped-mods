@@ -38,7 +38,8 @@ The keys follow CodeyPacker's mods (`run`, `jump`, `branch`) and Dockr, so they 
 | `q` | close this layer; at the top, hide Wayfindr |
 | `esc` | as `q`, and leaves a text box |
 | `?` | every key that works now |
-| `b` / `p` | Board / Pull Requests view |
+| `tab` | the other view: Board or Pull Requests |
+| `P` | the next Profile (the legend names it; absent with one Profile) |
 | `,` | Settings (`q` or `esc` returns to the view) |
 | `o` / `y` | open the selected card or Pull Request in the browser / copy its URL |
 

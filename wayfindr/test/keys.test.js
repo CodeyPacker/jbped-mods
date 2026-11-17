@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { keyAction, keyHints, coreHints, HINT_KEYS, RESERVED } from "../mods/wayfindr/keys.js";
 
-const ALL_FACTS = { url: true, canLaunch: true, canReview: true, canUpdate: true, canMove: true, canComment: true, canPost: true, hasFile: true, hasRows: true, pane: false, full: false, vim: true };
+const ALL_FACTS = { nextProfile: "work", url: true, canLaunch: true, canReview: true, canUpdate: true, canMove: true, canComment: true, canPost: true, hasFile: true, hasRows: true, pane: false, full: false, vim: true };
 const PLAIN = { ...ALL_FACTS, vim: false };
 const NONE = {};
 const LAYERS = ["board", "ticket", "move", "launch", "prs", "pr", "review", "confirm", "help", "settings"];
@@ -44,8 +44,10 @@ test("board: columns, moving a card, browser, copy, launch, views", () => {
   assert.equal(a("board", "o", { ...ALL_FACTS, url: false }), null);
   assert.equal(a("board", "s"), "launch");
   assert.equal(a("board", "s", { ...ALL_FACTS, canLaunch: false }), null);
-  assert.equal(a("board", "b"), "viewBoard");
-  assert.equal(a("board", "p"), "viewPrs");
+  assert.equal(a("board", "tab"), "toggleView");
+  assert.equal(a("board", "shift-p"), "profile");
+  assert.equal(a("board", "shift-p", { ...ALL_FACTS, nextProfile: null }), null);
+  assert.equal(a("board", "b"), null);
   assert.equal(a("board", ","), "settings");
   assert.equal(a("board", "c"), null); // the comment box is the detail panel's
   assert.equal(a("board", "j", NONE), null); // no cards
@@ -83,8 +85,10 @@ test("prs: browser, copy, review, views and a letter per row", () => {
   assert.equal(a("prs", "y"), "copy");
   assert.equal(a("prs", "s"), "review");
   assert.equal(a("prs", "s", { ...ALL_FACTS, canReview: false }), null);
-  assert.equal(a("prs", "b"), "viewBoard");
-  assert.equal(a("prs", "p"), "viewPrs");
+  assert.equal(a("prs", "tab"), "toggleView");
+  assert.equal(a("prs", "shift-p"), "profile");
+  assert.equal(a("prs", "b"), "letter");
+  assert.equal(a("prs", "p"), "letter");
   assert.equal(a("prs", ","), "settings");
   assert.equal(a("prs", "a"), "letter");
   assert.equal(a("prs", "z"), "letter");
@@ -166,9 +170,10 @@ for (const layer of LAYERS) {
 
 test("coreHints: the few per layer, then ? when it works", () => {
   const labels = (layer, facts = ALL_FACTS) => coreHints(layer, facts).map(([k]) => k);
-  assert.deepEqual(labels("board"), ["j/k", "h/l", "enter", "s", "q", "?"]);
+  assert.deepEqual(labels("board"), ["j/k", "h/l", "enter", "s", "P", "q", "?"]);
+  assert.deepEqual(labels("board", { ...ALL_FACTS, nextProfile: null }), ["j/k", "h/l", "enter", "s", "q", "?"]);
   assert.deepEqual(labels("ticket"), ["j/k", "c", "m", "s", "q", "?"]);
-  assert.deepEqual(labels("prs"), ["j/k", "a letter", "enter", "s", "q", "?"]);
+  assert.deepEqual(labels("prs"), ["j/k", "a letter", "enter", "s", "P", "q", "?"]);
   assert.deepEqual(labels("pr"), ["j/k", "v", "p", "s", "q", "?"]);
   assert.deepEqual(labels("review"), ["p", "q", "?"]);
   assert.deepEqual(labels("confirm"), ["y", "n", "?"]);
@@ -229,4 +234,11 @@ test("vim off: the legend lists arrow keys and esc, and no ?", () => {
   assert.deepEqual(labels("pr", { ...PLAIN, pane: true }), ["up/down", "v", "p"]);
   // With vim on, the arrow labels give way to j/k and the rest.
   assert.ok(!keyHints("board", ALL_FACTS).some(([k]) => k === "up/down" || k === "esc"));
+});
+
+test("the legend names the Profile P switches to, and drops P with one Profile", () => {
+  assert.deepEqual(keyHints("board", ALL_FACTS).find(([k]) => k === "P"), ["P", "work"]);
+  assert.equal(keyHints("board", { ...ALL_FACTS, nextProfile: null }).find(([k]) => k === "P"), undefined);
+  assert.deepEqual(keyHints("prs", ALL_FACTS).find(([k]) => k === "tab"), ["tab", "Board"]);
+  assert.deepEqual(keyHints("board", ALL_FACTS).find(([k]) => k === "tab"), ["tab", "Pull Requests"]);
 });
