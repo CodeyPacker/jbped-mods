@@ -157,6 +157,7 @@ export default class Wranglr extends View {
     this.nav = []; // the rows the keys can reach, in the order drawn: { key, index, kind, ... }
     this.cursor = null; // the key of the row the keys are on
     this.reveal = false; // scroll the cursor's row into view at the next draw
+    this.help = false; // every key is listed, after "?"
     try { if (localStorage.getItem("wranglr.tab") === "agents") this.tab = "agents"; } catch {}
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
@@ -447,6 +448,20 @@ export default class Wranglr extends View {
     return (this.nav.find((x) => x.key === want) ?? this.nav[0])?.key ?? null;
   }
 
+  // While the list holds the keyboard: one line, or after "?" every key.
+  keyHelp(t) {
+    const box = v_flex().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim);
+    if (!this.help) return box.child(div().truncate().child("j/k move · enter open · ? keys"));
+    const keys = [
+      ["j/k", "move"], ["g/G", "first, last"], ["enter", "open, or fold a group"], ["h/l", "fold, unfold, show tabs"],
+      ["c", "fold this group"], ["C", "fold or open all groups"], ["n", "new space in this group"], ["f", "find a space"],
+      ["s/a", "Spaces, Agents"], ["esc/q", "back to the terminal"], ["?", "hide this list"],
+    ];
+    return box.gap(2).border_t(1).border_color(t.border).pt(6).children(keys.map(([key, what]) => h_flex().gap(8)
+      .child(div().w(36).flex_none().text_color(t.muted).child(key))
+      .child(div().flex_1().min_w(0).truncate().child(what))));
+  }
+
   // The keyboard goes back to the pane beside the sidebar.
   leaveKeys() { run("pane.go", { direction: "right" }); }
 
@@ -467,6 +482,14 @@ export default class Wranglr extends View {
     // Not Tab: the window takes it to step the keyboard to the next control.
     else if (k === "s" || k === "a") this.showTab(k === "a" ? "agents" : "spaces");
     else if (k === "escape" || k === "q") this.leaveKeys();
+    else if (k === "?" || k === "shift-/" || e.key_char === "?") this.help = !this.help;
+    else if (k === "n") {
+      // A space in the cursor's Group, as its + starts one. Outside a Group: a plain new space.
+      const g = over && this.tree.groups.find((x) => x.id === over.group);
+      if (g?.can.plus) this.plus(g, over.sub, cx);
+      else this.newSpace();
+    }
+    else if (k === "f") run("mod.open", { name: "picker" });
     else if (k === "c") {
       if (over) { this.dispatch({ type: "fold", group: over.group, sub: over.sub }, cx); this.cursor = over.key; this.reveal = true; }
     }
@@ -1311,8 +1334,7 @@ export default class Wranglr extends View {
       .when(Boolean(warning), (el) => el.child(warning))
       .child(v_flex().id("wranglr-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(6).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
         .children(body))
-      .when(this.kb && !collapsed, (el) => el.child(div().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim).truncate()
-        .child("j/k move · enter open · h/l fold · c group · C all groups · s/a lists · esc")))
+      .when(this.kb && !collapsed, (el) => el.child(this.keyHelp(t)))
       .child(v_flex().flex_none().pb(8).children(this.machineLines(t, collapsed)));
   }
 
