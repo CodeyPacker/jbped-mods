@@ -59,6 +59,9 @@ const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
 const configPath = () => `${appHome()}/data/wayfindr.json`;
 // Review panes that come back without props (#30): a copy that may be one asks, one copy re-makes them.
 const ORPHAN = "wayfindr.orphan", REMAKE = "wayfindr.remake";
+// Every copy started without pr or overlay props registers here: { [copy id]: when }. One such copy is the main
+// one; a second means a Review pane lost its props. The id is this copy's own (localStorage), so a reload keeps it.
+const COPIES = "wayfindr.copies", COPY_WINDOW_MS = 30_000;
 // Wranglr's config: its worktree rule is the default Worktree Placement when Wranglr is set up.
 const wranglrPath = () => `${appHome()}/wranglr.json`;
 
@@ -365,6 +368,7 @@ export default class Wayfindr extends View {
     this.pendingView = null; // { view, boardId, until }: where the last toast's click lands
     if (this.paneFor) return this.initPane(cx);
     this.orphanSeen = null; // the last wayfindr.orphan this copy looked at
+    this.registerCopy();
     this.lookForOrphans(cx);
     cx.timer.after(500, (cx) => this.remakeIfAsked(cx));
     this.reload(cx);
@@ -372,6 +376,7 @@ export default class Wayfindr extends View {
     // Redraws on a show, and once a minute while shown (the "Updated" age).
     let drawn = 0;
     cx.timer.every(2_000, (cx) => {
+      if (this.paneFor) return; // became a Review pane late (lookForOrphans)
       const was = this.hidden;
       this.takeRequest(cx);
       this.remakeIfAsked(cx);
@@ -382,8 +387,8 @@ export default class Wayfindr extends View {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
         if (c === "focus") { this.gotFocus = true; this.gone = false; this.handle.focus(); }
         else if (c === "close") this.close_(cx);
-        else if (c === "refresh") this.reload(cx);
-        else if (c === "profile") await this.nextProfile(cx);
+        else if (c === "refresh") { if (this.paneFor) { if (this.profile) this.fetchPr(cx, { force: true }); } else this.reload(cx); }
+        else if (c === "profile") { if (!this.paneFor) await this.nextProfile(cx); }
         cx.notify();
       }
     });
@@ -392,10 +397,11 @@ export default class Wayfindr extends View {
 
   // The pane copy (#30): the config (runner, templates), then the Pull Request. refresh reloads the PR; focus
   // focuses; close and profile do nothing here (Herdr's pane header closes the pane).
-  initPane(cx) {
+  initPane(cx, { loop = true } = {}) {
     this.hidden = false;
     this.selectedPr = this.paneFor; this.prLast = this.paneFor.pr.key; this.prShown[this.paneFor.pr.key] = null;
     this.reload(cx);
+    if (!loop) return; // the main loop above already handles a copy that became a pane late
     cx.spawn(async (cx) => {
       for (;;) {
         const c = String(await nextCommand()).replace(/^wayfindr\./, "");
@@ -2434,16 +2440,48 @@ export default class Wayfindr extends View {
     }
   }
 
+  // This copy's own id (its localStorage, so a reload keeps it), registered in the shared COPIES map with
+  // entries older than the window dropped.
+  registerCopy() {
+    let id = null;
+    try { id = localStorage.getItem("wayfindr.copyId"); } catch { /* no storage */ }
+    if (!id) { id = `${Date.now()}-${Math.random()}`; try { localStorage.setItem("wayfindr.copyId", id); } catch { /* no storage */ } }
+    this.copyId = id;
+    this.touchCopies((m) => { m[id] = Date.now(); });
+  }
+
+  touchCopies(change) {
+    const now = Date.now(), cur = shared(COPIES), next = {};
+    for (const [k, at] of Object.entries(cur && typeof cur === "object" ? cur : {})) if (typeof at === "number" && now - at < COPY_WINDOW_MS) next[k] = at;
+    change(next);
+    setShared(COPIES, next);
+  }
+
+  proplessCopies() {
+    const now = Date.now(), cur = shared(COPIES);
+    return Object.values(cur && typeof cur === "object" ? cur : {}).filter((at) => typeof at === "number" && now - at < COPY_WINDOW_MS).length;
+  }
+
   // A copy started without pr or overlay props is the main copy or a Review pane that lost its props in a
-  // restart; it can't tell which. When panes() lists a Wayfindr pane in a tab panes.json recorded, it asks
-  // for a re-make. Panes on another machine can show up late, so it looks for 20 s.
+  // restart; it can't tell which by itself. For 20 s it does two things each second. It reads props() again:
+  // a pane on another machine can get its props after the view exists, and then it becomes that pane. And,
+  // from the third second, when panes() lists a Wayfindr pane in a tab panes.json recorded and more than
+  // one copy without props is registered (the main copy is one), it asks for a re-make.
   lookForOrphans(cx) {
     cx.spawn(async (cx) => {
-      let rec;
-      try { rec = parsePanes(await readTextFile(panesFile(appHome()))); } catch { return; }
-      if (!Object.keys(rec.panes).length) return;
+      let rec = null;
+      try { rec = parsePanes(await readTextFile(panesFile(appHome()))); } catch { /* no record: only the props re-read */ }
+      const recorded = rec && Object.keys(rec.panes).length > 0;
       for (let i = 0; i < 20; i++) {
-        if (recordedPanes(rec, panes()).length) { setShared(ORPHAN, { n: Date.now() }); return; }
+        const pp = props()?.pr;
+        if (pp && typeof pp === "object" && typeof pp.account === "string" && pp.pr && typeof pp.pr.key === "string") {
+          this.paneFor = { account: pp.account, pr: pp.pr };
+          this.touchCopies((m) => { delete m[this.copyId]; });
+          this.initPane(cx, { loop: false });
+          cx.notify();
+          return;
+        }
+        if (recorded && i >= 2 && recordedPanes(rec, panes()).length && this.proplessCopies() > 1) { setShared(ORPHAN, { n: Date.now() }); return; }
         await cx.sleep(1000);
       }
     });
