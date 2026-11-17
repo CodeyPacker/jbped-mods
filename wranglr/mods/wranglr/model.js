@@ -369,7 +369,24 @@ function buildTree(ctx) {
   const loose = sortRows(ctx, ctx.rows.filter((r) => members[r.id].group === "" && !isPinned.has(r.id)), "");
   const pinned = pins.map((id) => byId.get(id));
   const order = [...pinned, ...sorted.flatMap(allRows), ...loose].filter((r) => !r.dim).map((r) => r.id);
-  return { tree: { pinned, groups: sorted, loose, order }, members };
+  return { tree: { pinned, groups: sorted, loose, order, repos: repoList(ctx, groups) }, members };
+}
+
+// The Repos other mods can act on: each with a Repo group (dismissed ones are not) or in a Workspace,
+// and a main root on at least one Machine. { identity, name, on: { [mkey]: path } }, sorted by name.
+function repoList(ctx, groups) {
+  const names = new Map();
+  for (const g of groups) if (g.kind === "repo") names.set(g.identity ?? g.id.slice(5), g.name);
+  for (const ws of ctx.workspaces)
+    for (const identity of ws.repos || [])
+      if (!names.has(identity)) names.set(identity, ctx.repoNames.get(identity) || lastSegments(identity, 1));
+  const out = [];
+  for (const [identity, name] of names) {
+    const on = {};
+    for (const [mk, known] of Object.entries(ctx.cloned)) if (known[identity]) on[mk] = known[identity];
+    if (Object.keys(on).length) out.push({ identity, name, on });
+  }
+  return out.sort((a, b) => byName(a, b) || a.identity.localeCompare(b.identity));
 }
 
 export function arrange(world, config, state) {
@@ -828,13 +845,37 @@ function plusWorkspace(a, c, group, mode) {
   addPending(c, a, { machine, folder, workspace: ws.name });
 }
 
+// A Repo that is published but shows no Group (dismissed, or only in a Workspace): "+" still works on it,
+// sent by another mod. It has no Subgroups.
+function publishedGroup(c, gid) {
+  if (typeof gid !== "string" || !gid.startsWith("repo:")) return null;
+  const repo = c.tree().tree.repos.find((r) => r.identity === gid.slice(5));
+  if (!repo) return null;
+  const group = { id: gid, kind: "repo", name: repo.name, rows: [], subgroups: [] };
+  group.machines = groupMachines(c.ctx(), group);
+  return group;
+}
+
 function doPlus(a, c) {
-  const group = c.tree().tree.groups.find((g) => g.id === a.group);
+  const group = c.tree().tree.groups.find((g) => g.id === a.group) || publishedGroup(c, a.group);
   if (!group || (a.sub != null && !group.subgroups.some((s) => s.id === a.sub))) return;
   const mode = a.mode ?? c.config.settings.plus;
   if (group.kind === "custom") plusCustom(a, c, group);
   else if (group.kind === "repo") plusRepo(a, c, group, mode);
   else plusWorkspace(a, c, group, mode);
+}
+
+// Another mod (Gitr) starts a space in a folder of a published Repo, on a ready Machine. No placement:
+// the space is filed by the usual rules, and the pending entry shows it in the Repo group before git answers.
+function doStart(a, c) {
+  const repo = c.tree().tree.repos.find((r) => r.identity === a.repo);
+  if (!repo) return toast(c.effects, `${String(a.repo ?? "That Repo")} is not a Repo Wranglr knows.`);
+  const mk = mkey(a.machine ?? null);
+  if (!isReady(c.world, mk)) return toast(c.effects, `${mk || "This computer"} is not ready.`);
+  if (typeof a.folder !== "string" || !a.folder) return toast(c.effects, "A space needs a folder to start in.");
+  const machine = machineOfKey(mk);
+  c.effects.push({ type: "start", machine, folder: a.folder, argv: c.config.settings.agent, name: null, worktree: null });
+  addPending(c, { group: "repo:" + repo.identity, sub: null }, { machine, folder: a.folder });
 }
 
 // Revive: each Claude Code agent's session is remembered against its terminal while it runs.
@@ -897,7 +938,7 @@ function doTerminalsBack(a, c) {
 
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
-  select: doSelect, next: doStep, prev: doStep, plus: doPlus,
+  select: doSelect, next: doStep, prev: doStep, plus: doPlus, start: doStart,
   fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings, groupSettings: doGroupSettings,
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,

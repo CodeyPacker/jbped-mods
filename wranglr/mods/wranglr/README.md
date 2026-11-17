@@ -30,7 +30,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 - Right after a space's name are marks for what its agents are doing: `!` for agents that need you, a spinner for working ones and a dot for done ones, each with a count above one. Idle agents show nothing. Hover for the list. Click the marks to go to the most urgent agent's pane.
 - Drag a row onto another row (it lands above, or below when you release on the row's lower half), onto a Group or Subgroup header (it goes to the end), or onto the empty area under the list (it leaves every Group).
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
-- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group), Close group and Settings.
+- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Open in Gitr (Repo groups, when the `gitr` mod is installed), Dismiss (an empty Repo group), Close group and Settings.
 - Close group asks first, then closes every space in the Group and its Subgroups and ends their terminals. Pinned spaces and spaces on a Machine that is away stay open. A Repo group goes with its last space and comes back when a space opens in that Repo. Workspace and Custom groups stay. Right-click a Subgroup for Rename and Remove.
 - "+" on a Group starts a space there: in the Repo's main checkout, in the Workspace home, or in your home folder for a Custom group. Right-click "+" for Open here, New worktree (Repo groups) and Open on a given Machine.
 - A Group's Settings set its Machines in order of preference. A Repo also has its worktree location and the ref new branches start from, and a Workspace its home on each Machine. A Workspace's and a Repo's settings are written to the config file. A Custom group's are kept in Wranglr's state.
@@ -109,6 +109,16 @@ Every command is also in the palette (the `palette` mod).
 Wranglr writes a `<name>.code-workspace` file in each Workspace home, listing the Workspace's Repos found on that Machine.
 
 Its own state (placements, Groups, folds, order, names, pins, open tabs) is in `~/.config/herdr-app/data/wranglr/state.json`.
+
+## For other mods
+
+Wranglr publishes `shared("wranglr.view")` and takes actions through `shared("wranglr.action")`. Send one with `setShared("wranglr.action", { n: (shared("wranglr.action")?.n ?? 0) + 1, action })`. The Wranglr copy in the layout runs each `n` once.
+
+- `wranglr.view.repos`: `[{ identity, name, on: { [machine]: path } }]`, sorted by name. Every Repo with a Repo group (not dismissed) or in a Workspace, and a main checkout on at least one Machine. `on` maps a Machine (`""` is this computer) to the main checkout's path there.
+- `{ type: "start", repo, machine, folder }` starts a space in `folder` on `machine` (`null` or left out: this computer), running `agent`. The space is filed by the usual rules, and shows in the Repo group before git answers. A `repo` not in `repos`, or a Machine that is not ready, gives a warning toast and starts nothing.
+- `{ type: "plus", group: "repo:<identity>", sub: null, mode: "worktree", machine, branch }` makes a worktree for `branch` and starts a space in it, as "New worktree" does. It works for every Repo in `repos`, also one whose Repo group is dismissed or that is only in a Workspace.
+
+"Open in Gitr" opens the `gitr` mod as a popup at the top, with props `{ repo, machine }`: the focused space's Machine when the Repo is cloned there, else the Group's first Machine.
 
 ## Revive
 

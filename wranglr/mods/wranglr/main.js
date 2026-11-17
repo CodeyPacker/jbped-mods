@@ -9,7 +9,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import {
   spaces, machines, panes, agents, focused, run, openOverlay, closeOverlay, props, exec, hc, theme,
-  shared, setShared, watchFolder, window, layout, home, nextCommand,
+  shared, setShared, watchFolder, window, layout, home, nextCommand, readTextFile, appHome,
 } from "herdr";
 import { emptyState, mkey, clonedMap, arrange, act, workspaceHome } from "./model.js";
 import { parseConfig, loadConfig, settingError, groupError, DEFAULT_SETTINGS } from "./config.js";
@@ -172,8 +172,10 @@ export default class Wranglr extends View {
     // Actions sent before this copy started are not ours to run.
     this.handled = shared("wranglr.action")?.n ?? 0;
 
+    this.gitr = false; // the gitr mod is installed: Repo group menus offer "Open in Gitr"
     cx.spawn(async (cx) => {
       await this.reloadConfig();
+      await this.checkGitr();
       this.state = await loadState(emptyState()).catch(() => emptyState());
       this.loaded = true;
       this.tick(cx);
@@ -184,6 +186,7 @@ export default class Wranglr extends View {
     // Refresh only when the refs could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
     cx.timer.every(CONFIG_EVERY, (cx) => cx.spawn(async (cx) => {
+      await this.checkGitr();
       if (await this.reloadConfig()) { this.filesKey = null; this.tick(cx); cx.notify(); }
     }));
     // "wranglr.<command>" in keys.json and the palette.
@@ -198,6 +201,10 @@ export default class Wranglr extends View {
 
   async close() {
     if (!this.dialog && this.saver) await this.saver.flush();
+  }
+
+  async checkGitr() {
+    try { this.gitr = (await readTextFile(appHome() + "/mods/gitr/mod.json")) != null; } catch { this.gitr = false; }
   }
 
   // The config file's text changed: true. A missing file is the defaults.
@@ -349,6 +356,7 @@ export default class Wranglr extends View {
         id: g.id, kind: g.kind, name: g.name, subgroups: g.subgroups.map((x) => ({ id: x.id, name: x.name })), machines: g.machines,
       })),
       focus: focused()?.space ?? null, sort: s.sort, plus: s.plus,
+      repos: this.tree.repos,
     };
     if (JSON.stringify(view) !== JSON.stringify(shared("wranglr.view") ?? null)) setShared("wranglr.view", view);
   }
@@ -474,6 +482,10 @@ export default class Wranglr extends View {
       items.push({ label: "Rename…", input: { title: "Rename group", value: g.name, action: { type: "renameGroup", group: g.id } } });
       items.push({ label: "Remove group", action: { type: "removeCustom", group: g.id } });
     }
+    if (g.kind === "repo" && this.gitr) {
+      const gitr = this.gitrOverlay(g.id.slice(5));
+      if (gitr) items.push({ label: "Open in Gitr", key: "g", icon: "git-branch", overlay: gitr });
+    }
     if (g.can.dismiss) items.push({ label: "Dismiss", action: { type: "dismiss", group: g.id } });
     const n = [...g.rows, ...g.subgroups.flatMap((x) => x.rows)].filter((r) => !r.dim).length;
     if (n) items.push({
@@ -486,6 +498,18 @@ export default class Wranglr extends View {
     });
     items.push({ label: "Settings…", key: "s", dialog: this.groupProps(g) });
     openMenu(items);
+  }
+
+  // Gitr on a Repo, placed as `mod.open gitr` places it. The Machine: the focused space's when the Repo
+  // is cloned there, else the Group's first, else any with a path. Null when the Repo is not published.
+  gitrOverlay(identity) {
+    const repo = this.tree?.repos.find((r) => r.identity === identity);
+    if (!repo) return null;
+    const focus = focused()?.space;
+    const here = focus ? spaces().find((s) => s.id === focus)?.machine ?? null : undefined;
+    const g = this.tree.groups.find((x) => x.id === "repo:" + identity);
+    const mk = here !== undefined && mkey(here) in repo.on ? mkey(here) : g?.machines.find((m) => m in repo.on) ?? Object.keys(repo.on)[0];
+    return { mod: "gitr", kind: "popup", at: "top", offset: 40, width: 860, height: 0.75, props: { repo: identity, machine: mk === "" ? null : mk } };
   }
 
   subMenu(g, s) {
@@ -1495,6 +1519,7 @@ export default class Wranglr extends View {
     if (!item) return;
     if (item.dialog) openOverlay({ mod: "wranglr", kind: "dialog", width: item.width ?? 460, props: item.dialog });
     else if (item.run) run(item.run.name, item.run.args ?? {});
+    else if (item.overlay) openOverlay(item.overlay);
     else if (item.shipped) openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: item.shipped });
     else if (item.input) openInput(item.input);
     else if (item.action) send(item.action);

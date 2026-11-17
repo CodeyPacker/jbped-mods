@@ -503,6 +503,105 @@ test("{clone} expands to the Repo's clone on each Machine, so one pattern works 
   assert.equal(at(null), "C:/dev/arden/.worktrees/foo/frontend");
 });
 
+// Published Repos and actions from other mods
+
+const SEEN_FRONT = { name: "frontend", on: { "": "/d/front" } };
+
+test("repos lists a Repo group, shown or empty, with its main root per Machine", () => {
+  const c = config();
+  const w = world([space("s1")], { repos: { s1: repo(FRONT, "/d/front") } });
+  assert.deepEqual(view(w, c).tree.repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+  const empty = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT } };
+  assert.deepEqual(arrange(world([]), c, empty).repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+});
+
+test("repos lists a Repo only in a Workspace, with no Repo group", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const tree = arrange(world([]), c, emptyState());
+  assert.deepEqual(groupIds(tree), ["ws:Arden"]);
+  assert.deepEqual(tree.repos, [
+    { identity: BACK, name: "backend", on: { "": "/home/me/dev/arden/backend" } },
+    { identity: FRONT, name: "frontend", on: { "": "/home/me/dev/arden/frontend" } },
+  ]);
+});
+
+test("repos leaves out a dismissed Repo group unless a Workspace lists it", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT }, dismissed: [FRONT] };
+  assert.deepEqual(arrange(world([]), config(), s).repos, []);
+  const ws = { name: "W", repos: [FRONT], machines: [], on: {} };
+  assert.deepEqual(arrange(world([]), config({ workspaces: [ws] }), s).repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+});
+
+test("repos gives a Repo on two Machines both paths, sorted by name", () => {
+  const c = config({ repos: MULTI });
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} }, [BACK]: { name: "backend", on: { wsl: "/srv/back" } } } };
+  assert.deepEqual(arrange(world([]), c, s).repos, [
+    { identity: BACK, name: "backend", on: { wsl: "/srv/back" } },
+    { identity: FRONT, name: "frontend", on: { wsl: "/srv/front", "": "/home/me/front" } },
+  ]);
+});
+
+test("repos leaves out a Repo with no path on any Machine", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const ws = { name: "Lone", repos: [BACK], machines: [], on: {} };
+  const tree = arrange(world([]), config({ workspaces: [ws] }), s);
+  assert.deepEqual(groupIds(tree), ["ws:Lone", "repo:" + FRONT]);
+  assert.deepEqual(tree.repos, []);
+});
+
+test("start runs the agent in the folder on the Machine, filed by the Repo's pending entry", () => {
+  const c = config({ settings: { agent: ["claude"] } });
+  const s0 = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT } };
+  const w0 = world([]);
+  const r = run({ type: "start", repo: FRONT, machine: null, folder: "/d/front/.worktrees/x" }, w0, c, s0);
+  assert.deepEqual(r.effects, [{ type: "start", machine: null, folder: "/d/front/.worktrees/x", argv: ["claude"], name: null, worktree: null }]);
+  assert.deepEqual(r.state.pending.map((p) => [p.group, p.sub, p.workspace, p.machine, p.folder]), [["repo:" + FRONT, null, null, null, "/d/front/.worktrees/x"]]);
+  assert.deepEqual(r.state.place, {}, "no manual placement");
+  const w1 = world([space("s1", { folder: "/d/front/.worktrees/x" })]);
+  const { tree, state } = view(w1, c, r.state);
+  assert.deepEqual(rowIds(tree, "repo:" + FRONT), ["s1"], "in its Group before git answers");
+  assert.deepEqual(state.place, {});
+  assert.equal(run({ type: "start", repo: FRONT, folder: "/d/front" }, w0, c, s0).effects[0].machine, null, "no machine is this computer");
+});
+
+test("start on a Machine that is not ready warns and starts nothing", () => {
+  const c = config({ repos: MULTI });
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const w = world([], { machines: [{ name: null, layout: "ready" }, { name: "wsl", layout: "loading" }] });
+  const r = run({ type: "start", repo: FRONT, machine: "wsl", folder: "/srv/front" }, w, c, s);
+  assert.deepEqual(r.effects.map((e) => [e.type, e.level]), [["toast", "warning"]]);
+  assert.deepEqual(r.state.pending, []);
+  assert.equal(run({ type: "start", repo: FRONT, machine: "gone", folder: "/srv/front" }, w, c, s).effects[0].type, "toast", "a Machine not listed is not ready");
+});
+
+test("start for a Repo not published warns and starts nothing", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const w = world([]);
+  for (const repoId of [FRONT, BACK, undefined]) {
+    const r = run({ type: "start", repo: repoId, machine: null, folder: "/d/x" }, w, config(), s);
+    assert.deepEqual(r.effects.map((e) => [e.type, e.level]), [["toast", "warning"]], String(repoId));
+    assert.deepEqual(r.state.pending, []);
+  }
+});
+
+test("worktree plus works for a Workspace-only Repo and a dismissed Repo group, with an explicit Machine", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const w = world([]);
+  const r = run({ type: "plus", group: "repo:" + BACK, sub: null, mode: "worktree", machine: null, branch: "fix" }, w, c);
+  assert.deepEqual(r.effects, [{
+    type: "start", machine: null, folder: "/home/me/dev/arden/backend/.worktrees/fix", argv: null, name: null,
+    worktree: { main: "/home/me/dev/arden/backend", branch: "fix", path: "/home/me/dev/arden/backend/.worktrees/fix", from: null },
+  }]);
+  assert.deepEqual(r.state.pending.map((p) => [p.group, p.machine, p.folder]), [["repo:" + BACK, null, "/home/me/dev/arden/backend/.worktrees/fix"]]);
+  const dismissed = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } }, dismissed: [FRONT] };
+  const listed = config({ repos: MULTI, workspaces: [{ name: "W", repos: [FRONT], machines: [], on: {} }] });
+  const wsl = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: "wsl", branch: "b" }, w, listed, dismissed);
+  assert.equal(wsl.effects[0].folder, "/srv/front/.worktrees/b", "dismissed, still in a Workspace");
+  assert.deepEqual(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: "wsl", branch: "b" }, w, config({ repos: MULTI }), dismissed).effects, [], "dismissed and in no Workspace: not published");
+  assert.deepEqual(run({ type: "plus", group: "repo:" + BACK, sub: "x", mode: "worktree", machine: null, branch: "b" }, w, c).effects, [], "no Subgroups");
+  assert.deepEqual(run({ type: "plus", group: "repo:github.com/org/none", sub: null, mode: "worktree", machine: null, branch: "b" }, w, c).effects, []);
+});
+
 test("plus on a Workspace passes Repos outside the home to Claude as added directories", () => {
   const ws = { name: "Mix", repos: [FRONT, BACK], machines: ["wsl"], on: { wsl: { home: "/srv/mix", paths: { [FRONT]: "/srv/mix/front", [BACK]: "/opt/back" } } } };
   const c = config({ workspaces: [ws], settings: { agent: ["/usr/bin/claude", "--x"] } });
