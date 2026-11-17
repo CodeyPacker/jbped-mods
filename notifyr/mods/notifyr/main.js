@@ -4,35 +4,100 @@
 //   toast  the layout root's "toast": "notifyr". Draws the notification as Herdr's own
 //          toast mod does, and records it. This is the only place that sees every one.
 //   bell   props { bell: true }. A small block for the layout: a bell and the unread count.
-//   list   opened by the bell or by mod.open: the record, newest first.
+//          It also watches where the person goes, to mark entries read.
+//   list   opened by the bell or by mod.open: the record, newest first, with vim keys.
 //
-// The record is the shared value "notifyr.log": [{ id, at, overlay, title, body, level, icon, action }].
+// The record is the shared value "notifyr.log":
+//   [{ id, at, overlay, title, body, level, icon, action, terminal, space, read }]
+// read is null while unread, else { at, how }: "clicked" (the toast), "visited" (the person arrived at its
+// space or terminal), "opened" (from the list), "listed" (seen in the list), "marked" (by hand).
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { checking, closeOverlay, layout, props, run, setShared, shared, theme } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { agents, checking, closeOverlay, focused, layout, panes, props, run, setShared, shared, spaces, theme } from "herdr";
 
 const LOG = "notifyr.log";
-const SEEN = "notifyr.seen";
+const SEEN = "notifyr.seen"; // Only for entries recorded before read was kept per entry.
 const MAX = 200;
 const BODY_MAX = 600;
+const HALF_PAGE = 6;
 const DOT = { error: "blocked", warning: "working", success: "done", info: "accent" };
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const HOW = { clicked: "clicked", visited: "visited", opened: "opened", listed: "seen", marked: "read" };
+const HOW_TIP = {
+  clicked: "You clicked its toast",
+  visited: "You went to its space",
+  opened: "You opened it from this list",
+  listed: "You saw it in this list",
+  marked: "You marked it read",
+};
+const KEYS = [
+  ["j / k", "down / up"], ["g / G", "first / last"], ["ctrl-d / ctrl-u", "half a page"],
+  ["enter", "go to it"], ["r", "read / unread"], ["R", "all read"],
+  ["d", "delete"], ["D", "delete all"], ["u", "unread only"], ["q", "close"],
+];
 
 function entries() {
   const v = shared(LOG);
   return Array.isArray(v) ? v : [];
 }
 
-function seenAt() {
-  return Number(shared(SEEN)) || 0;
+function isRead(e) {
+  if (e.read) return true;
+  return e.read === undefined && e.at <= (Number(shared(SEEN)) || 0);
 }
 
-/** Adds one toast to the record. A toast whose copy starts again (a hot reload) is not added twice. */
+/** Rewrites the record through fn. Writes only when an entry changed or went (fn returns null). */
+function update(fn) {
+  const log = entries();
+  let changed = false;
+  const next = [];
+  for (const e of log) {
+    const r = fn(e);
+    if (r !== e) changed = true;
+    if (r) next.push(r);
+  }
+  if (changed) setShared(LOG, next);
+}
+
+function markRead(match, how) {
+  const at = Date.now();
+  update((e) => (!isRead(e) && match(e) ? { ...e, read: { at, how } } : e));
+}
+
+function spaceOfTab(tab) {
+  return spaces().find((s) => s.tabs.some((x) => x.id === tab))?.id ?? null;
+}
+
+/** The terminal and space a toast's action goes to, when it names one. */
+function target(action) {
+  const a = action?.args ?? {};
+  const str = (v) => (typeof v === "string" && v ? v : null);
+  const terminal = str(a.terminal);
+  let space = str(a.space);
+  if (!space && action?.name?.startsWith("space.")) space = str(a.id);
+  if (!space && action?.name?.startsWith("tab.") && str(a.id)) space = spaceOfTab(a.id);
+  if (!space && str(a.tab)) space = spaceOfTab(a.tab);
+  if (!space && terminal) {
+    space = agents().find((x) => x.address === terminal)?.space ?? null;
+    const pane = space ? null : panes().find((x) => x.terminal === terminal);
+    if (pane) space = spaceOfTab(pane.tab);
+  }
+  if (!space && str(a.pane)) {
+    const pane = panes().find((x) => x.pane === a.pane);
+    if (pane) space = spaceOfTab(pane.tab);
+  }
+  return { terminal, space };
+}
+
+/** Adds one toast to the record and returns its id. A toast whose copy starts again (a hot
+ *  reload) is not added twice. */
 function record(p) {
   const now = Date.now();
   const log = entries();
-  if (log.some((e) => e.overlay === p.overlay && e.title === (p.title ?? "") && now - e.at < 60000)) return;
+  const again = log.find((e) => e.overlay === p.overlay && e.title === (p.title ?? "") && now - e.at < 60000);
+  if (again) return again.id;
+  const action = p.action?.name ? { name: p.action.name, args: p.action.args ?? {} } : null;
   const entry = {
     id: `${now}-${p.overlay ?? ""}`,
     at: now,
@@ -41,9 +106,12 @@ function record(p) {
     body: p.body ? String(p.body).slice(0, BODY_MAX) : "",
     level: p.level ?? "info",
     icon: p.icon ?? null,
-    action: p.action?.name ? { name: p.action.name, args: p.action.args ?? {} } : null,
+    action,
+    ...target(action),
+    read: null,
   };
   setShared(LOG, [entry, ...log].slice(0, MAX));
+  return entry.id;
 }
 
 const two = (n) => String(n).padStart(2, "0");
@@ -75,28 +143,59 @@ function mark(t, e, size) {
 }
 
 export default class Notifyr extends View {
-  init(_props, _cx) {
+  init(_props, cx) {
     const p = props() ?? {};
     const toast = p.title != null || p.body != null || p.level != null;
     this.view = p.bell ? "bell" : toast && !p.list ? "toast" : "list";
-    if (checking()) return;
-    if (this.view === "toast") record(p);
+    this.lastSpace = focused()?.space ?? null;
+    this.lastTerminal = focused()?.terminal ?? null;
     if (this.view === "list") {
-      // What was unread when the list opened stays marked while it is open.
-      this.unreadSince = seenAt();
-      setShared(SEEN, Date.now());
+      this.at = 0;
+      this.onlyUnread = false;
+      this.help = false;
+      this.fresh = new Set();
+      this.scroll = ScrollHandle.new();
+      this.handle = cx.focus_handle();
+      this.handle.focus();
+      cx.timer.after(600, () => this.handle.focus());
+    }
+    if (checking()) return;
+    if (this.view === "toast") this.entry = record(p);
+    if (this.view === "list") {
+      // An entry with nowhere to go is read once the list has shown it. It keeps its mark while the list is open.
+      const plain = (e) => !e.action && !e.space;
+      for (const e of entries()) if (!isRead(e) && plain(e)) this.fresh.add(e.id);
+      markRead(plain, "listed");
     }
   }
 
-  async close(_cx) {
-    // Toasts that arrived while the list was open were read in it.
-    if (this.view === "list" && !checking()) setShared(SEEN, Date.now());
+  /** The person clicked this toast. */
+  touched() {
+    if (this.entry) markRead((e) => e.id === this.entry, "clicked");
+  }
+
+  /** Marks entries read when the person arrives at their space or their terminal. Being there
+   *  already does not count, so an entry marked unread by hand stays unread. */
+  sweep(cx) {
+    if (checking()) return;
+    const f = focused();
+    // An overlay with the keyboard can leave nothing focused. That is not leaving the space.
+    const space = f?.space ?? this.lastSpace;
+    const terminal = f?.terminal ?? this.lastTerminal;
+    const enteredSpace = space !== this.lastSpace ? space : null;
+    const enteredTerminal = terminal !== this.lastTerminal ? terminal : null;
+    this.lastSpace = space;
+    this.lastTerminal = terminal;
+    if (enteredSpace == null && enteredTerminal == null) return;
+    const hit = (e) => (enteredSpace != null && e.space === enteredSpace) || (enteredTerminal != null && e.terminal === enteredTerminal);
+    if (entries().some((e) => !isRead(e) && hit(e))) cx.spawn(async () => markRead(hit, "visited"));
   }
 
   render(cx) {
     const t = theme();
-    if (this.view === "bell") return this.renderBell(t);
     if (this.view === "toast") return this.renderToast(t);
+    this.sweep(cx);
+    if (this.view === "bell") return this.renderBell(t);
     return this.renderList(t);
   }
 
@@ -115,6 +214,7 @@ export default class Notifyr extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click(() => {
+        this.touched();
         if (p.action?.name) run(p.action.name, p.action.args ?? {});
         closeOverlay(p.overlay);
       })
@@ -129,7 +229,7 @@ export default class Notifyr extends View {
             .child(div().flex_1().min_w(0).truncate().tooltip(command).text_size(12).text_color(t.muted).child(command))
             .child(div().id("toast-login-copy").flex_none().px(6).py(3).rounded(4).bg(t.raised)
               .text_size(12).text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
-              .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(command); this.copied = true; cx.notify(); })
+              .on_click((_e, cx) => { cx.stop_propagation(); this.touched(); cx.write_to_clipboard(command); this.copied = true; cx.notify(); })
               .child(this.copied ? "Copied" : "Copy")))),
       );
   }
@@ -137,11 +237,10 @@ export default class Notifyr extends View {
   /** The layout's mark. props { bare: true } drops the status-bar background and top border. */
   renderBell(t) {
     const p = props() ?? {};
-    const seen = seenAt();
     const all = entries();
-    const unread = all.filter((e) => e.at > seen).length;
+    const unread = all.filter((e) => !isRead(e)).length;
     const color = unread ? t.accent : t.muted;
-    const tip = unread ? `${unread} new ${unread === 1 ? "notification" : "notifications"}` : all.length ? "No new notifications" : "No notifications yet";
+    const tip = unread ? `${unread} unread ${unread === 1 ? "notification" : "notifications"}` : all.length ? "No unread notifications" : "No notifications yet";
     return h_flex()
       .id("notifyr-bell")
       .size_full()
@@ -159,17 +258,84 @@ export default class Notifyr extends View {
       .when(unread > 0, (el) => el.child(div().child(unread > 99 ? "99+" : String(unread))));
   }
 
-  renderList(t) {
-    const p = props() ?? {};
+  shownEntries() {
     const log = entries();
+    return this.onlyUnread ? log.filter((e) => !isRead(e) || this.fresh.has(e.id)) : log;
+  }
+
+  closeList() {
+    const id = props()?.overlay;
+    if (id != null) closeOverlay(id);
+  }
+
+  /** Goes where the entry's toast would have gone. One with nowhere to go is only marked read. */
+  go(e) {
+    if (!e) return;
+    markRead((x) => x.id === e.id, "opened");
+    if (!e.action?.name) return;
+    this.closeList();
+    run(e.action.name, e.action.args ?? {});
+  }
+
+  toggleRead(e) {
+    if (!e) return;
+    this.fresh.delete(e.id);
+    const read = isRead(e) ? null : { at: Date.now(), how: "marked" };
+    update((x) => (x.id === e.id ? { ...x, read } : x));
+  }
+
+  listKey(ev, cx) {
+    const rows = this.shownEntries();
+    const last = Math.max(0, rows.length - 1);
+    const m = ev.modifiers ?? {};
+    const k = ev.key;
+    const ks = ev.keystroke;
+    const plain = !m.control && !m.alt && !m.platform;
+    const shift = Boolean(m.shift);
+    if (k === "escape" || (plain && !shift && k === "q")) this.closeList();
+    else if (ks === "ctrl-d") this.at = Math.min(last, this.at + HALF_PAGE);
+    else if (ks === "ctrl-u") this.at = Math.max(0, this.at - HALF_PAGE);
+    else if (!plain) return;
+    else if (k === "?" || (shift && k === "/")) this.help = !this.help;
+    else if (k === "down" || (!shift && k === "j")) this.at = Math.min(last, this.at + 1);
+    else if (k === "up" || (!shift && k === "k")) this.at = Math.max(0, this.at - 1);
+    else if (k === "G" || (shift && k === "g") || k === "end") this.at = last;
+    else if (k === "g" || k === "home") this.at = 0;
+    else if (k === "pagedown") this.at = Math.min(last, this.at + HALF_PAGE * 2);
+    else if (k === "pageup") this.at = Math.max(0, this.at - HALF_PAGE * 2);
+    else if (k === "enter" || (!shift && k === "o")) this.go(rows[this.at]);
+    else if (k === "R" || (shift && k === "r")) { this.fresh.clear(); markRead(() => true, "marked"); }
+    else if (k === "r") this.toggleRead(rows[this.at]);
+    else if (k === "D" || (shift && k === "d")) { setShared(LOG, []); this.at = 0; }
+    else if (k === "d" || (!shift && k === "x")) {
+      const e = rows[this.at];
+      if (e) update((x) => (x.id === e.id ? null : x));
+    }
+    else if (!shift && k === "u") { this.onlyUnread = !this.onlyUnread; this.at = 0; }
+    else return;
+    this.scroll.scroll_to_item(this.at);
+    cx.stop_propagation();
+    cx.notify();
+  }
+
+  renderList(t) {
+    const all = entries();
+    const rows = this.shownEntries();
+    const unread = all.filter((e) => !isRead(e)).length;
     const now = Date.now();
-    const since = this.unreadSince ?? seenAt();
     const wired = layout()?.toast === "notifyr";
-    const close = () => { if (p.overlay != null) closeOverlay(p.overlay); };
+    this.at = Math.max(0, Math.min(this.at, rows.length - 1));
+
+    const button = (id, label, on) =>
+      div().id(id).flex_none().px(8).py(3).rounded(4).bg(t.raised)
+        .text_size(12).text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
+        .on_click((_e, cx) => { on(); cx.notify(); })
+        .child(label);
 
     const row = (e, i) => {
-      const act = Boolean(e.action?.name);
-      const unread = e.at > since;
+      const read = isRead(e);
+      const marked = !read || this.fresh.has(e.id);
+      const how = e.read?.how;
       return h_flex()
         .id(`notifyr-row-${e.id ?? i}`)
         .flex_none()
@@ -179,25 +345,44 @@ export default class Notifyr extends View {
         .items_start()
         .border_b(1)
         .border_color(t.border)
-        .when(act, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click(() => { close(); run(e.action.name, e.action.args ?? {}); }))
+        .when(i === this.at, (el) => el.bg(t.selected))
+        .when(Boolean(e.action?.name), (el) => el.cursor_pointer())
+        .hover((s) => s.bg(t.hover))
+        .on_click((_ev, cx) => { this.at = i; this.go(e); cx.notify(); })
         .child(h_flex().flex_none().h(18).w(16).items_center().justify_center().child(mark(t, e, 8)))
         .child(
           v_flex()
             .flex_1()
             .min_w(0)
             .gap(2)
-            .child(div().font_semibold().text_size(13).text_color(t.foreground).child(e.title || "(no title)"))
-            .when(Boolean(e.body), (el) => el.child(div().text_size(12).text_color(t.muted).child(e.body))),
+            .child(div().font_semibold().text_size(13).text_color(marked ? t.foreground : t.muted).child(e.title || "(no title)"))
+            .when(Boolean(e.body), (el) => el.child(div().text_size(12).text_color(marked ? t.muted : t.dim).child(e.body))),
         )
         .child(
-          h_flex().flex_none().h(18).gap(6).items_center()
-            .when(unread, (el) => el.child(div().size(6).rounded(3).flex_none().bg(t.accent)))
-            .child(div().text_size(11).text_color(unread ? t.accent : t.dim).tooltip(stamp(e.at)).child(ago(e.at, now))),
+          v_flex().flex_none().items_end().gap(2)
+            .child(
+              h_flex().h(18).gap(6).items_center()
+                .when(marked, (el) => el.child(div().size(6).rounded(3).flex_none().bg(t.accent)))
+                .child(div().text_size(11).text_color(marked ? t.accent : t.dim).tooltip(stamp(e.at)).child(ago(e.at, now))),
+            )
+            .when(read && !marked && Boolean(how), (el) => el.child(
+              div().text_size(10.5).text_color(t.dim).tooltip(`${HOW_TIP[how] ?? "Read"}, ${stamp(e.read.at)}`).child(HOW[how] ?? "read"),
+            )),
         );
     };
 
+    const key = (k, what) => h_flex().gap(5).child(div().text_color(t.accent).child(k)).child(div().text_color(t.dim).child(what));
+    const legend = this.help
+      ? h_flex().flex_none().flex_wrap().px(14).py(8).gap_x(16).gap_y(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
+          .children(KEYS.map(([k, what]) => key(k, what)))
+      : h_flex().flex_none().h(28).px(14).gap(14).items_center().border_t(1).border_color(t.border).text_size(11)
+          .child(key("j/k", "move")).child(key("enter", "go")).child(key("r", "read")).child(key("d", "delete")).child(key("u", "unread only")).child(key("?", "keys"));
+
     return v_flex()
       .id("notifyr-list")
+      .track_focus(this.handle)
+      .on_key_down((ev, cx) => this.listKey(ev, cx))
+      .on_click(() => this.handle.focus())
       .size_full()
       .bg(t.popover)
       .text_color(t.foreground)
@@ -211,22 +396,20 @@ export default class Notifyr extends View {
           .border_b(1)
           .border_color(t.border)
           .child(div().font_semibold().text_size(13).child("Notifications"))
-          .child(div().flex_1().text_size(11.5).text_color(t.dim).child(log.length ? String(log.length) : ""))
-          .when(log.length > 0, (el) => el.child(
-            div().id("notifyr-clear").flex_none().px(8).py(3).rounded(4).bg(t.raised)
-              .text_size(12).text_color(t.foreground).cursor_pointer().hover((s) => s.bg(t.hover))
-              .on_click((_e, cx) => { setShared(LOG, []); cx.notify(); })
-              .child("Clear"),
-          )),
+          .child(div().flex_1().text_size(11.5).text_color(t.dim).child(
+            all.length ? `${unread} unread of ${all.length}${this.onlyUnread ? ", showing unread" : ""}` : ""))
+          .when(unread > 0, (el) => el.child(button("notifyr-all-read", "Mark all read", () => { this.fresh.clear(); markRead(() => true, "marked"); })))
+          .when(all.length > 0, (el) => el.child(button("notifyr-clear", "Clear", () => { setShared(LOG, []); this.at = 0; }))),
       )
       .when(!wired, (el) => el.child(
         div().flex_none().px(14).py(8).border_b(1).border_color(t.border).text_size(11.5).text_color(t.working)
           .child('This layout does not record notifications. Set "toast": "notifyr" on its root.'),
       ))
       .child(
-        log.length
-          ? v_flex().id("notifyr-rows").flex_1().min_h(0).overflow_y_scrollbar().children(log.map(row))
-          : v_flex().flex_1().items_center().justify_center().text_size(12).text_color(t.dim).child("No notifications yet."),
-      );
+        rows.length
+          ? v_flex().id("notifyr-rows").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.scroll).children(rows.map(row))
+          : v_flex().flex_1().items_center().justify_center().text_size(12).text_color(t.dim).child(all.length ? "Nothing unread." : "No notifications yet."),
+      )
+      .child(legend);
   }
 }

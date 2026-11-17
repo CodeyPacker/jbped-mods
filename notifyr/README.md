@@ -7,9 +7,11 @@ A log of every notification Herdr shows, with a bell that counts the new ones an
 ## Features
 
 - **Every toast is kept.** Herdr's own notices and every mod's are recorded as they appear, with the time they arrived.
+- **Read state per entry.** An entry is read once you click its toast or go to its space, and the list says which. The rest stay unread.
 - **A list to read them.** Newest first, with the level, the title and the whole body. A toast cuts a long body off. The list wraps it.
-- **A bell with a count.** A small mark you place anywhere in your layout. It shows how many arrived since you last opened the list.
-- **Entries still act.** Click an entry to run what its toast would have run, such as going to the agent that needed you.
+- **A bell with a count.** A small mark you place anywhere in your layout. It shows how many entries are unread.
+- **Entries still act.** Open an entry to run what its toast would have run, such as going to the agent that needed you.
+- **Vim keys.** `j` and `k` move, `enter` goes, `r` marks read or unread, `d` deletes, `u` shows unread only.
 - **History that lasts.** The last 200 are kept across restarts. Clear empties the list.
 - **Toasts look the same.** Notifications are drawn as Herdr draws them, including the Copy button on a machine login notice.
 
@@ -37,11 +39,17 @@ Or by hand:
 
 ## Use
 
-Click the bell or press the key to open the list. Click an entry to run its action. Click Clear to empty it.
+Click the bell or press the key to open the list. Click an entry to go to it. The buttons mark everything read or clear the list.
 
 | Key | Action |
 |---|---|
 | `ctrl-shift-i` | open the list, again closes it |
-| `escape` | close |
+| `j` / `k` | down / up |
+| `enter` | go to the entry |
+| `r` | mark read or unread |
+| `d` | delete the entry |
+| `u` | show unread only |
+| `?` | every key |
+| `q` or `escape` | close |
 
-Props, the stored format and the limits: [`mods/notifyr/README.md`](mods/notifyr/README.md).
+Every key, the read rules, props, the stored format and the limits: [`mods/notifyr/README.md`](mods/notifyr/README.md).
