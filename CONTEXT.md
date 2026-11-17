@@ -77,3 +77,20 @@ The state where a Service's container runs from a different Source than the one 
 **Main checkout**:
 The original clone of a Repo, which its worktrees hang off. It can have any branch checked out.
 _Avoid_: main, main branch
+
+### Gitr
+
+**Gitr**:
+The mod that shows one Repo's Branches and Worktrees on one Machine, with the spaces working on them, and acts on them.
+
+**Worktree**:
+A checkout of a Repo on one Machine: its Main checkout or a linked worktree. Each has one directory and at most one Branch checked out.
+_Avoid_: checkout, working copy
+
+**Branch**:
+A local branch of a Repo on one Machine, or a remote branch that no local branch tracks.
+_Avoid_: ref, head
+
+**Occupied**:
+A Worktree is Occupied when a space's first terminal is in its directory. A Branch is Occupied when its Worktree is.
+_Avoid_: active, in use, open
