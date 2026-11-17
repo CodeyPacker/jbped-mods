@@ -11,6 +11,7 @@ export function emptyState() {
     v: 1, place: {}, started: {}, custom: [], subs: {}, folded: {},
     order: { groups: [], spaces: {} }, dismissed: [], seen: {}, snap: {},
     names: {}, titles: {}, naming: {}, pending: [], active: {},
+    pinned: [], open: {}, closing: [],
   };
 }
 
@@ -342,8 +343,13 @@ function buildTree(ctx) {
   const members = {};
   for (const row of ctx.rows) members[row.id] = memberOf(ctx, row);
   const folded = (key) => !!ctx.state.folded[key];
+  // Pinned spaces show above the Groups, in the order pinned. Their Group keeps their place for the unpin.
+  const byId = new Map(ctx.rows.map((r) => [r.id, r]));
+  const pins = (Array.isArray(ctx.state.pinned) ? ctx.state.pinned : []).filter((id, i, all) => byId.has(id) && all.indexOf(id) === i);
+  const isPinned = new Set(pins);
   const groups = candidateGroups(ctx, members).map((g) => {
-    const mine = ctx.rows.filter((r) => members[r.id].group === g.id);
+    const all = ctx.rows.filter((r) => members[r.id].group === g.id);
+    const mine = all.filter((r) => !isPinned.has(r.id));
     const subgroups = (ctx.state.subs[g.id] || []).map((s) => ({
       id: s.id, name: s.name, folded: folded(g.id + "/" + s.id),
       rows: sortRows(ctx, mine.filter((r) => members[r.id].sub === s.id), g.id + "/" + s.id),
@@ -355,14 +361,15 @@ function buildTree(ctx) {
     group.machines = groupMachines(ctx, group);
     group.can = {
       plus: g.kind === "custom" || group.machines.length > 0,
-      dismiss: g.kind === "repo" && mine.length === 0,
+      dismiss: g.kind === "repo" && all.length === 0,
     };
     return group;
   });
   const sorted = sortGroups(ctx, groups);
-  const loose = sortRows(ctx, ctx.rows.filter((r) => members[r.id].group === ""), "");
-  const order = [...sorted.flatMap(allRows), ...loose].filter((r) => !r.dim).map((r) => r.id);
-  return { tree: { groups: sorted, loose, order }, members };
+  const loose = sortRows(ctx, ctx.rows.filter((r) => members[r.id].group === "" && !isPinned.has(r.id)), "");
+  const pinned = pins.map((id) => byId.get(id));
+  const order = [...pinned, ...sorted.flatMap(allRows), ...loose].filter((r) => !r.dim).map((r) => r.id);
+  return { tree: { pinned, groups: sorted, loose, order }, members };
 }
 
 export function arrange(world, config, state) {
@@ -437,12 +444,15 @@ function syncPending(c, known) {
 function forget(s, id) {
   for (const map of [s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active]) delete map[id];
   for (const key of Object.keys(s.order.spaces)) s.order.spaces[key] = s.order.spaces[key].filter((x) => x !== id);
+  s.pinned = s.pinned.filter((x) => x !== id);
+  delete s.open[id];
 }
 
 function syncForget(c) {
   const { world, s } = c;
   const live = new Set(world.spaces.map((sp) => sp.id));
-  const ids = new Set([s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active].flatMap(Object.keys));
+  const ids = new Set([s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active, s.open].flatMap(Object.keys));
+  for (const id of s.pinned) ids.add(id);
   for (const list of Object.values(s.order.spaces)) for (const id of list) ids.add(id);
   for (const id of ids) {
     if (live.has(id)) continue;
@@ -491,9 +501,23 @@ function syncNaming(c) {
   }
 }
 
+// A closed Repo group goes once its last space has: until then its spaces keep it shown.
+function syncClosing(c) {
+  const { world, s } = c;
+  const kept = [];
+  for (const entry of s.closing) {
+    if (world.spaces.some((sp) => s.snap[sp.id]?.identity === entry.identity)) {
+      const age = (entry.age || 0) + 1;
+      if (age < PENDING_LIMIT) kept.push({ ...entry, age });
+    } else if (!s.dismissed.includes(entry.identity)) s.dismissed.push(entry.identity);
+  }
+  s.closing = kept;
+}
+
 function doSync(a, c) {
   const known = new Set(Object.keys(c.prev.snap || {}));
   syncSpaces(c);
+  syncClosing(c);
   syncPending(c, known);
   syncForget(c);
   syncPlacements(c);
@@ -517,7 +541,40 @@ function rowKnown(c, id) {
 function doMove(a, c) {
   if (!rowKnown(c, a.space) || !targetValid(c, a.group, a.sub)) return false;
   c.s.place[a.space] = { group: a.group, sub: a.group === "" ? null : a.sub ?? null };
+  // Putting a pinned space somewhere takes its pin off.
+  c.s.pinned = c.s.pinned.filter((x) => x !== a.space);
   return true;
+}
+
+// Pins a space above the Groups, or takes the pin off. `on` left out flips it.
+function doPin(a, c) {
+  if (!rowKnown(c, a.space)) return;
+  const has = c.s.pinned.includes(a.space);
+  const on = typeof a.on === "boolean" ? a.on : !has;
+  if (on && !has) c.s.pinned.push(a.space);
+  else if (!on) c.s.pinned = c.s.pinned.filter((x) => x !== a.space);
+}
+
+// Shows or hides a space's tabs under its row.
+function doExpand(a, c) {
+  if (!rowKnown(c, a.space)) return;
+  if (c.s.open[a.space]) delete c.s.open[a.space];
+  else c.s.open[a.space] = true;
+}
+
+// Closes every space in a Group, its Subgroups included. Pinned spaces and spaces on a Machine
+// that is away are not in it. A Repo group goes with its last space.
+function doCloseGroup(a, c) {
+  const group = c.tree().tree.groups.find((g) => g.id === a.group);
+  if (!group) return;
+  const ids = allRows(group).filter((r) => !r.dim).map((r) => r.id);
+  if (ids.length) c.effects.push({ type: "close", ids });
+  if (group.kind !== "repo") return;
+  const identity = a.group.slice(5);
+  const others = c.ctx().rows.some((r) => !ids.includes(r.id) && c.tree().members[r.id]?.group === a.group);
+  if (others) return;
+  if (!ids.length) { if (!c.s.dismissed.includes(identity)) c.s.dismissed.push(identity); }
+  else if (!c.s.closing.some((e) => e.identity === identity)) c.s.closing.push({ identity });
 }
 
 function containerRows(tree, key) {
@@ -787,6 +844,7 @@ const HANDLERS = {
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,
   dismiss: doDismiss, name: doName, named: doNamed,
+  pin: doPin, expand: doExpand, closeGroup: doCloseGroup,
 };
 
 export function act(action, world, config, state) {

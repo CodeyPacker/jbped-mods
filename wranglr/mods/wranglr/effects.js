@@ -15,6 +15,7 @@ async function makeWorktree(worktree, machine) {
 async function runOne(e, { dispatch, askName, saveSetting, saveSettings, saveGroup }) {
   switch (e.type) {
     case "select": run("space.select", { id: e.id }); return;
+    case "close": for (const id of e.ids) run("space.close", { id, confirmed: true }); return;
     case "rename": run("space.rename", { id: e.id, name: e.name }); return;
     case "start": {
       if (e.worktree && !(await makeWorktree(e.worktree, e.machine ?? null))) return;

@@ -95,7 +95,7 @@ test("mkey, emptyState and clonedMap", () => {
   assert.equal(mkey(null), "");
   assert.equal(mkey("wsl"), "wsl");
   const s = emptyState();
-  assert.deepEqual(Object.keys(s).sort(), ["active", "custom", "dismissed", "folded", "names", "naming", "order", "pending", "place", "seen", "snap", "started", "subs", "titles", "v"].sort());
+  assert.deepEqual(Object.keys(s).sort(), ["active", "closing", "custom", "dismissed", "folded", "names", "naming", "open", "order", "pending", "pinned", "place", "seen", "snap", "started", "subs", "titles", "v"].sort());
   const state = { ...s, seen: { [FRONT]: { name: "frontend", on: { "": "/old/frontend", wsl: "/w/frontend" } } } };
   const c = config({ workspaces: [ARDEN], repos: { [BACK]: { machines: [], on: { wsl: { path: "/w/backend" } } } } });
   assert.deepEqual(clonedMap(c, state), {
@@ -751,4 +751,119 @@ test("act never mutates frozen inputs and returns the identical state when nothi
   const moved = run({ type: "move", space: "s1", group: "", sub: null }, w, c, s);
   assert.notEqual(moved.state, s);
   assert.equal(s.place.s1, undefined);
+});
+
+// Pins, tabs and closing a Group
+
+const HM = repo("github.com/o/hm", "/r/hm");
+function pinWorld(extra = {}) {
+  return world([space("a", { folder: "/r/hm" }), space("b", { folder: "/r/hm" }), space("c")], { repos: { a: HM, b: HM, c: null }, ...extra });
+}
+
+test("a pinned space leaves its Group for the pinned list and returns on unpin", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  assert.deepEqual(r.tree.pinned, []);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  let tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["b"]);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), ["a"]);
+  assert.deepEqual(tree.order, ["b", "a", "c"]);
+  r = run({ type: "pin", space: "c" }, w, c, r.state);
+  tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["b", "c"]);
+  assert.deepEqual(looseIds(tree), []);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["c"]);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), ["a", "b"]);
+});
+
+test("pin with `on` sets it, an unknown space is ignored, and a Group whose only space is pinned stays", () => {
+  const w = world([space("a", { folder: "/r/hm" })], { repos: { a: HM } }), c = config();
+  let r = view(w, c);
+  assert.equal(run({ type: "pin", space: "zz" }, w, c, r.state).state, r.state);
+  r = run({ type: "pin", space: "a", on: true }, w, c, r.state);
+  assert.equal(run({ type: "pin", space: "a", on: true }, w, c, r.state).state, r.state);
+  const tree = arrange(w, c, r.state);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), []);
+  assert.equal(group(tree, "repo:github.com/o/hm").can.dismiss, false);
+  r = run({ type: "pin", space: "a", on: false }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+});
+
+test("moving or dropping a pinned space takes its pin off, and a closed space's pin and open tabs are forgotten", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, { a: true });
+  r = run({ type: "move", space: "a", group: "", sub: null }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  r = run({ type: "drop", space: "a", group: "repo:github.com/o/hm", sub: null, before: null }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  const gone = world([space("b", { folder: "/r/hm" }), space("c")], { repos: { b: HM, c: null } });
+  r = view(gone, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  assert.deepEqual(r.state.open, {});
+});
+
+test("expand flips a space's tabs open and shut", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, { a: true });
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, {});
+  assert.equal(run({ type: "expand", space: "zz" }, w, c, r.state).state, r.state);
+});
+
+test("closing a Repo group closes its spaces, Subgroups included, and the group goes with the last one", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "addSub", group: "repo:github.com/o/hm", name: "Review" }, w, c, r.state);
+  const sub = r.state.subs["repo:github.com/o/hm"][0].id;
+  r = run({ type: "move", space: "b", group: "repo:github.com/o/hm", sub }, w, c, r.state);
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["a", "b"] }]);
+  // One space still open: the group stays.
+  const half = world([space("b", { folder: "/r/hm" }), space("c")], { repos: { b: HM, c: null } });
+  r = view(half, c, r.state);
+  assert.ok(group(r.tree, "repo:github.com/o/hm"));
+  const none = world([space("c")], { repos: { c: null } });
+  r = view(none, c, r.state);
+  assert.equal(group(r.tree, "repo:github.com/o/hm"), undefined);
+  assert.deepEqual(r.state.closing, []);
+  // A new space in that Repo brings the group back.
+  r = view(world([space("d", { folder: "/r/hm" })], { repos: { d: HM } }), c, r.state);
+  assert.deepEqual(rowIds(r.tree, "repo:github.com/o/hm"), ["d"]);
+});
+
+test("closing a group leaves pinned spaces open and keeps a Repo group that still has one", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["a"] }]);
+  assert.deepEqual(r.state.closing, []);
+});
+
+test("closing a Custom group closes its spaces and keeps the group, an empty Repo group is dismissed, an unknown one is ignored", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "addCustom", name: "Mine" }, w, c, r.state);
+  const gid = "custom:" + r.state.custom[0].id;
+  r = run({ type: "move", space: "c", group: gid, sub: null }, w, c, r.state);
+  r = run({ type: "closeGroup", group: gid }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["c"] }]);
+  assert.ok(group(arrange(w, c, r.state), gid));
+  assert.deepEqual(run({ type: "closeGroup", group: "custom:nope" }, w, c, r.state).effects, []);
+  const empty = world([space("c")], { repos: { c: null } });
+  r = view(empty, c, r.state);
+  assert.ok(group(r.tree, "repo:github.com/o/hm"));
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, empty, c, r.state);
+  assert.deepEqual(r.effects, []);
+  assert.equal(group(arrange(empty, c, r.state), "repo:github.com/o/hm"), undefined);
 });

@@ -86,3 +86,8 @@ test("settings and group save through the config module, and a failed save says 
   assert.match(notes[0].body, /^Not saved: the Workspace "W" is not in wranglr.json\.$/);
   assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s1" } }], "the effects after it still run");
 });
+
+test("close closes each space without asking again", async () => {
+  await runEffects([{ type: "close", ids: ["s1", "s2"] }], noDeps);
+  assert.deepEqual(runCalls, [{ name: "space.close", args: { id: "s1", confirmed: true } }, { name: "space.close", args: { id: "s2", confirmed: true } }]);
+});
