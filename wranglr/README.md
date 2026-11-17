@@ -23,7 +23,7 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 
 - git. `claude` is used only to name a space whose branch has too many words.
 - It replaces the `spaces` block in your layout and rebinds `alt-1` to `alt-9`, `ctrl-shift-pagedown` and `ctrl-shift-pageup`.
-- It runs git, reads and writes `~/.config/herdr-app/wranglr.json`, keeps its state in `~/.config/herdr-app/data/wranglr/`, and writes a `<name>.code-workspace` file in each Workspace home. No network of its own.
+- It runs git, reads and writes `~/.config/herdr-app/wranglr.json`, keeps its state in `~/.config/herdr-app/data/wranglr/`, reads Claude Code's session files under `~/.claude/` for an agent's current folder, and writes a `<name>.code-workspace` file in each Workspace home. No network of its own.
 
 ## Install
 

@@ -17,6 +17,7 @@ import { makeResolver } from "./repos.js";
 import { loadState, makeSaver } from "./store.js";
 import { writeWorkspaceFile } from "./workspacefile.js";
 import { runEffects } from "./effects.js";
+import { agentDir } from "./agentdir.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -138,6 +139,10 @@ export default class Wranglr extends View {
     this.busy = {}; // pane -> an agent working or a program in front of its shell
     this.ready = {}; // machine -> its layout was readable at the last look
     this.at = {}; // space -> its where() at the last look
+    this.real = {}; // space -> the folder its Claude Code agent is in now, when it could be told
+    this.realAt = {}; // space -> when that was last asked
+    this.realBusy = new Set(); // spaces being asked about
+    this.agentWas = {}; // agent -> its status at the last look
     this.watching = new Set(); // local repos' git folders
     this.pressed = null; // { kind: "row" | "group" | "sub", id, group?, sub? } while the button is down
     this.over = null; // the drop target under the pointer: { kind, id, group?, sub?, below }
@@ -206,6 +211,7 @@ export default class Wranglr extends View {
   checkNew(cx) {
     const now = Date.now();
     const sp = spaces();
+    this.refreshReal(now, sp, cx);
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
     this.tick(cx);
@@ -492,7 +498,7 @@ export default class Wranglr extends View {
   due(now, sp, ps) {
     // Moved there: what it knew of that place may be old.
     const at = {};
-    for (const s of sp) at[s.id] = where(s, ps);
+    for (const s of sp) at[s.id] = this.whereOf(s, ps);
     const keys = new Set(Object.values(at).filter((k) => JSON.parse(k)[1]));
     const due = new Set([...keys].filter((k) => !(k in this.git)));
     for (const [id, k] of Object.entries(at)) if (this.at[id] && this.at[id] !== k && keys.has(k)) due.add(k);
@@ -518,6 +524,41 @@ export default class Wranglr extends View {
       }
     }
     return due;
+  }
+
+  // Where a space's git is read: the folder its Claude Code agent works in when that is known,
+  // else where Herdr says its first terminal is.
+  whereOf(s, ps) {
+    return this.real[s.id] ? JSON.stringify([s.machine ?? null, this.real[s.id]]) : where(s, ps);
+  }
+
+  // Asks where each space's first Claude Code agent is working: once when it is first seen, when
+  // its turn ends, and after the fallback time while the window is in front.
+  refreshReal(now, sp, cx) {
+    const first = new Map(), was = {};
+    for (const a of agents()) {
+      was[a.address] = a.status;
+      if (a.app === "claude-code" && !first.has(a.space)) first.set(a.space, a);
+    }
+    for (const id of Object.keys(this.real)) if (!first.has(id)) delete this.real[id];
+    for (const id of Object.keys(this.realAt)) if (!first.has(id)) delete this.realAt[id];
+    const active = window().active;
+    for (const [id, a] of first) {
+      const ended = this.agentWas[a.address] === "working" && a.status !== "working";
+      const last = this.realAt[id];
+      if (this.realBusy.has(id) || (last !== undefined && !ended && !(active && now - last > FALLBACK))) continue;
+      const space = sp.find((s) => s.id === id);
+      if (!space) continue;
+      this.realAt[id] = now;
+      this.realBusy.add(id);
+      cx.spawn(async (cx) => {
+        const dir = await agentDir(a.address, space.machine ?? null);
+        this.realBusy.delete(id);
+        // Not told this time: what it showed stays.
+        if (dir && this.real[id] !== dir) { this.real[id] = dir; cx.notify(); }
+      });
+    }
+    this.agentWas = was;
   }
 
   // `key` and the other places in its repo (a commit there moves their ahead/behind).
@@ -744,7 +785,7 @@ export default class Wranglr extends View {
     const { t, live, ps } = d;
     const w = live.get(r.id) ?? r.space;
     const name = w?.name ?? r.name;
-    const g = w ? this.git[where(w, ps)] ?? null : null;
+    const g = w ? this.git[this.whereOf(w, ps)] ?? null : null;
     const marks = r.dim || !d.agents.get(r.id)?.length ? null : this.agentMarks(r.id, d.agents.get(r.id), d);
     const tabs = r.dim ? [] : (w?.tabs ?? []).filter((x) => !x.settled);
     const open = !r.dim && !!this.state.open?.[r.id];

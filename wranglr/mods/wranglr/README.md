@@ -110,6 +110,7 @@ Its own state (placements, Groups, folds, order, names, pins, open tabs) is in `
 
 ## Limits
 
+- The branch on a row is read where Herdr says the space's first terminal is. A Claude Code agent changes folder inside itself, so for a space whose first agent is Claude Code, Wranglr reads the agent's real folder from Claude Code's own files (`~/.claude/sessions/` and the session's transcript under `~/.claude/projects/`) on the space's Machine. It asks when the agent is first seen, when its turn ends and once a minute. These files are private to Claude Code. When they are missing or change shape, the row shows the terminal's folder as before. Other agents always show the terminal's folder. On this computer under Windows it is not read, since it needs `sh`. Grouping does not use it.
 - The keys only reach Wranglr while the sidebar is shown. With the sidebar hidden they do nothing.
 - Herdr's own `space.next` and `space.prev` follow Herdr's order, not the list's. Use the Wranglr commands instead.
 - Wranglr never reorders Herdr's spaces. Other mods that list spaces show Herdr's order.
