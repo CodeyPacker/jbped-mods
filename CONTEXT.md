@@ -90,3 +90,7 @@ _Avoid_: checkout, working copy
 **Branch**:
 A local branch of a Repo on one Machine, or a remote branch that no local branch tracks. It is checked out in the Main checkout, in one Worktree, or nowhere.
 _Avoid_: ref, head
+
+**Occupied**:
+A Main checkout or Worktree is Occupied by each space whose first terminal is in its directory. A space occupies one of them at most.
+_Avoid_: active, in use, open
