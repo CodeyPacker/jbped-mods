@@ -1,6 +1,6 @@
 // Wayfindr: one Profile's Boards and Pull Requests, in its own "wayfindr" block in the layout's
 // "work-body" row. tabs-plus hides the terminals and the side panel while it shows.
-// Keys as CodeyPacker's mods and Dockr have them (keys.js): ctrl-shift-g shows Wayfindr and takes the keyboard,
+// Keys as CodeyPacker's mods and Dockr have them (keys.js): ctrl-shift-j shows Wayfindr and takes the keyboard,
 // j/k move, enter opens, q closes a layer, ? lists every key, and a legend shows the few that apply now.
 // Board data comes from the cache at once, then refreshes in the background on show and every
 // 30 minutes while shown. Nothing runs while hidden (D25).
@@ -468,7 +468,7 @@ export default class Wayfindr extends View {
     if (req.kind === "keys") this.keysCommand(cx);
   }
 
-  // The key (ctrl-shift-g): holding the keyboard a moment ago, it hides Wayfindr; else it takes the keyboard.
+  // The key (ctrl-shift-j): holding the keyboard a moment ago, it hides Wayfindr; else it takes the keyboard.
   // Wayfindr's own key section (mod:wayfindr) hides it while it holds the keyboard; this covers that section missing,
   // when the key's popup has just taken the keyboard off Wayfindr.
   keysCommand(cx) {

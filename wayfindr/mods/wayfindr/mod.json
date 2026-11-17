@@ -5,7 +5,7 @@
   "overlay": { "kind": "popup", "at": "top", "offset": 0, "width": 1, "height": 1, "frame": "none" },
   "palette": [
     { "title": "Wayfindr: Open", "command": "layout.show", "args": { "id": "wayfindr" }, "about": "Show Wayfindr over the terminals" },
-    { "title": "Wayfindr: Toggle", "command": "mod.open", "args": { "name": "wayfindr" }, "about": "Show Wayfindr and give it the keyboard (ctrl-shift-g). Again hides it. j/k move, enter opens, q closes, ? lists keys" },
+    { "title": "Wayfindr: Toggle", "command": "mod.open", "args": { "name": "wayfindr" }, "about": "Show Wayfindr and give it the keyboard (ctrl-shift-j). Again hides it. j/k move, enter opens, q closes, ? lists keys" },
     { "title": "Wayfindr: Close", "command": "layout.hide", "args": { "id": "wayfindr" }, "about": "Hide Wayfindr and give the terminals back" },
     { "title": "Wayfindr: Switch Profile", "command": "wayfindr.profile", "about": "Show the next profile" },
     { "title": "Wayfindr: Refresh", "command": "wayfindr.refresh", "about": "Reload the configuration and data" }

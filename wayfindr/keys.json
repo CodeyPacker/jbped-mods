@@ -1,8 +1,8 @@
 {
   "global": {
-    "ctrl-shift-g": "mod.open:wayfindr"
+    "ctrl-shift-j": "mod.open:wayfindr"
   },
   "mod:wayfindr": {
-    "ctrl-shift-g": "wayfindr.close"
+    "ctrl-shift-j": "wayfindr.close"
   }
 }
