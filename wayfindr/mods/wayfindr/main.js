@@ -21,6 +21,7 @@ import { groupFiles, viewedKey, applyViewed, threadsOn, unplacedThreads, barePat
 import { COMMENTS_DIR, parseComments, commentsOn, coveredRows, openAt, extendOpen, saveComment, removeComment, linesOf, rowOf, verdictsFor, verdictLabel, canPost, toReview, confirmText } from "./prcomments.js";
 import { newItems, toastsFor } from "./background.js";
 import { byColumn, byRepo, initials, trackColumns, can, repoFilter, moveTarget, NO_COLUMN } from "./providers/contract.js";
+import { panesFile, parsePanes, serializePanes, addPane, prunePanes, tabIdsOf, recordedPanes, remakePlan } from "./panes.js";
 import { cacheFile, parseCache, serializeCache, cachedBoard, withBoard, cachedPrs, withPrs, prsKey, formatAge, isShown, due, POLL_MS } from "./cache.js";
 import { PR_CACHE_DIR, prCacheFile, parsePrCache, serializePrCache, detailStale, prunePrKeys } from "./prcache.js";
 import { keyAction, keyHints, coreHints, RESERVED } from "./keys.js";
@@ -56,6 +57,8 @@ const diffRowsOf = new WeakMap(); // a PrDetail file -> { rows, longest }, so a 
 const tint = (c) => (/^#[0-9a-f]{6}$/i.test(String(c)) ? `${c}1f` : null);
 
 const configPath = () => `${appHome()}/data/wayfindr.json`;
+// Review panes that come back without props (#30): a copy that may be one asks, one copy re-makes them.
+const ORPHAN = "wayfindr.orphan", REMAKE = "wayfindr.remake";
 // Wranglr's config: its worktree rule is the default Worktree Placement when Wranglr is set up.
 const wranglrPath = () => `${appHome()}/wranglr.json`;
 
@@ -361,6 +364,9 @@ export default class Wayfindr extends View {
     this.lastBackground = null;
     this.pendingView = null; // { view, boardId, until }: where the last toast's click lands
     if (this.paneFor) return this.initPane(cx);
+    this.orphanSeen = null; // the last wayfindr.orphan this copy looked at
+    this.lookForOrphans(cx);
+    cx.timer.after(500, (cx) => this.remakeIfAsked(cx));
     this.reload(cx);
     // Reads the layout only (due() gates requests), often enough that a show from anywhere is noticed.
     // Redraws on a show, and once a minute while shown (the "Updated" age).
@@ -368,6 +374,7 @@ export default class Wayfindr extends View {
     cx.timer.every(2_000, (cx) => {
       const was = this.hidden;
       this.takeRequest(cx);
+      this.remakeIfAsked(cx);
       if (this.watch(cx) && (was || Date.now() - drawn >= 60_000)) { drawn = Date.now(); cx.notify(); }
     });
     cx.spawn(async (cx) => {
@@ -2409,9 +2416,62 @@ export default class Wayfindr extends View {
         if (spot?.wayfindr) return;
         if (spot?.terminal) {
           run("pane.split", { pane: spot.terminal, direction: "right", mod: "wayfindr", props: { pr: { account: accountId, pr } } });
+          const tab = panes().find((p) => p.pane === spot.terminal)?.tab;
+          if (tab) await this.updatePanes((rec) => addPane(rec, tab, { space: name, account: accountId, pr, at: Date.now() }));
           return;
         }
       }
+    });
+  }
+
+  // panes.json (#30), read-modify-write with compare-and-swap as saveCache. Best effort.
+  async updatePanes(update) {
+    const path = panesFile(appHome());
+    for (let i = 0; i < 2; i++) {
+      let cur = null;
+      try { cur = await readTextFile(path); } catch { /* unreadable: start over */ }
+      try { await writeTextFile(path, serializePanes(update(parsePanes(cur))), cur); return; } catch { /* stale snapshot */ }
+    }
+  }
+
+  // A copy started without pr or overlay props is the main copy or a Review pane that lost its props in a
+  // restart; it can't tell which. When panes() lists a Wayfindr pane in a tab panes.json recorded, it asks
+  // for a re-make. Panes on another machine can show up late, so it looks for 20 s.
+  lookForOrphans(cx) {
+    cx.spawn(async (cx) => {
+      let rec;
+      try { rec = parsePanes(await readTextFile(panesFile(appHome()))); } catch { return; }
+      if (!Object.keys(rec.panes).length) return;
+      for (let i = 0; i < 20; i++) {
+        if (recordedPanes(rec, panes()).length) { setShared(ORPHAN, { n: Date.now() }); return; }
+        await cx.sleep(1000);
+      }
+    });
+  }
+
+  // Every non-pane copy runs this; the wayfindr.remake claim lets one act per ask. It closes the Wayfindr
+  // panes in recorded tabs and splits each again with its recorded props, so a re-made pane has its props
+  // again. Records whose tab is gone are pruned. A second ask within 10 s of a re-make is only marked.
+  remakeIfAsked(cx) {
+    const o = shared(ORPHAN);
+    if (!o?.n || o.n === this.orphanSeen) return;
+    this.orphanSeen = o.n;
+    const done = shared(REMAKE);
+    if (done?.n === o.n) return;
+    const me = `${Date.now()}-${Math.random()}`;
+    const recent = done?.at && Date.now() - done.at < 10_000;
+    setShared(REMAKE, { n: o.n, by: me, at: recent ? done.at : Date.now() });
+    if (recent) return;
+    cx.spawn(async (cx) => {
+      await cx.sleep(150);
+      if (shared(REMAKE)?.by !== me) return; // another copy claimed it
+      let rec;
+      try { rec = parsePanes(await readTextFile(panesFile(appHome()))); } catch { return; }
+      const plan = remakePlan(rec, spaces(), panes());
+      await this.updatePanes((r) => prunePanes(r, tabIdsOf(spaces())));
+      // Splits first, closes last: this copy may be one of the panes it closes.
+      for (const step of plan) run("pane.split", step.split);
+      for (const step of plan) for (const pane of step.close) run("pane.close", { pane });
     });
   }
 
@@ -2993,7 +3053,7 @@ export default class Wayfindr extends View {
   render(cx) {
     if (this.passing) return div();
     if (this.hidden && !this.paneFor) this.watch(cx); // just shown: refresh in the background
-    if (!this.paneFor) this.takeRequest(cx);
+    if (!this.paneFor) { this.takeRequest(cx); this.remakeIfAsked(cx); }
     const t = theme();
     const pane = Boolean(this.paneFor);
     // The handle still answers "focused" in the render after a press elsewhere or a close, so `gone` says so (D9).
