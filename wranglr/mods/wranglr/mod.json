@@ -11,6 +11,7 @@
     { "title": "Wranglr: Pin space", "command": "wranglr.pin", "about": "Pin the focused space above the Groups, or take its pin off" },
     { "title": "Wranglr: Show tabs", "command": "wranglr.tabs", "about": "Show or hide the focused space's tabs under its row" },
     { "title": "Wranglr: Spaces or Agents", "command": "wranglr.agents", "about": "Switch the sidebar between its Spaces and Agents lists" },
+    { "title": "Wranglr: Keys", "command": "wranglr.keys", "about": "Give the sidebar the keyboard: j/k move, enter opens, ? lists the keys" },
     { "title": "Wranglr: Fold group", "command": "wranglr.fold", "about": "Fold or unfold the focused space's Group" },
     { "title": "Wranglr: Next sort", "command": "wranglr.sort", "about": "Recent, Kind, A-Z, Manual" },
     { "title": "Wranglr: Group settings", "command": "wranglr.group", "about": "Machines, worktree rules or homes of the focused space's Group" },

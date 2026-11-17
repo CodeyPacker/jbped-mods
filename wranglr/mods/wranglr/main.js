@@ -158,6 +158,9 @@ export default class Wranglr extends View {
     this.cursor = null; // the key of the row the keys are on
     this.reveal = false; // scroll the cursor's row into view at the next draw
     this.help = false; // every key is listed, after "?"
+    this.wanted = false; // wranglr.keys asked for the keyboard and Herdr's "focus" has not come yet
+    this.popup = undefined; // the pane under the window when a key opened a popup over the list
+    this.back = null; // the pane the keyboard came from
     try { if (localStorage.getItem("wranglr.tab") === "agents") this.tab = "agents"; } catch {}
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
@@ -399,8 +402,17 @@ export default class Wranglr extends View {
     const focus = focused()?.space ?? null;
     const n = /^select:?(\d+)$/.exec(c);
     if (n) this.dispatch({ type: "select", index: Number(n[1]) }, cx);
-    // Herdr handed this copy the keyboard (pane.go), or a key bound to wranglr.focus asked for it.
-    else if (c === "focus") { this.cursor = null; this.reveal = true; this.handle.focus(); }
+    else if (c === "keys") this.grabKeys(cx);
+    // Herdr handed this copy the keyboard. Asked for (wranglr.keys), or back after a popup over the
+    // list closed: take it. Reached by pane.go alone: send it back, so pane.go stops at the last pane.
+    else if (c === "focus") {
+      const popup = this.popup;
+      this.popup = undefined;
+      if (this.wanted) { this.wanted = false; this.cursor = null; this.reveal = true; this.handle.focus(); }
+      // The popup chose nothing: the pane under the window is the one it opened over.
+      else if (popup !== undefined && popup === (focused()?.pane ?? null)) this.handle.focus();
+      else run("pane.go", { direction: "right" });
+    }
     else if (c === "next" || c === "prev") this.dispatch({ type: c }, cx);
     else if (c === "fold") this.dispatch({ type: "foldFocused" }, cx);
     else if (c === "sort") this.dispatch({ type: "sort", value: null }, cx);
@@ -467,7 +479,32 @@ export default class Wranglr extends View {
   }
 
   // The keyboard goes back to the pane beside the sidebar.
-  leaveKeys() { run("pane.go", { direction: "right" }); }
+  leaveKeys() {
+    this.popup = undefined;
+    run("pane.go", { direction: "right" });
+    if (this.back) run("pane.focus", { pane: this.back });
+    this.back = null;
+  }
+
+  // A key bound to wranglr.keys. Only Herdr moves the keyboard off a terminal, with pane.go, one
+  // step at a time: step left until its "focus" arrives. The pane left behind gets it back.
+  grabKeys(cx) {
+    if (this.wanted || this.handle.is_focused()) return;
+    this.back = focused()?.pane ?? null;
+    this.popup = undefined;
+    this.wanted = true;
+    cx.spawn(async (cx) => {
+      for (let i = 0; i < 8 && this.wanted; i++) {
+        run("pane.go", { direction: "left" });
+        await cx.sleep(80);
+      }
+      this.wanted = false;
+      cx.notify();
+    });
+  }
+
+  // A key opened a popup over the list: Herdr's "focus" comes when it closes.
+  popupOpened() { this.popup = focused()?.pane ?? null; }
 
   onKey(e, cx) {
     const nav = this.nav, k = e.keystroke;
@@ -490,10 +527,10 @@ export default class Wranglr extends View {
     else if (k === "n") {
       // A space in the cursor's Group, as its + starts one. Outside a Group: a plain new space.
       const g = over && this.tree.groups.find((x) => x.id === over.group);
-      if (g?.can.plus) this.plus(g, over.sub, cx);
+      if (g?.can.plus) { if (g.kind === "repo" && this.config.settings.plus === "worktree") this.popupOpened(); this.plus(g, over.sub, cx); }
       else this.newSpace();
     }
-    else if (k === "f") run("mod.open", { name: "picker" });
+    else if (k === "f") { this.popupOpened(); run("mod.open", { name: "picker" }); }
     else if (k === "c") {
       if (over) { this.dispatch({ type: "fold", group: over.group, sub: over.sub }, cx); this.cursor = over.key; this.reveal = true; }
     }
