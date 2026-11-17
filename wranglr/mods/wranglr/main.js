@@ -464,10 +464,10 @@ export default class Wranglr extends View {
   keyHelp(t) {
     const box = v_flex().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim);
     if (!this.help) return box.child(div().truncate().child("j/k move · enter open · ? keys"));
-    // One job per key here. h/l and enter also fold a header, as c does.
+    // One job per key here. enter also folds a header, as c does.
     const keys = [
       ["Move"], ["j/k", "down, up"], ["g/G", "top, bottom"],
-      ["Spaces"], ["enter", "open it"], ["h/l", "hide, show its tabs"], ["n", "new space here"], ["f", "find a space"],
+      ["Spaces"], ["enter", "open it"], ["t", "show or hide its tabs"], ["n", "new space here"], ["f", "find a space"],
       ["Groups"], ["c", "fold or open this group"], ["C", "fold or open all groups"],
       ["Sidebar"], ["s/a", "Spaces list, Agents list"], ["esc", "back to the terminal"], ["?", "hide these keys"],
     ];
@@ -510,7 +510,6 @@ export default class Wranglr extends View {
     const nav = this.nav, k = e.keystroke;
     const i = nav.findIndex((x) => x.key === this.cursor), it = nav[i];
     const to = (n) => { if (nav.length) { this.cursor = nav[Math.max(0, Math.min(nav.length - 1, n))].key; this.reveal = true; } };
-    const toKey = (key) => { if (nav.some((x) => x.key === key)) { this.cursor = key; this.reveal = true; } };
     const head = it?.kind === "group" || it?.kind === "sub";
     const fold = () => this.dispatch({ type: "fold", group: it.group, sub: it.sub }, cx);
     // The header the cursor is on or under: a row's Subgroup or Group, a tab's through its space.
@@ -546,15 +545,13 @@ export default class Wranglr extends View {
       else if (it?.kind === "tab") { run("space.select", { id: it.space }); run("tab.select", { id: it.tab }); this.leaveKeys(); }
       else if (it?.kind === "agent") run("pane.focus", { pane: it.pane });
     }
-    else if (k === "l" || k === "right") {
-      if (head && it.folded) fold();
-      else if (it?.kind === "row" && !it.open && it.tabs > 1) this.dispatch({ type: "expand", space: it.space }, cx);
-      else if (head || it?.open) to(i + 1);
-    }
-    else if (k === "h" || k === "left") {
-      if (head && !it.folded) fold();
-      else if (it?.kind === "row" && it.open) this.dispatch({ type: "expand", space: it.space }, cx);
-      else if (it?.parent) toKey(it.parent);
+    else if (k === "t") {
+      // On a tab: its space's tabs close and the cursor goes up to the space.
+      const row = it?.kind === "tab" ? byKey(it.parent) : it;
+      if (row?.kind === "row" && (row.open || row.tabs > 1)) {
+        this.dispatch({ type: "expand", space: row.space }, cx);
+        this.cursor = row.key; this.reveal = true;
+      }
     }
     else return;
     cx.stop_propagation();
