@@ -9,7 +9,7 @@ Herdr's Agents list with Claude Code's in-process subagents nested under the ses
 - **Subagent rows.** Each in-process subagent (Claude Code's Agent tool) shows its description under its parent. Herdr's own list nests only subagents started with `hc run`.
 - **Live state.** A spinner while the subagent works. The row goes when it finishes.
 - **Click to open.** Click a subagent to open its view in its Claude Code session. Click the parent to go back to `main`.
-- **Safe clicks.** When Claude Code's screen is not what the mod expects, it shows a warning and presses nothing.
+- **Safe clicks.** It presses Enter only when Claude Code's screen shows the right subagent selected. Otherwise it shows a warning.
 - **Every platform.** The same on macOS, Linux, Windows and Windows with agents in WSL, with no hook to install.
 
 ## Needs
