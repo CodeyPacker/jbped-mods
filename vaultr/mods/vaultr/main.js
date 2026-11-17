@@ -310,6 +310,7 @@ export default class Vaultr extends View {
       else if (k === "r") this.start(this.vault, cx);
       else if (k === "o") { if (this.note) openExternal(`obsidian://open?path=${encodeURIComponent(`${this.vault}/${this.note.path}`)}`); }
       else if (k === "escape" && this.query) this.search.set_value("");
+      else if (k === "escape" && this.narrow() && this.listShown && this.note) this.listShown = false;
       else return;
     }
     cx.stop_propagation(); cx.notify();
@@ -336,7 +337,14 @@ export default class Vaultr extends View {
   }
 
   list(t) {
+    // In a narrow copy the list covers the note, so it carries the way back to it.
+    const back = this.narrow() && this.note;
     return v_flex().h_full().border_color(t.border).bg(t.chrome)
+      .when(Boolean(back), (el) => el.child(h_flex().id("vaultr-return").flex_none().h(32).px(10).gap(8).items_center().border_b(1).border_color(t.border)
+        .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { this.listShown = false; this.handle.focus(); cx.notify(); })
+        .child(div().flex_none().child("←"))
+        .child(div().min_w(0).truncate().child(`Back to ${stem(this.note.path)}`))))
       .child(h_flex().flex_none().h(30).mx(8).my(6).px(8).gap(6).items_center().rounded(6).border(1)
         .border_color(this.typing ? t.accent : t.border).bg(t.background)
         .child(Input.new(this.search).flex_1().text_size(12.5).text_color(t.foreground))

@@ -21,7 +21,7 @@ Two columns on `background`, 13px text.
   - Footer, 24px high, 11px `dim`: the key hints at the left, "N notes · change vault" at the right.
 - **Folder form**, in place of both columns when no vault is set or after "change vault": centered, "Choose your Obsidian vault" (or "Change vault") in 16px semibold, one `muted` line, a path field with a "Use" button, "Browse…" below (and "Cancel" when changing), and an error line in `blocked`.
 
-Narrower than 620px there is one column: the list or the note.
+Narrower than 620px there is one column: the list or the note. The list then has a 32px row above the search box, "← Back to <note name>" in `muted` with a 1px `border` line below, which shows the note again.
 
 ## How it behaves
 

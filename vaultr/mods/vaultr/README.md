@@ -33,7 +33,7 @@ All three are in the palette as "Vaultr: Open", "Vaultr: Open in a tab" and "Vau
 
 A palette entry or a key runs one command, so the pair has to come from a mod. "Vaultr: Open in the side panel" sends `tabs-plus.vaultr`, which a tab bar mod named `tabs-plus` must handle by running those two commands. `vault.svg` in this folder is an icon for its button. The palette also has "Vaultr: Change vault" (`vaultr.vault`) and "Vaultr: Reload" (`vaultr.reload`), which act on the copy that is showing.
 
-Narrower than 620px, the list and the note take turns: opening a note hides the list, and `b` or the ☰ button brings it back.
+Narrower than 620px, the list and the note take turns: opening a note hides the list, and `b` or the ☰ button brings it back. To return to the note without choosing another, click "← Back to <note>" above the search box, or press `b` or `escape`.
 
 Vaultr opens on the note it last showed in that vault, and remembers which folders were open.
 
