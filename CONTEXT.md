@@ -84,13 +84,9 @@ _Avoid_: main, main branch
 The mod that shows one Repo's Branches and Worktrees on one Machine, with the spaces working on them, and acts on them.
 
 **Worktree**:
-A checkout of a Repo on one Machine: its Main checkout or a linked worktree. Each has one directory and at most one Branch checked out.
+A linked worktree of a Repo on one Machine, in its own directory apart from the Main checkout. The Main checkout is not a Worktree.
 _Avoid_: checkout, working copy
 
 **Branch**:
-A local branch of a Repo on one Machine, or a remote branch that no local branch tracks.
+A local branch of a Repo on one Machine, or a remote branch that no local branch tracks. It is checked out in the Main checkout, in one Worktree, or nowhere.
 _Avoid_: ref, head
-
-**Occupied**:
-A Worktree is Occupied when a space's first terminal is in its directory. A Branch is Occupied when its Worktree is.
-_Avoid_: active, in use, open
