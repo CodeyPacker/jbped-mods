@@ -1,0 +1,180 @@
+# Brunr
+
+A side panel for Herdr that lists Bruno Collections as a tree, runs their Requests with the Bruno CLI and shows each Response in a pane. It reads and runs. It never edits a Collection.
+
+This file is the reference. What the mod offers and how to install it is in the page one folder up.
+
+## Config
+
+`brunr.json` in the Herdr app home (`~/.config/herdr-app/brunr.json`). With no file, Brunr reads Bruno desktop's default workspace and nothing else. It lives in the app home so it never travels with the mod folder.
+
+```json
+{
+  "workspace": "/home/dev/.config/bruno/default-workspace/workspace.yml",
+  "collections": [
+    { "path": "C:/dev/shop/api-collection" },
+    { "machine": "wsl", "path": "/home/dev/shop/collections" },
+    { "machine": "buildbox", "path": "/srv/shop/api-collection" }
+  ]
+}
+```
+
+- `workspace`: the path of a `workspace.yml` on this computer. Optional. It replaces the default workspace path.
+- `collections`: a list of entries, each with a `path` and an optional `machine`.
+- `machine`: the name of a Herdr Machine that holds the Collection. Leave it out for this computer.
+- `path`: a Collection root, or a folder whose direct child folders are Collection roots. It is a path on that Machine, and Brunr does not translate a path between Machines.
+
+A bad entry is left out and a notice in the panel names it. A file that is not valid JSON gives the defaults and a notice with the parse error.
+
+## Where Collections come from
+
+1. Bruno desktop's workspace file. The default path is `<home>/AppData/Roaming/bruno/default-workspace/workspace.yml` on Windows, `<home>/Library/Application Support/bruno/default-workspace/workspace.yml` on macOS and `<home>/.config/bruno/default-workspace/workspace.yml` elsewhere. Its Collection paths may be relative to the workspace folder. These Collections are always on this computer.
+2. The entries of `brunr.json`, after the workspace ones.
+
+A Collection listed twice (same Machine and same root) shows once. A Collection is a folder holding `opencollection.yml` (the YAML format) or `bruno.json` (the bru format). A Collection shows under its own name, else its folder's name. When the Collections sit on more than one Machine, each Machine gets a heading, and "This computer" is the name for this one.
+
+The tree stays current in two ways:
+
+- Collections on this computer are watched, and a change in the folder reloads that Collection.
+- Collections on another Machine are read again every 30 seconds.
+
+The refresh button, the palette entry "Brunr: Reload" and the `brunr.reload` command read `brunr.json`, the workspace, every Collection and the CLI check again.
+
+Brunr reads only the files it needs from a Collection: the config file, and the Request, folder and Environment files of the Collection's format (`.yml` or `.bru`). Dot files, dot folders and `node_modules` are never listed or read, so `.env` is never opened. It reads at most 2000 files per Collection.
+
+## Environments and secrets
+
+An Environment is a file in the Collection. Its name is the file name without the extension, which is what `--env` takes.
+
+- The Environment chip on a Collection row, the `e` key and the row menu pick the Environment of that Collection. "No Environment" is a choice.
+- Until a choice is made, or when the chosen Environment no longer exists, the Collection's default Environment is used.
+- The choice is remembered per Collection.
+
+A Global environment is a file in the `environments` folder beside the workspace's `workspace.yml`. Brunr shows a "Global environment" row above the workspace's Collections when that folder has any. One choice per workspace applies to all of its Collections, and a Run passes `--global-env` and `--workspace-path`. Collections that came from `brunr.json` get no Global environment.
+
+Secrets:
+
+- The CLI cannot read secrets stored in Bruno desktop.
+- Change a secret variable to a normal variable whose value is `{{process.env.NAME}}`, and put the value in the Collection's `.env`. Bruno desktop reads that too.
+- Brunr warns on an Environment that still has secret variables. The warning shows on the chip, in the picker and in the panel's footer, and names the variables.
+- Brunr reads only variable names from Environments. It never reads a `.env` file. The CLI reads it during a Run.
+
+## Runs
+
+A Run is one `bru run` on the Collection's Machine, started with the Collection root as the working directory:
+
+```text
+bru run [path] [-r] [--env NAME] [--global-env NAME --workspace-path DIR] --reporter-json FILE
+```
+
+- A Request Run passes the Request file's path.
+- A folder Run passes the folder's path and `-r`.
+- A Collection Run passes no path.
+- On Windows, `bru.cmd` is started on this computer.
+
+Rules:
+
+- A Request Run times out after 60 seconds, and a folder or Collection Run after 10 minutes. A timed-out Run shows "The Run timed out."
+- One Run goes at a time across the whole mod. Run buttons and keys do nothing while a Run is in progress, and the tooltip says so.
+- A Run cannot be cancelled.
+- A Request Run starts at once. A folder or Collection Run first asks `Run 4 Requests in "Products" against local?` in Herdr's confirm dialog. Enter runs and Esc cancels. A folder with no Requests shows a toast and runs nothing.
+- Runs are off for a Machine where `bru` does not start. At start and on reload Brunr runs `bru --version` and `node --version` on each Machine, with a 20 second timeout. A notice then gives the step: install Node.js first when it is missing, else `npm i -g @usebruno/cli`. It has a Copy button.
+- Each Run writes the CLI's JSON report to a file and deletes it after reading it. On this computer the file is `data/brunr/run-*.json` in the app home. On another Machine it is `/tmp/brunr-*.json`.
+- A report left behind by a timed-out Run is deleted at the next Run. The panel also deletes `run-*.json` files left by an earlier session when it starts.
+
+A Run's output goes to the Response pane of the focused tab. The pane is reused when the tab has one. Otherwise it opens to the right of the focused pane, or in a new tab when no pane has focus.
+
+## The Response pane
+
+A Run of one Request shows:
+
+- A top line with the Request's name, method and URL, then the status with its text, the time and the size.
+- Four views: Response, Headers (with the count), Timeline and Tests (passed over total). The Tests label turns red when anything failed.
+- Response is a read-only editor with syntax colours for JSON, HTML and XML. A body over 400000 characters is cut.
+- Timeline shows the Request as it was sent: resolved URL, headers and body, then the status and time.
+- Tests lists each assertion and each script test with its error text.
+
+A folder or Collection Run adds:
+
+- A summary line with the number of Requests, passed, failed and skipped, and the total time.
+- A list of Responses, each with a pass or fail mark, method, name and status. A Request with no response shows `ERR`. The first failed Response is selected.
+- The list sits left of the views when the pane is 720px wide or more, and above them when it is narrower.
+
+When the CLI sends no Request, or fails before it starts, the pane shows its message in a box. Open file shows a Request's file in the pane, read only.
+
+Everything in the pane is held in memory and goes when the pane closes.
+
+## Keys
+
+`ctrl-shift-u` (in `keys.json`):
+
+- Anywhere, it shows the panel if it is hidden and gives it the keyboard (`mod.open:brunr`).
+- While the panel holds the keyboard, it hides the panel and hands the keyboard back (`brunr.hide`, in the `mod:brunr` section).
+
+With the keyboard in the panel, keys with `ctrl`, `alt` or the platform key are not used by it:
+
+| Key | Action |
+|---|---|
+| `up` / `k` | previous row |
+| `down` / `j` | next row |
+| `home` / `end` | first / last row |
+| `left` / `h` | fold the Collection or folder, else go to the parent row |
+| `right` / `l` | unfold, else go to the first child |
+| `enter` | run a Request, fold or unfold a Collection or folder, pick on the Global environment row |
+| `r` | run the Request, folder or Collection |
+| `e` | pick the Environment (or the Global environment on its row) |
+| `o` | open the Request's file in the Response pane |
+| `b` | open Bruno desktop (Collections on this computer only) |
+| `esc` / `q` | hand the keyboard back to the pane on the left |
+
+In a picker or menu: `up`, `down`, `enter` and `esc`.
+
+Mouse:
+
+- Click selects a row. Double-click runs a Request or folds a Collection or folder.
+- The arrow folds. The play button on a hovered or selected Collection or folder row runs it.
+- The Environment chip opens the picker.
+- Right-click opens the row's menu: Run, Open file, Run folder or Run Collection, Environment, Global environment, Open Bruno (this computer only), Copy URL, Copy path and Reload.
+
+Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`), "Brunr: Keys" and "Brunr: Reload".
+
+## State
+
+- The panel keeps in its localStorage: which Collections and folders are unfolded, the Environment chosen per Collection (keyed by Machine and root) and the Global environment chosen per workspace file. Herdr keeps it in store files under `data/brunr/` in the app home.
+- Collections start unfolded and folders folded until you change them.
+- Runs and Responses are never written to disk. The report file is the only exception, and it lives for the length of one Run.
+- Shared state holds `brunr.tick`, a counter that makes the other copies of the mod draw again, and `brunr.request`. `brunr.request` holds the last choice a popup made for the panel: a kind, a row key (Machine, Collection path and the path inside it), an action, or an Environment or Global environment name. It never holds Response data or secrets.
+
+## Limits
+
+- Requests with prompt variables are skipped by the CLI.
+- OAuth2 works only for the `client_credentials` and `password` grants.
+- A YAML file the CLI cannot parse aborts the whole Run, for example an unquoted value containing a colon followed by a space. Brunr's own reader is more forgiving, so the tree can show a Request the CLI will not run.
+- A file Brunr cannot read adds to a count on the Collection row, and the footer names the first five.
+- There is no cancel for a Run.
+- Secrets stored in Bruno desktop are empty in a CLI Run (see Environments and secrets).
+- On Windows Brunr starts `bru.cmd`, so the npm global folder must be on the PATH Herdr was started with. Without it the panel shows the missing CLI notice.
+- Bruno desktop cannot be told to open a specific Request, so "Open Bruno" only starts the app. Brunr looks for it at `<home>/AppData/Local/Programs/Bruno/Bruno.exe` on Windows, `/Applications/Bruno.app` on macOS and `bruno` on the PATH elsewhere.
+- `"place": "right"` did not dock the panel by itself on the Herdr version tested, which is why the page's Install adds a layout block.
+- Collections on another Machine are listed and read with `sh` and `cat`, so that Machine needs both.
+- A Global environment applies only to Collections listed in the workspace file.
+- Paths are used as the Machine gives them. A Collection on WSL is not the same Collection as the same folder seen from Windows.
+
+## How it works
+
+One mod draws every part. Herdr starts a copy of it for the panel, for each Response pane, for each popup and for the key's pass-through, and the props tell them apart.
+
+- `main.js`: the entry. Chooses the copy by its props, loads and watches Collections, handles keys, clicks and Runs.
+- `panel.js`: draws the tree, the notices and the footer.
+- `response.js`: draws the Response pane.
+- `popup.js`: draws the Environment pickers and the row menu.
+- `tree.js`: the rows, the key map, the block finder and the confirmation and secret texts. No Herdr calls.
+- `store.js`: saved state, the in-memory Run store and the popup-to-panel asks.
+- `sources.js`: reads `brunr.json` and the workspace and finds Collection roots. Loads one Collection.
+- `machine.js`: every `exec`, `readTextFile`, `watchFolder` and `fs` call. Lists and reads files, checks the CLI, runs `bru`, reads and deletes reports and starts Bruno desktop.
+- `plan.js`: turns a target and the chosen Environments into the `bru run` arguments. No Herdr calls.
+- `report.js`: turns the CLI's JSON report, exit code and output into Responses. No Herdr calls.
+- `parser.js` and `yaml.js`: read Collection files in both formats and a small YAML subset.
+- `icons/`: the panel's SVG icons.
+
+Tests are in `brunr/tests/` in the repo and run with `sh brunr/tests/run.sh`.
