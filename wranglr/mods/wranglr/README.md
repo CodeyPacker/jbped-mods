@@ -10,7 +10,7 @@ There are three kinds of Group:
 
 Any Group can have Subgroups, such as Working and Review. Spaces in no Group are listed last.
 
-Each row keeps the shipped look: the colored avatar, the name, and the repo, branch and ahead/behind counts when they differ from the name. A space on another Machine shows that Machine's name in a small chip. A space on a Machine that is not reachable stays in its place, dimmed. Below the list, each Machine that is not connected gets one line, with Connect for a rebuilt Machine and Copy for its login command.
+Each row keeps the shipped look: the colored avatar, the name, and the repo, branch and ahead/behind counts when they differ from the name. In a Repo group the row leaves the repo out and says the branch, or the worktree's folder when no branch is checked out there. A space on another Machine shows that Machine's name in a small chip. A space on a Machine that is not reachable stays in its place, dimmed. Below the list, each Machine that is not connected gets one line, with Connect for a rebuilt Machine and Copy for its login command.
 
 New spaces are named `<ticket id> <one to four words>` from their branch. When the branch has too many words, a small model call (`claude -p --model haiku`) picks the words from the agent's first title.
 

@@ -622,7 +622,7 @@ export default class Wranglr extends View {
       ]);
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
       const [ahead, behind] = counts.code === 0 ? counts.stdout.trim().split(/\s+/).map(Number) : [0, 0];
-      const info = { name, branch: branch.code === 0 ? branch.stdout.trim().replace(/^refs\/heads\//, "") : "(detached)", ahead, behind, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git` };
+      const info = { name, branch: branch.code === 0 ? branch.stdout.trim().replace(/^refs\/heads\//, "") : "(detached)", ahead, behind, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git`, tree: base(top) };
       this.git[key] = info;
       if (!on) this.watch(repo, cx);
     } catch {
@@ -707,11 +707,14 @@ export default class Wranglr extends View {
 
   // Only what's unusual, after the name: "herdr · spike ↑2 ↓1". The repo or
   // branch goes when the name already says it, and master/main go: nearly every space is on one.
-  gitTail(g, name, t) {
-    const raw = g.branch ?? "detached";
+  // In a Repo group the header already names the repo, so the row says only the branch,
+  // or the worktree's folder when nothing is checked out by name there.
+  gitTail(g, name, t, inRepo) {
+    const none = !g.branch || g.branch === "(detached)";
+    const raw = none && inRepo && g.linked && g.tree ? g.tree : g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
     const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
-    const repo = same(g.name) ? "" : g.name;
+    const repo = inRepo || same(g.name) ? "" : g.name;
     const where = [repo, branch].filter(Boolean).join(" · ");
     return h_flex()
       .flex_1()
@@ -759,9 +762,9 @@ export default class Wranglr extends View {
       .child(this.avatar(r.id, name, t))
       .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(name))
       .when(Boolean(r.machine), (el) => el.child(this.chip(r.machine, t)))
-      .child(g && !r.dim ? this.gitTail(g, name, t) : div().flex_1())
-      .when(Boolean(toggle), (el) => el.child(toggle))
-      .when(Boolean(marks), (el) => el.child(marks));
+      .child(g && !r.dim ? this.gitTail(g, name, t, !!at?.group?.startsWith("repo:")) : div().flex_1())
+      .when(Boolean(marks), (el) => el.child(marks))
+      .when(Boolean(toggle), (el) => el.child(toggle));
     const el = v_flex().relative().id(`space-${r.id}`).px(8).h(30).flex_none().justify_center().rounded(8);
     if (r.dim) return el.opacity(0.5).child(content);
     const on = !!w?.active;
