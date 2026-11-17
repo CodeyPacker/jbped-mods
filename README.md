@@ -21,3 +21,7 @@ Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/jbped/
 ```
 
 Or follow the by-hand steps on the mod's page.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE). A folder with its own license file keeps that license for the code it came with: `agents-plus` and `wranglr` started from Herdr's mods (Apache-2.0).
