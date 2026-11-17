@@ -275,6 +275,42 @@ export default class Vaultr extends View {
     cx.notify();
   }
 
+  // A breadcrumb's folder: shown in the list, opened, with the keyboard on it.
+  showFolder(dir, cx) {
+    for (const d of [...ancestors(`${dir}/x`)]) this.open.add(d);
+    save(`open:${this.vault}`, [...this.open]);
+    if (this.query) this.search.set_value("");
+    this.query = "";
+    this.listShown = true;
+    this.sel = `d:${dir}`;
+    this.rows = rows(this.index, this.open, "");
+    const at = this.rows.findIndex((r) => r.key === this.sel);
+    if (at >= 0) this.listScroll.scroll_to_item(at);
+    this.handle.focus();
+    cx.notify();
+  }
+
+  // The note's folders, then its name. A narrow copy shows the last folder only.
+  crumbs(t) {
+    const n = this.note;
+    const bar = h_flex().flex_1().min_w(0).gap(4).items_center().overflow_hidden();
+    if (!n) return bar.child(div().font_semibold().child("Vaultr"));
+    let dirs = ancestors(n.path);
+    const cut = this.narrow() && dirs.length > 1;
+    if (cut) dirs = dirs.slice(-1);
+    const sep = () => div().flex_none().text_size(11).text_color(t.dim).child("›");
+    return bar
+      .when(cut, (el) => el.child(div().flex_none().text_color(t.dim).child("…")).child(sep()))
+      .children(dirs.flatMap((dir) => [
+        div().id(`vaultr-crumb-${dir}`).flex_none().max_w(160).truncate().px(4).rounded(4).text_size(12).text_color(t.muted)
+          .hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => this.showFolder(dir, cx))
+          .child(dir.slice(dir.lastIndexOf("/") + 1)),
+        sep(),
+      ]))
+      .child(div().min_w(0).truncate().font_semibold().child(stem(n.path)));
+  }
+
   toggle(dir, to) {
     const open = to ?? !this.open.has(dir);
     if (open) this.open.add(dir); else this.open.delete(dir);
@@ -401,8 +437,7 @@ export default class Vaultr extends View {
       .child(h_flex().flex_none().h(32).px(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(tool("vaultr-list-toggle", "☰", (_e, cx) => { this.listShown = !this.listShown; cx.notify(); }))
         .child(tool("vaultr-back", "←", (_e, cx) => this.back(cx), this.history.length > 0))
-        .child(div().font_semibold().truncate().child(n ? stem(n.path) : "Vaultr"))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(n?.path ?? ""))
+        .child(this.crumbs(t))
         .when(Boolean(n), (el) => el.child(tool("vaultr-obsidian", "Open in Obsidian", () => openExternal(`obsidian://open?path=${encodeURIComponent(`${this.vault}/${n.path}`)}`))))
         .when(Boolean(props()?.overlay), (el) => el.child(tool("vaultr-close", "✕", () => closeOverlay(props().overlay)))))
       .when(Boolean(strip), (el) => el.child(div().flex_none().px(12).py(6).text_color(this.error ? t.blocked : t.muted).bg(t.surface).child(strip ?? "")))

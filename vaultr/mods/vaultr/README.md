@@ -35,6 +35,8 @@ A palette entry or a key runs one command, so the pair has to come from a mod. "
 
 Narrower than 620px, the list and the note take turns: opening a note hides the list, and `b` or the ☰ button brings it back. To return to the note without choosing another, click "← Back to <note>" above the search box, or press `b` or `escape`.
 
+The bar above the note holds, left to right: ☰ (show or hide the list), ← (back to the note you read before this one, like a browser's back button; `backspace` does the same), and breadcrumbs: the folders above the note, then its name. Click a folder in the breadcrumbs to see it open in the list.
+
 Vaultr opens on the note it last showed in that vault, and remembers which folders were open.
 
 ## Keys

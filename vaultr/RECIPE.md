@@ -14,7 +14,7 @@ Two columns on `background`, 13px text.
   - Text is `muted`. The note on screen is `foreground` on `selected`. The row the keyboard is on is `foreground` on `hover`.
   - With a search, the rows are the matching notes as paths without `.md`, no folders. With no match: "No notes match." in `dim`.
 - **Note column**, the rest of the width.
-  - Bar, 32px high with a 1px `border` line below: "☰" (show or hide the list), "←" (back, `dim` when there is nothing to go back to), the note's name in semibold, its path in 11px `dim`, "Open in Obsidian" at the right, and "✕" when it is a dialog.
+  - Bar, 32px high with a 1px `border` line below: "☰" (show or hide the list), "←" (back to the note read before this one, `dim` when there is none), breadcrumbs (each folder above the note in 12px `muted`, "›" between them in `dim`, then the note's name in semibold; a narrow copy shows "…" and the last folder only), "Open in Obsidian" at the right, and "✕" when it is a dialog.
   - A notice strip on `surface` when there is one: an error in `blocked`, a note such as `No note named "X".` in `muted`.
   - The note, scrolling, 16px side padding, 10px between parts: the properties box (`surface`, 1px `border`, radius 6, 12px `muted`, one line per frontmatter line), then the text, with each image as its own block at most 720px wide with radius 4. A missing image is one `blocked` line: "Missing image: name".
   - Under a 1px `border` line: "BACKLINKS (n)" in 11px `dim`, then one `accent` line per linking note. While the vault is still being read it says "BACKLINKS (reading the vault…)".
@@ -28,6 +28,7 @@ Narrower than 620px there is one column: the list or the note. The list then has
 - It shows no agent status.
 - Clicking a folder opens or closes it. Clicking a note opens it. Open folders and the last note are remembered per vault.
 - Opening a note starts it at the top, opens its folders in the list, and in a narrow copy hides the list.
+- Clicking a breadcrumb folder shows the list with that folder open and the keyboard on it.
 - Clicking a link: a note opens in place, at the heading when the link names one. A missing note shows the notice. A file that is not a note, and a web link, open in the system's default app.
 - Typing in the search box filters by every word, on the path, with notes whose name matches first, 200 at most.
 - Keys, while the mod has the keyboard: `/` search, `j`/`k` or arrows move, `enter` open, `l`/`h` or right/left open/close a folder, `]`/`[` next/previous heading, `backspace` back, `b` list, `o` Obsidian, `r` reload, `escape` leave or clear the search.

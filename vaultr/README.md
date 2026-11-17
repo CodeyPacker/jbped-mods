@@ -8,7 +8,7 @@ Read your Obsidian vault inside Herdr: the folder tree, name search, links that 
 
 - **Notes as Obsidian shows them.** Wikilinks, aliases, callouts, highlights, tables, task lists, code and the properties block all draw. The mod never writes to the vault.
 - **Links open in place.** Click a wikilink or a link to another note and it opens here, at the heading when the link names one. Back returns to the note before.
-- **Folder tree and search.** The vault's folders, with a search box that filters notes by name and path as you type.
+- **Folder tree and search.** The vault's folders, with a search box that filters notes by name and path as you type. Breadcrumbs above the note show where it lives.
 - **Images.** Embedded and linked PNG, JPEG, GIF, WebP and SVG files draw in the note.
 - **Backlinks.** Every note lists the notes that link to it.
 - **Live.** A note redraws when Obsidian or an agent saves it, and new notes appear in the tree.
