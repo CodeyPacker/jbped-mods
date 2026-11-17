@@ -1,14 +1,12 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
-// agents-plus: also nests Claude Code in-process subagents, read from files that
-// ~/.claude/hooks/herdr-subagents.py writes to ~/.herdr-subagents (one per running subagent).
+// agents-plus: also nests an agent's in-process subagents (Claude Code's Agent tool) under it.
+// herdr-core keeps them per terminal in `records` ({id: {app, state, title}}), reported
+// through the terminal itself, so they show however the agent was started.
 // A viewed done agent stays in Done until left.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, home, watchFolder, readTextFile, hc, notify } from "herdr";
-import { readdir } from "fs/promises";
-
-const CLAUDE_DIR = `${home()}/.herdr-subagents`;
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, hc, notify } from "herdr";
 
 // Claude Code's footer agent list, bottom of the screen:
 //   "❯ ● main" / "  ◯ general-purpose  Herdr nav target      8s · ↓ 37k tokens"
@@ -105,55 +103,22 @@ export default class Agents extends View {
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
-    // Claude subagent files: a folder watch, with a slow poll in case WSL writes don't trigger it.
-    this.claude = [];
-    this.claudeKey = "";
-    cx.spawn(async (cx) => {
-      for (;;) {
-        if (await this.loadClaude()) cx.notify();
-        try { await watchFolder(CLAUDE_DIR); } catch { await cx.sleep(5000); }
-      }
-    });
-    cx.spawn(async (cx) => {
-      for (;;) {
-        await cx.sleep(5000);
-        if (await this.loadClaude()) cx.notify();
-      }
-    });
   }
 
-  // Reads every subagent file; true when the set changed.
-  async loadClaude() {
-    let names = [];
-    try { names = await readdir(CLAUDE_DIR); } catch { names = []; }
-    const files = names.filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort();
-    const list = [];
-    for (const n of files) {
-      try {
-        const d = JSON.parse((await readTextFile(`${CLAUDE_DIR}/${n}`)) ?? "null");
-        if (d?.terminal && d?.agent_id) list.push(d);
-      } catch { /* mid-write or removed */ }
-    }
-    const key = JSON.stringify(list);
-    if (key === this.claudeKey) return false;
-    this.claudeKey = key;
-    this.claude = list;
-    return true;
-  }
-
-  // Claude subagents as terminal-shaped rows under their live parent terminal.
-  claudeKids(all) {
-    const live = new Map(all.filter((t) => t.state === "live").map((t) => [t.address, t]));
-    return (this.claude ?? []).filter((d) => live.has(d.terminal)).map((d) => ({
-      address: `claude:${d.terminal}:${d.agent_id}`,
-      parent: d.terminal,
-      state: "live",
-      // Waiting on its own background work shows as idle until it resumes.
-      status: d.status === "waiting" ? "idle" : d.status || "working",
-      name: (d.description ? `${d.type} \u00b7 ${d.description}` : d.type) + (d.status === "waiting" ? " (waiting)" : ""),
-      program: live.get(d.terminal).program,
-      claude: d,
-    }));
+  // In-process subagents (herdr-core `records`) as terminal-shaped rows under their live parent.
+  recordKids(all) {
+    return all.filter((t) => t.state === "live" && t.records).flatMap((t) =>
+      Object.entries(t.records).map(([id, r]) => ({
+        address: `rec:${t.address}:${id}`,
+        parent: t.address,
+        state: "live",
+        status: r.state || "working",
+        name: r.title || id,
+        program: t.program,
+        record: { id, ...r },
+        // Sibling order: Claude Code's footer lists the subagents in this order.
+        order: Object.keys(t.records),
+      })));
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -240,10 +205,19 @@ export default class Agents extends View {
   // Opens a Claude subagent's own view in its parent Claude Code by driving the
   // footer agent list. Enter is pressed only once the screen shows the target row selected.
   async openClaude(k, cx) {
-    const d = k.claude;
-    const desc = (d.description ?? "").replace(/\s+/g, " ").slice(0, 24);
-    const want = (r) => r.first === d.type && (!desc || r.label.includes(desc));
-    return this.navigate(k.parent, want, d.type, cx);
+    // Footer rows read "<type>  <text>", and the text is the description only until
+    // the subagent starts reporting activity. So: the one row showing the description,
+    // else the record's position when the footer lists as many subagents as records.
+    const title = (k.record.title ?? "").replace(/\s+/g, " ").slice(0, 24);
+    const pos = k.order.indexOf(k.record.id);
+    const want = (r, _i, rows) => {
+      if (r.first === "main") return false;
+      const subs = rows.filter((x) => x.first !== "main");
+      const named = title ? subs.filter((x) => x.label.includes(title)) : [];
+      if (named.length === 1) return r === named[0];
+      return subs.length === k.order.length && subs.indexOf(r) === pos;
+    };
+    return this.navigate(k.parent, want, k.record.title || "The subagent", cx);
   }
 
   // Clicking a parent: back to Claude Code's main view if a subagent view is on screen.
@@ -344,7 +318,12 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => (k.claude ? cx.spawn((cx) => this.openClaude(k, cx)) : this.peek(k.address)))
+      .on_click((_e, cx) => {
+        if (!k.record) return this.peek(k.address);
+        // Only Claude Code has the footer agent list to drive; others focus the parent.
+        if (k.record.app === "claude-code") return cx.spawn((cx) => this.openClaude(k, cx));
+        run("pane.focus", { pane: this.paneOf.get(k.parent) });
+      })
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
@@ -373,7 +352,7 @@ export default class Agents extends View {
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const cores = terminals();
     this.migratePins(cores);
-    const all = [...cores, ...this.claudeKids(cores)];
+    const all = [...cores, ...this.recordKids(cores)];
     this.paneOf = new Map(list.map((a) => [a.address, a.pane]));
     const shown = focused()?.agent;
     const now = Date.now();
