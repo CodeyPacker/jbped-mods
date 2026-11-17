@@ -43,7 +43,9 @@ Every entry is unread until one of these happens. The list shows which one, unde
 
 ## The list
 
-- Newest first. Each row has the level dot (or the toast's icon), the title, the whole body and the time: "now", "5m", "3h", then "Nov 16". The tooltip on the time is the full date and time.
+- Newest first. Each row has an icon, the title, the whole body and the time: "now", "5m", "3h", then "Nov 16". The tooltip on the time is the full date and time.
+- The icon is the toast's own when it has one. Otherwise, for an entry that goes to a terminal, it is that terminal's program icon from Herdr's program table (Claude, Codex, a shell), with a small corner dot in the level color when the level is not info. Any other entry gets a glyph in its level color: a ticked circle for success, a triangle for warning, a crossed circle for error, an "i" for info.
+- Toasts keep Herdr's plain level dot.
 - An unread entry has an `accent` dot and time. A read one is dimmed and shows how it was read.
 - An entry with nowhere to go is marked seen when the list opens. It keeps its dot until the list closes.
 - The header counts unread entries and has "Mark all read" and "Clear".
@@ -71,9 +73,10 @@ If the target of an action is gone (a closed terminal), Herdr reports the error.
 
 Shared values, saved by Herdr in `shared.json`:
 
-- `notifyr.log`: at most 200 entries, newest first: `{ id, at, overlay, title, body, level, icon, action, terminal, space, read }`.
+- `notifyr.log`: at most 200 entries, newest first: `{ id, at, overlay, title, body, level, icon, action, terminal, space, program, read }`.
   - `at` is milliseconds since 1970, taken when the toast appeared. `body` is cut at 600 characters.
   - `terminal` and `space` are where the action goes, or null.
+  - `program` is `{ name, icon, tint }` of what ran in that terminal when the toast appeared, or null. It is kept so the icon outlives the terminal.
   - `read` is null while unread, else `{ at, how }` with `how` one of `clicked`, `visited`, `opened`, `listed`, `marked`.
 - `notifyr.seen`: written by the first version only. Entries without a `read` field that are older than it count as read.
 

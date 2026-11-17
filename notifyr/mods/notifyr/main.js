@@ -8,13 +8,13 @@
 //   list   opened by the bell or by mod.open: the record, newest first, with vim keys.
 //
 // The record is the shared value "notifyr.log":
-//   [{ id, at, overlay, title, body, level, icon, action, terminal, space, read }]
+//   [{ id, at, overlay, title, body, level, icon, action, terminal, space, program, read }]
 // read is null while unread, else { at, how }: "clicked" (the toast), "visited" (the person arrived at its
 // space or terminal), "opened" (from the list), "listed" (seen in the list), "marked" (by hand).
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
-import { agents, checking, closeOverlay, focused, layout, panes, props, run, setShared, shared, spaces, theme } from "herdr";
+import { agents, checking, closeOverlay, focused, layout, panes, props, run, setShared, shared, spaces, terminals, theme } from "herdr";
 
 const LOG = "notifyr.log";
 const SEEN = "notifyr.seen"; // Only for entries recorded before read was kept per entry.
@@ -22,6 +22,7 @@ const MAX = 200;
 const BODY_MAX = 600;
 const HALF_PAGE = 6;
 const DOT = { error: "blocked", warning: "working", success: "done", info: "accent" };
+const LEVELS = ["success", "warning", "error", "info"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const HOW = { clicked: "clicked", visited: "visited", opened: "opened", listed: "seen", marked: "read" };
 const HOW_TIP = {
@@ -108,6 +109,7 @@ function record(p) {
     icon: p.icon ?? null,
     action,
     ...target(action),
+    program: programOf(target(action).terminal),
     read: null,
   };
   setShared(LOG, [entry, ...log].slice(0, MAX));
@@ -136,10 +138,24 @@ function stamp(at) {
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${clock(at)}`;
 }
 
-function mark(t, e, size) {
-  return e.icon
-    ? image(e.icon).w(size + 8).h(size + 8).flex_none()
-    : div().size(size).rounded(size / 2).flex_none().bg(t[DOT[e.level] ?? "accent"]);
+/** What ran in a terminal, as Herdr's program table shows it. Kept on the entry, so the icon
+ *  outlives the terminal. */
+function programOf(terminal) {
+  const p = terminal ? terminals().find((x) => x.address === terminal)?.program : null;
+  return p?.icon ? { name: p.name, icon: p.icon, tint: Boolean(p.tint) } : null;
+}
+
+/** The list's mark for an entry: the toast's own icon, else the program of its terminal (with
+ *  a corner dot for a level other than info), else a glyph for its level. */
+function mark(t, e, read) {
+  const color = t[DOT[e.level] ?? "accent"];
+  if (e.icon) return image(e.icon).w(16).h(16).flex_none();
+  const p = e.program ?? programOf(e.terminal);
+  if (!p) return svg(`mods/notifyr/icons/${LEVELS.includes(e.level) ? e.level : "info"}.svg`).size(16).flex_none().text_color(color);
+  const pic = p.tint ? svg(p.icon).size(16).flex_none().text_color(read ? t.muted : t.foreground) : image(p.icon).w(16).h(16).flex_none();
+  if (!e.level || e.level === "info") return pic;
+  return div().relative().size(16).flex_none().child(pic)
+    .child(div().absolute().right(-3).bottom(-3).size(7).rounded(3.5).border(1).border_color(t.popover).bg(color));
 }
 
 export default class Notifyr extends View {
@@ -349,7 +365,7 @@ export default class Notifyr extends View {
         .when(Boolean(e.action?.name), (el) => el.cursor_pointer())
         .hover((s) => s.bg(t.hover))
         .on_click((_ev, cx) => { this.at = i; this.go(e); cx.notify(); })
-        .child(h_flex().flex_none().h(18).w(16).items_center().justify_center().child(mark(t, e, 8)))
+        .child(h_flex().flex_none().h(18).w(18).items_center().justify_center().child(mark(t, e, read && !marked)))
         .child(
           v_flex()
             .flex_1()

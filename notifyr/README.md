@@ -8,7 +8,8 @@ A log of every notification Herdr shows, with a bell that counts the new ones an
 
 - **Every toast is kept.** Herdr's own notices and every mod's are recorded as they appear, with the time they arrived.
 - **Read state per entry.** An entry is read once you click its toast or go to its space, and the list says which. The rest stay unread.
-- **A list to read them.** Newest first, with the level, the title and the whole body. A toast cuts a long body off. The list wraps it.
+- **A list to read them.** Newest first, with the title and the whole body. A toast cuts a long body off. The list wraps it.
+- **Icons that say what it was.** An agent's entry shows that agent's icon. Any other entry shows a glyph for its level: success, warning, error or info.
 - **A bell with a count.** A small mark you place anywhere in your layout. It shows how many entries are unread.
 - **Entries still act.** Open an entry to run what its toast would have run, such as going to the agent that needed you.
 - **Vim keys.** `j` and `k` move, `enter` goes, `r` marks read or unread, `d` deletes, `u` shows unread only.

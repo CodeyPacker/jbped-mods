@@ -6,12 +6,13 @@ A log of every notification Herdr shows. Toasts look as they always did, a bell 
 
 ## What you see
 
-- **Toast**: Herdr's own, unchanged. A row on `popover` with 18px side padding and a 12px gap: an 8px level dot (or an 18px icon), a 13px semibold title in `foreground` and a 12px one-line body in `muted`, both truncated. A machine login notice shows the command and a "Copy" button on `raised`.
+- **Toast**: Herdr's own, unchanged, with its plain level dot. A row on `popover` with 18px side padding and a 12px gap: an 8px level dot (or an 18px icon), a 13px semibold title in `foreground` and a 12px one-line body in `muted`, both truncated. A machine login notice shows the command and a "Copy" button on `raised`.
 - **Bell**: a block the person places, 48px wide in a 28px status row. A 14px bell icon, centered, in `muted` on `chrome` with a 1px top border in `border`. With unread entries the icon and an 11.8px count beside it are `accent`. The count stops at "99+".
 - **List**: a dialog 440px wide and 70% of the window high, on `popover`.
   - Header, 40px with a bottom border: "Notifications" in 13px semibold, "1 unread of 5" in 11.5px `dim` (with ", showing unread" when filtered), and the buttons "Mark all read" (only with unread entries) and "Clear" on `raised` at the right.
   - A warning line in 11.5px `working`, only when the shown layout's root does not name `notifyr` as its toast mod.
-  - Rows, newest first, the only part that scrolls. Each has 14px side and 9px vertical padding and a bottom border: the 8px level dot or the toast's icon, the title in 13px semibold, the whole body wrapped in 12px, and a right column with the time in 11px.
+  - Rows, newest first, the only part that scrolls. Each has 14px side and 9px vertical padding and a bottom border: a 16px icon, the title in 13px semibold, the whole body wrapped in 12px, and a right column with the time in 11px.
+  - The icon: the toast's own when it has one. Else, for an entry that goes to a terminal, that terminal's program icon, with a 7px corner dot in the level color (1px `popover` border) when the level is not info. Else a stroked glyph in the level color: a ticked circle for success, a triangle with "!" for warning, a crossed circle for error, a circled "i" for info.
   - An unread row: title in `foreground`, body in `muted`, a 6px `accent` dot before the time, the time in `accent`.
   - A read row: title in `muted`, body in `dim`, the time in `dim`, and under it in 10.5px `dim` how it was read: "clicked", "visited", "opened", "seen" or "read".
   - The selected row is on `selected`.
@@ -42,10 +43,10 @@ A log of every notification Herdr shows. Toasts look as they always did, a bell 
 - `herdr` functions: `props`, `shared`, `setShared`, `run`, `closeOverlay`, `layout`, `theme`, `checking`, `focused`, `spaces`, `panes`, `agents`. Commands: `mod.open`, and whatever each stored action names.
 - Keyboard: `cx.focus_handle()` focused in `init` and again after 600 ms, `track_focus` and `on_key_down` on the list's root. `ScrollHandle` with `scroll_to_item` keeps the selected row in view.
 - Visits: the bell and the list compare `focused().space` and `focused().terminal` with the last values they saw, on every render.
-- Shared value `notifyr.log`: `[{ id, at, overlay, title, body, level, icon, action, terminal, space, read }]`, newest first, 200 at most, body cut at 600 characters. `read` is null or `{ at, how }` with `how` one of `clicked`, `visited`, `opened`, `listed`, `marked`.
+- Shared value `notifyr.log`: `[{ id, at, overlay, title, body, level, icon, action, terminal, space, program, read }]`, newest first, 200 at most, body cut at 600 characters. `read` is null or `{ at, how }` with `how` one of `clicked`, `visited`, `opened`, `listed`, `marked`.
 - The space of an entry: `space` in the action's arguments, the `id` of a `space.*` command, the space holding the tab of a `tab.*` command or a `tab` argument, else the space of the `terminal` (from `agents()`, then `panes()` and the tab's space) or of the `pane`.
 - The toast view is a copy of Herdr's `toast` mod.
-- Art: `bell.svg`, one filled 16px glyph, drawn with `svg("mods/notifyr/bell.svg")`.
+- Art: `bell.svg`, one filled 16px glyph, drawn with `svg("mods/notifyr/bell.svg")`, and `icons/success.svg`, `warning.svg`, `error.svg` and `info.svg`, 24px stroked glyphs tinted by `svg()`. Program icons are Herdr's, from `terminals()[i].program` (`icon`, `tint`): `svg(icon)` in the text color when `tint`, else `image(icon)`.
 - `keys.json`: `"ctrl-shift-i": "mod.open:notifyr"`.
 
 ## Watch out
@@ -61,6 +62,8 @@ A log of every notification Herdr shows. Toasts look as they always did, a bell 
 - A shifted letter arrives as `key: "g"` with `modifiers.shift`, and `?` arrives as `key: "?"` with no shift. Test the shifted letters before the plain ones.
 - `setShared` inside `render` is avoided: the visit sweep writes from `cx.spawn`.
 - `D` and Clear have no confirmation.
+- Store the program on the entry when the toast appears. Looked up at draw time, the icon is lost once the terminal ends.
+- Herdr's agent toasts are level info, so a level dot on every agent row is noise. Draw the corner dot for other levels only.
 
 ## Done when
 
@@ -69,5 +72,6 @@ A log of every notification Herdr shows. Toasts look as they always did, a bell 
 - A toast whose action names a terminal in another space is unread, and turns "visited" when that space is selected.
 - A toast with no action turns "seen" when the list opens.
 - The bell shows the unread count.
+- An entry for a terminal shows its program icon, and one with no terminal shows the glyph for its level.
 - In the list, `j`, `k`, `g`, `G`, `r`, `R`, `d`, `D`, `u`, `?`, `enter` and `q` do what the legend says.
 - `shared.json` holds the entries under `notifyr.log`.
