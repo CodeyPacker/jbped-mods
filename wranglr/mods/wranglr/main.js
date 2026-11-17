@@ -839,8 +839,8 @@ export default class Wranglr extends View {
       : null;
     const content = h_flex().gap(9).items_center().pl(indent)
       .child(this.avatar(r.id, name, t))
-      .when(Boolean(marks), (el) => el.child(marks))
       .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(name))
+      .when(Boolean(marks), (el) => el.child(marks))
       .when(Boolean(r.machine), (el) => el.child(this.chip(r.machine, t)))
       .child(g && !r.dim ? this.gitTail(g, name, t, !!at?.group?.startsWith("repo:")) : div().flex_1())
       .when(Boolean(toggle), (el) => el.child(toggle));
@@ -953,7 +953,7 @@ export default class Wranglr extends View {
     return { agents: bySpace, labels };
   }
 
-  // What a space's agents are doing, between its avatar and its name: one mark per state that has agents
+  // What a space's agents are doing, right after its name: one mark per state that has agents
   // (needs you, working, done), with a count above one. Idle agents show nothing.
   // A click goes to the most urgent agent's pane.
   agentMarks(id, list, d) {
