@@ -36,7 +36,7 @@ Narrower than 620px there is one column: the list or the note.
 
 ## Built from
 
-- `mods/vaultr/mod.json`: `place` "none", `focusable` true, `overlay` `{ "kind": "dialog", "width": 1100, "height": 0.85 }`, and five `palette` entries (open as dialog, tab, pane; change vault; reload).
+- `mods/vaultr/mod.json`: `place` "none", `focusable` true, `overlay` `{ "kind": "dialog", "width": 1100, "height": 0.85 }`, and six `palette` entries (open as dialog, tab, pane, side panel; change vault; reload). The side panel entry sends `tabs-plus.vaultr` and needs the setup in the mod's README.
 - `mods/vaultr/main.js`: one `View`. Props: `vault` and `note`, both optional, and `overlay` from Herdr.
 - `mods/vaultr/md.js`, no Herdr imports: splits frontmatter, and turns the body into segments, `{type: "md", text, heading?}` or `{type: "image", target}`. A heading line starts a new segment. Wikilinks and relative markdown links become `[label](vaultr://open/<encoded target>)`. Callout first lines become bold. Fenced code and code spans are left alone.
 - `mods/vaultr/vault.js`, no Herdr imports: `makeIndex(files)`, `resolve(index, name, from)`, `rows(index, open, query)`, `vaultKey(path)`.
@@ -49,7 +49,7 @@ Narrower than 620px there is one column: the list or the note.
 - Files read: every file name under the vault, and every `.md` file. Files written: image copies under `<appHome>/data/vaultr/<vaultKey>/`, at the image's path below the vault.
 - Each markdown segment is its own `TextView.markdown(id, text).selectable(true)`, with the note's version in the id. Segments and images are direct children of the scroll area, so `ScrollHandle.scroll_to_item` can reach a heading.
 - Open in Obsidian is `obsidian://open?path=<encoded absolute path>`.
-- Theme tokens only. No art.
+- Theme tokens only. Art: `vault.svg`, a book outline for a side panel button. The mod itself does not draw it.
 
 ## Watch out
 

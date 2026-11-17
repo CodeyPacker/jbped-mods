@@ -12,7 +12,7 @@ Read your Obsidian vault inside Herdr: the folder tree, name search, links that 
 - **Images.** Embedded and linked PNG, JPEG, GIF, WebP and SVG files draw in the note.
 - **Backlinks.** Every note lists the notes that link to it.
 - **Live.** A note redraws when Obsidian or an agent saves it, and new notes appear in the tree.
-- **Three places.** Open it as a dialog over the window, as a tab, or beside the pane you are working in. A narrow pane shows the note alone.
+- **Four places.** Open it as a dialog over the window, as a tab, beside the pane you are working in, or in your layout's side panel. A narrow one shows the note alone.
 - **Keyboard.** Every action has a key, and the dialog opens on the note you closed it on.
 - **Open in Obsidian.** One key or click opens the note you are reading in Obsidian to edit it.
 

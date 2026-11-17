@@ -24,7 +24,14 @@ One copy can read a different vault through its props: `{ "vault": "<folder>", "
 | A tab | `tab.new {"name": "Vault", "mod": "vaultr"}` |
 | Beside the focused pane | `pane.split {"direction": "right", "mod": "vaultr"}` |
 
-All three are in the palette as "Vaultr: Open", "Vaultr: Open in a tab" and "Vaultr: Open beside this pane". The palette also has "Vaultr: Change vault" (`vaultr.vault`) and "Vaultr: Reload" (`vaultr.reload`), which act on the copy that is showing.
+All three are in the palette as "Vaultr: Open", "Vaultr: Open in a tab" and "Vaultr: Open beside this pane".
+
+**The side panel.** Vaultr can also sit in a layout's side panel, next to Files and Changes. This takes a layout of your own (clone a shipped one first):
+
+1. Add a block to the panel's stack: `{ "id": "vaultr", "type": "block", "content": { "mod": "vaultr" } }`.
+2. Show it with two commands: `layout.select {"stack": "<the stack's id>", "child": "vaultr"}`, then `layout.show {"id": "<the panel's id>"}`.
+
+A palette entry or a key runs one command, so the pair has to come from a mod. "Vaultr: Open in the side panel" sends `tabs-plus.vaultr`, which a tab bar mod named `tabs-plus` must handle by running those two commands. `vault.svg` in this folder is an icon for its button. The palette also has "Vaultr: Change vault" (`vaultr.vault`) and "Vaultr: Reload" (`vaultr.reload`), which act on the copy that is showing.
 
 Narrower than 620px, the list and the note take turns: opening a note hides the list, and `b` or the ☰ button brings it back.
 
@@ -92,5 +99,6 @@ A link finds its note the way Obsidian does: a path from the vault's root, then 
 - `md.js`: Obsidian markdown to what the text view draws.
 - `vault.js`: which file a link names, and the list's rows.
 - `platform.js`: opening a URL and copying a file on each system.
+- `vault.svg`: an icon for a side panel button.
 
 `md.js` and `vault.js` have tests: `sh vaultr/tests/run.sh` in the repo.
