@@ -87,8 +87,20 @@ async function runOne(e, ctx, toasts) {
   switch (e.type) {
     case "git": {
       const r = await git(e.args, { cwd: e.cwd ?? ctx.main, machine: ctx.machine ?? null, timeout: e.timeout });
-      if (r.code !== 0) throw new Stop(said(r), e.refuse);
-      return;
+      if (r.code === 0) return;
+      // A closed space's shell can still hold the folder (Windows): git drops the Worktree, then fails
+      // to delete the folder. The Worktree is gone from git, so the list goes on.
+      if (e.args[0] === "worktree" && e.args[1] === "remove") {
+        const path = e.args[e.args.length - 1];
+        const flat = (p) => String(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+        const list = await git(["worktree", "list", "--porcelain"], { cwd: ctx.main, machine: ctx.machine ?? null });
+        const listed = list.code !== 0 || list.stdout.split(/\r?\n/).some((l) => l.startsWith("worktree ") && flat(l.slice(9)) === flat(path));
+        if (!listed) {
+          toast({ level: "warning", title: "Worktree removed, folder left behind", body: `${path} could not be deleted. Remove it by hand.` });
+          return;
+        }
+      }
+      throw new Stop(said(r), e.refuse);
     }
     case "checkout":
       try { for (const t of await checkoutEffect(e, ctx, ctx.tap)) toast(t); }

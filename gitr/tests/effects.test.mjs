@@ -257,6 +257,17 @@ test("Worktree remove without changes works without --force", async () => {
   assert.equal(existsSync(wt), false);
 });
 
+test("A remove that fails after git dropped the Worktree warns and the list goes on", async () => {
+  const { main, ctx } = setup();
+  // git fails on a path it no longer lists, as it does when it could not delete a held folder.
+  const gone = join(tmpDir(), "held");
+  const r = await runEffects([{ type: "git", args: ["worktree", "remove", gone] }, { type: "toast", level: "info", title: "next" }], ctx);
+  assert.equal(r.ok, true);
+  assert.equal(r.toasts[0].level, "warning");
+  assert.match(r.toasts[0].title, /folder left behind/);
+  assert.equal(r.toasts[1].title, "next");
+});
+
 test("worktree and space.start go to the Source with the Repo and Machine", async () => {
   const { main, ctx, calls } = setup({ machine: "box" });
   const r = await runEffects([{ type: "worktree", branch: "feat" }, { type: "space.start", dir: "/x/y" }], ctx);
