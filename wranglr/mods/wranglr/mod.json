@@ -1,6 +1,7 @@
 {
   "place": "none",
   "title": "Wranglr",
+  "focusable": true,
   "palette": [
     { "title": "Wranglr: Move space to group", "command": "wranglr.move", "about": "Pick a Group or Subgroup for the focused space" },
     { "title": "Wranglr: Next space", "command": "wranglr.next", "about": "The next space in the order the sidebar shows" },

@@ -152,6 +152,11 @@ export default class Wranglr extends View {
     this.machines = [];
     this.hovered = null; // the agent row under the pointer
     this.tab = "spaces"; // the list shown: "spaces" or "agents"
+    this.handle = cx.focus_handle(); // holds the keyboard while the list is driven by keys
+    this.scroll = ScrollHandle.new();
+    this.nav = []; // the rows the keys can reach, in the order drawn: { key, index, kind, ... }
+    this.cursor = null; // the key of the row the keys are on
+    this.reveal = false; // scroll the cursor's row into view at the next draw
     try { if (localStorage.getItem("wranglr.tab") === "agents") this.tab = "agents"; } catch {}
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
@@ -393,6 +398,8 @@ export default class Wranglr extends View {
     const focus = focused()?.space ?? null;
     const n = /^select:?(\d+)$/.exec(c);
     if (n) this.dispatch({ type: "select", index: Number(n[1]) }, cx);
+    // Herdr handed this copy the keyboard (pane.go), or a key bound to wranglr.focus asked for it.
+    else if (c === "focus") { this.cursor = null; this.reveal = true; this.handle.focus(); }
     else if (c === "next" || c === "prev") this.dispatch({ type: c }, cx);
     else if (c === "fold") this.dispatch({ type: "foldFocused" }, cx);
     else if (c === "sort") this.dispatch({ type: "sort", value: null }, cx);
@@ -417,8 +424,63 @@ export default class Wranglr extends View {
 
   showTab(tab) {
     this.tab = tab;
+    this.cursor = null;
     this.pressed = this.over = null;
     try { localStorage.setItem("wranglr.tab", tab); } catch {}
+  }
+
+  // Keys while the list holds the keyboard.
+
+  isCursor(key) { return this.kb && this.cursor === key; }
+
+  // The cursor's look on a row.
+  ring(el, key, t) {
+    return el.when(this.isCursor(key), (e) => e.bg(t.hover).border_1().border_color(t.accent));
+  }
+
+  // The row the keys start on: the shown space or the focused agent, else the first.
+  firstCursor() {
+    const f = focused();
+    const want = this.tab === "agents" ? `a:${agents().find((a) => a.focused)?.address}` : `r:${f?.space}`;
+    return (this.nav.find((x) => x.key === want) ?? this.nav[0])?.key ?? null;
+  }
+
+  // The keyboard goes back to the pane beside the sidebar.
+  leaveKeys() { run("pane.go", { direction: "right" }); }
+
+  onKey(e, cx) {
+    const nav = this.nav, k = e.keystroke;
+    const i = nav.findIndex((x) => x.key === this.cursor), it = nav[i];
+    const to = (n) => { if (nav.length) { this.cursor = nav[Math.max(0, Math.min(nav.length - 1, n))].key; this.reveal = true; } };
+    const toKey = (key) => { if (nav.some((x) => x.key === key)) { this.cursor = key; this.reveal = true; } };
+    const head = it?.kind === "group" || it?.kind === "sub";
+    const fold = () => this.dispatch({ type: "fold", group: it.group, sub: it.sub }, cx);
+    if (k === "j" || k === "down") to(i + 1);
+    else if (k === "k" || k === "up") to(i - 1);
+    else if (k === "g") to(0);
+    else if (k === "shift-g") to(nav.length - 1);
+    // Not Tab: the window takes it to step the keyboard to the next control.
+    else if (k === "s" || k === "a") this.showTab(k === "a" ? "agents" : "spaces");
+    else if (k === "escape" || k === "q") this.leaveKeys();
+    else if (k === "enter" || k === "space") {
+      if (head) fold();
+      else if (it?.kind === "row") { run("space.select", { id: it.space }); this.leaveKeys(); }
+      else if (it?.kind === "tab") { run("space.select", { id: it.space }); run("tab.select", { id: it.tab }); this.leaveKeys(); }
+      else if (it?.kind === "agent") run("pane.focus", { pane: it.pane });
+    }
+    else if (k === "l" || k === "right") {
+      if (head && it.folded) fold();
+      else if (it?.kind === "row" && !it.open && it.tabs > 1) this.dispatch({ type: "expand", space: it.space }, cx);
+      else if (head || it?.open) to(i + 1);
+    }
+    else if (k === "h" || k === "left") {
+      if (head && !it.folded) fold();
+      else if (it?.kind === "row" && it.open) this.dispatch({ type: "expand", space: it.space }, cx);
+      else if (it?.parent) toKey(it.parent);
+    }
+    else return;
+    cx.stop_propagation();
+    cx.notify();
   }
 
   openMove(space) {
@@ -872,7 +934,7 @@ export default class Wranglr extends View {
     if (r.dim) return el.opacity(0.5).child(content);
     const on = !!w?.active;
     const target = this.pressed?.kind === "row" && this.pressed.id !== r.id && this.over?.kind === "row" && this.over.id === r.id;
-    return el
+    return this.ring(el, `r:${r.id}`, t)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
       .when(this.pressed?.kind === "row" && this.pressed.id === r.id && this.over && this.over.id !== r.id, (el) => el.opacity(0.5))
@@ -884,11 +946,18 @@ export default class Wranglr extends View {
       .child(content);
   }
 
-  rows(list, at, indent, d) {
-    return list.flatMap((r, i) => [
-      this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d),
-      ...(!r.dim && this.state.open?.[r.id] ? this.tabRows(r, indent, d) : []),
-    ]);
+  // Adds the rows to `out`, and each one the keys can reach to this.nav. parent: the key of the header above.
+  rows(out, list, at, indent, d, parent = null) {
+    list.forEach((r, i) => {
+      const open = !r.dim && !!this.state.open?.[r.id];
+      const tabs = r.dim ? [] : ((d.live.get(r.id) ?? r.space)?.tabs ?? []).filter((x) => !x.settled);
+      if (!r.dim) this.nav.push({ key: `r:${r.id}`, index: out.length, kind: "row", space: r.id, open, tabs: tabs.length, parent });
+      out.push(this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d));
+      if (!open) return;
+      const els = this.tabRows(r, indent, d);
+      tabs.forEach((tab, n) => this.nav.push({ key: `t:${tab.id}`, index: out.length + n, kind: "tab", space: r.id, tab: tab.id, parent: `r:${r.id}` }));
+      out.push(...els);
+    });
   }
 
   // A space's tabs under its row. A click shows the space at that tab.
@@ -904,7 +973,7 @@ export default class Wranglr extends View {
         ? (agent.tint ? svg(agent.icon).size(13).flex_none().text_color(t.muted) : image(agent.icon).size(13).flex_none())
         : svg(icon(agent ? "square" : "terminal")).size(11).flex_none().text_color(t.dim);
       const on = !!w.active && !!tab.active;
-      return h_flex().id(`tab-${tab.id}`).h(24).flex_none().pl(indent + 35).pr(8).gap(7).items_center().rounded(6)
+      return this.ring(h_flex().id(`tab-${tab.id}`).h(24).flex_none().pl(indent + 35).pr(8).gap(7).items_center().rounded(6), `t:${tab.id}`, t)
         .text_size(12).text_color(on ? t.foreground : t.muted).cursor_pointer()
         .when(on, (el) => el.bg(t.hover))
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
@@ -931,7 +1000,10 @@ export default class Wranglr extends View {
       if (!members.length) continue;
       out.push(h_flex().h(24).mt(out.length ? 6 : 0).px(8).gap(6).flex_none().items_center().text_size(11).text_color(t[key] ?? t.dim)
         .child(div().child(title)).child(div().text_color(t.dim).child(String(members.length))));
-      for (const a of members) out.push(this.agentRow(a, agentLabel(a, tabs.get(a.tab), leads.get(a.tab)), d));
+      for (const a of members) {
+        this.nav.push({ key: `a:${a.address}`, index: out.length, kind: "agent", pane: a.pane });
+        out.push(this.agentRow(a, agentLabel(a, tabs.get(a.tab), leads.get(a.tab)), d));
+      }
     }
     return out;
   }
@@ -947,7 +1019,7 @@ export default class Wranglr extends View {
     const mark = a.status === "blocked" || a.status === "working" || a.status === "done"
       ? this.agentStatus(t, a.status)
       : div().size(7).mx(2).flex_none().rounded(4).border_1().border_color(t.dim);
-    return h_flex().id(`agent-${a.address}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer()
+    return this.ring(h_flex().id(`agent-${a.address}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer(), `a:${a.address}`, t)
       .when(!!a.focused, (el) => el.bg(t.selected))
       .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
       .on_hover((on, cx) => {
@@ -1015,7 +1087,7 @@ export default class Wranglr extends View {
     const dragging = this.pressed?.kind === "row" || (this.pressed?.kind === "group" && this.pressed.id !== g.id);
     const over = dragging && this.over?.kind === "group" && this.over.id === g.id;
     const lineFor = this.pressed?.kind === "group" && over;
-    return h_flex().relative().id(`group-${g.id}`).h(26).mt(4).px(8).gap(6).flex_none().items_center().rounded(6)
+    return this.ring(h_flex().relative().id(`group-${g.id}`).h(26).mt(4).px(8).gap(6).flex_none().items_center().rounded(6), `g:${g.id}`, t)
       .text_size(11.5).text_color(t.muted).cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .when(over && !lineFor, (el) => el.bg(t.hover).border_1().border_color(t.accent))
@@ -1035,7 +1107,7 @@ export default class Wranglr extends View {
     const { t } = d;
     const key = `${g.id}/${s.id}`;
     const over = this.pressed?.kind === "row" && this.over?.kind === "sub" && this.over.id === key;
-    return h_flex().id(`sub-${key}`).h(24).pl(24).pr(8).gap(6).flex_none().items_center().rounded(6)
+    return this.ring(h_flex().id(`sub-${key}`).h(24).pl(24).pr(8).gap(6).flex_none().items_center().rounded(6), `s:${key}`, t)
       .text_size(11.5).text_color(t.muted).cursor_pointer()
       .hover((st) => st.bg(t.hover))
       .when(over, (el) => el.bg(t.hover).border_1().border_color(t.accent))
@@ -1057,22 +1129,25 @@ export default class Wranglr extends View {
       out.push(h_flex().h(24).px(8).gap(6).flex_none().items_center().text_size(11.5).text_color(d.t.muted)
         .child(svg(icon("pin")).size(11).flex_none().text_color(d.t.dim))
         .child(div().font_semibold().child("Pinned")));
-      out.push(...this.rows(pinned, null, 0, d));
+      this.rows(out, pinned, null, 0, d);
       if (groups.length || this.tree.loose.length) out.push(div().h(1).mx(8).my(6).flex_none().bg(d.t.border));
     }
     groups.forEach((g, i) => {
+      this.nav.push({ key: `g:${g.id}`, index: out.length, kind: "group", group: g.id, sub: null, folded: g.folded });
       out.push(this.groupHead(g, groups[i + 1]?.id ?? null, d));
       if (g.folded) return;
-      out.push(...this.rows(g.rows, { group: g.id, sub: null }, 0, d));
+      this.rows(out, g.rows, { group: g.id, sub: null }, 0, d, `g:${g.id}`);
       for (const s of g.subgroups) {
+        const key = `s:${g.id}/${s.id}`;
+        this.nav.push({ key, index: out.length, kind: "sub", group: g.id, sub: s.id, folded: s.folded, parent: `g:${g.id}` });
         out.push(this.subHead(g, s, d));
-        if (!s.folded) out.push(...this.rows(s.rows, { group: g.id, sub: s.id }, 16, d));
+        if (!s.folded) this.rows(out, s.rows, { group: g.id, sub: s.id }, 16, d, key);
       }
     });
     // A line between the Groups and the spaces in no Group.
     if (this.tree.loose.length && groups.length) out.push(div().h(1).mx(8).my(6).flex_none().bg(d.t.border));
     else if (this.tree.loose.length) out.push(div().h(8).flex_none());
-    out.push(...this.rows(this.tree.loose, { group: "", sub: null }, 0, d));
+    this.rows(out, this.tree.loose, { group: "", sub: null }, 0, d);
     const { t } = d;
     const over = this.pressed?.kind === "row" && this.over?.kind === "end";
     out.push(div().id("wranglr-end").flex_1().min_h(36).rounded(6)
@@ -1196,15 +1271,34 @@ export default class Wranglr extends View {
         .text_size(11).text_color(t.blocked).tooltip(this.errors.join("\n"))
         .child(div().flex_1().truncate().child(`wranglr.json: ${this.errors.length} problem${this.errors.length > 1 ? "s" : ""}`))
       : null;
-    const body = !this.tree
-      ? [h_flex().h(28).px(collapsed ? 0 : 8).items_center().when(collapsed, (el) => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…")]
-      : collapsed ? this.railRows(d) : onAgents ? this.agentList(d) : this.list(d);
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
+    this.kb = this.handle.is_focused();
+    const build = () => {
+      this.nav = [];
+      return !this.tree
+        ? [h_flex().h(28).px(collapsed ? 0 : 8).items_center().when(collapsed, (el) => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…")]
+        : collapsed ? this.railRows(d) : onAgents ? this.agentList(d) : this.list(d);
+    };
+    let body = build();
+    // The cursor's row is gone, or the keys have just arrived: start again from the shown space.
+    if (this.kb && this.nav.length && !this.nav.some((x) => x.key === this.cursor)) {
+      this.cursor = this.firstCursor();
+      this.reveal = true;
+      body = build();
+    }
+    if (this.kb && this.reveal) {
+      const at = this.nav.find((x) => x.key === this.cursor);
+      if (at) this.scroll.scroll_to_item(at.index);
+    }
+    this.reveal = false;
+    return v_flex().id("wranglr-keys").track_focus(this.handle).on_key_down((e, cx) => this.onKey(e, cx))
+      .size_full().min_h(0).bg(t.chrome).text_size(13)
       .on_mouse_up("left", (_e, cx) => { if (this.pressed) { this.pressed = this.over = null; cx.notify(); } })
       .child(header)
       .when(Boolean(warning), (el) => el.child(warning))
-      .child(v_flex().id("wranglr-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(6).overflow_y_scrollbar().mode("always")
+      .child(v_flex().id("wranglr-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(6).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
         .children(body))
+      .when(this.kb && !collapsed, (el) => el.child(div().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim).truncate()
+        .child("j k move · enter open · h l fold · s a lists · esc")))
       .child(v_flex().flex_none().pb(8).children(this.machineLines(t, collapsed)));
   }
 
