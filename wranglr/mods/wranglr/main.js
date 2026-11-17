@@ -76,6 +76,19 @@ function agentLabel(a, tab, lead) {
   return telling ? live : prog || a.title || "agent";
 }
 
+// What a tab's row says: the name someone gave it, else its lead terminal's title when it tells something, else its program.
+function tabLabel(tab, lead) {
+  const prog = lead?.program?.name;
+  if (tab.named && tab.name && tab.name !== prog) return tab.name;
+  const live = clean(lead?.title);
+  const path = /^[~/]|^[A-Za-z]:\\/.test((lead?.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, ""));
+  const telling = live && live !== prog && !path && !live.includes("@") && live.toLowerCase() !== lead?.program?.key;
+  return telling ? live : prog || `Tab ${tab.name ?? ""}`.trim();
+}
+
+// The Agents tab's sections, most urgent first.
+const SECTIONS = [["pinned", "Pinned"], ["blocked", "Needs you"], ["working", "Working"], ["done", "Done"], ["idle", "Idle"]];
+
 // A space speaks up only when something in it needs you.
 export function glyph(status) {
   return status === "blocked" || status === "done" ? "●" : "·";
@@ -110,6 +123,7 @@ export default class Wranglr extends View {
     if (this.dialog === "move" || this.dialog === "input") this.initInput(cx);
     else if (this.dialog === "settings") this.initSettings(cx);
     else if (this.dialog === "group") this.initGroup(cx);
+    else if (this.dialog === "confirm") { this.handle = cx.focus_handle(); this.handle.focus(); }
     else if (this.dialog === "menu") { this.at = 0; this.handle = cx.focus_handle(); this.handle.focus(); }
     else if (!this.dialog) this.initOwner(cx);
   }
@@ -128,6 +142,9 @@ export default class Wranglr extends View {
     this.pressed = null; // { kind: "row" | "group" | "sub", id, group?, sub? } while the button is down
     this.over = null; // the drop target under the pointer: { kind, id, group?, sub?, below }
     this.machines = [];
+    this.hovered = null; // the agent row under the pointer
+    this.tab = "spaces"; // the list shown: "spaces" or "agents"
+    try { if (localStorage.getItem("wranglr.tab") === "agents") this.tab = "agents"; } catch {}
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
 
@@ -363,6 +380,9 @@ export default class Wranglr extends View {
     else if (c === "fold") this.dispatch({ type: "foldFocused" }, cx);
     else if (c === "sort") this.dispatch({ type: "sort", value: null }, cx);
     else if (c === "settings") this.openSettings();
+    else if (c === "agents") this.showTab(this.tab === "agents" ? "spaces" : "agents");
+    else if (c === "pin" && focus) this.dispatch({ type: "pin", space: focus }, cx);
+    else if (c === "tabs" && focus) this.dispatch({ type: "expand", space: focus }, cx);
     else if (c === "group") {
       const at = focus && this.placeOf(focus);
       const g = at?.group && this.tree.groups.find((x) => x.id === at.group);
@@ -376,6 +396,12 @@ export default class Wranglr extends View {
       if (g) this.plus(g, at.sub, cx);
       else this.newSpace();
     }
+  }
+
+  showTab(tab) {
+    this.tab = tab;
+    this.pressed = this.over = null;
+    try { localStorage.setItem("wranglr.tab", tab); } catch {}
   }
 
   openMove(space) {
@@ -440,6 +466,15 @@ export default class Wranglr extends View {
       items.push({ label: "Remove group", action: { type: "removeCustom", group: g.id } });
     }
     if (g.can.dismiss) items.push({ label: "Dismiss", action: { type: "dismiss", group: g.id } });
+    const n = [...g.rows, ...g.subgroups.flatMap((x) => x.rows)].filter((r) => !r.dim).length;
+    if (n) items.push({
+      label: "Close group…", key: "c", icon: "x", width: 420,
+      dialog: {
+        dialog: "confirm", title: `Close ${g.name}?`, yes: n > 1 ? `Close ${n} spaces` : "Close 1 space",
+        detail: `This closes ${n > 1 ? `the ${n} spaces` : "the 1 space"} in this group and ends ${n > 1 ? "their" : "its"} terminals.${g.kind === "repo" ? " The group goes with them." : ""}`,
+        action: { type: "closeGroup", group: g.id },
+      },
+    });
     items.push({ label: "Settings…", key: "s", dialog: this.groupProps(g) });
     openMenu(items);
   }
@@ -611,8 +646,17 @@ export default class Wranglr extends View {
     });
   }
 
+  // A space's menu: Wranglr's own entries, then Herdr's. "More…" opens the shipped space menu.
   spaceMenu(id) {
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id } } });
+    const pinned = (this.state.pinned ?? []).includes(id);
+    openMenu([
+      { label: pinned ? "Unpin" : "Pin to the top", key: "p", icon: pinned ? "pin-off" : "pin", action: { type: "pin", space: id } },
+      { label: this.state.open?.[id] ? "Hide tabs" : "Show tabs", key: "t", icon: "files", action: { type: "expand", space: id } },
+      { label: "Move to group…", key: "m", icon: "folder", width: 420, dialog: { dialog: "move", space: id, at: this.placeOf(id) } },
+      { label: "Rename", key: "r", icon: "square-pen", run: { name: "space.rename", args: { id } } },
+      { label: "Close", key: "c", icon: "x", run: { name: "space.close", args: { id } } },
+      { label: "More…", icon: "chevron-right", shipped: { tab: "space", target: { id } } },
+    ]);
   }
 
   // Drag and drop
@@ -635,7 +679,7 @@ export default class Wranglr extends View {
     this.pressed = this.over = null;
     if (from?.kind !== "row") return;
     if (from.id === r.id) run("space.select", { id: r.id });
-    else this.dispatch({ type: "drop", space: from.id, group: at.group, sub: at.sub, before: below ? after : r.id }, cx);
+    else if (at) this.dispatch({ type: "drop", space: from.id, group: at.group, sub: at.sub, before: below ? after : r.id }, cx);
   }
 
   releaseGroup(g, after, cx) {
@@ -699,11 +743,24 @@ export default class Wranglr extends View {
     const name = w?.name ?? r.name;
     const g = w ? this.git[where(w, ps)] ?? null : null;
     const marks = r.dim || !d.agents.get(r.id)?.length ? null : this.agentMarks(r.id, d.agents.get(r.id), d);
+    const tabs = r.dim ? [] : (w?.tabs ?? []).filter((x) => !x.settled);
+    const open = !r.dim && !!this.state.open?.[r.id];
+    // The tabs toggle: shown once a space has more than one tab, or while its tabs are open.
+    const toggle = tabs.length > 1 || open
+      ? h_flex().id(`tabs-${r.id}`).flex_none().h(20).px(3).gap(2).items_center().rounded(5).text_size(11).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip(open ? "Hide tabs" : `Show ${tabs.length} tabs`)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => { cx.stop_propagation(); this.dispatch({ type: "expand", space: r.id }, cx); })
+        .child(svg(icon(open ? "chevron-down" : "chevron-right")).size(10).flex_none())
+        .child(String(tabs.length))
+      : null;
     const content = h_flex().gap(9).items_center().pl(indent)
       .child(this.avatar(r.id, name, t))
       .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(name))
       .when(Boolean(r.machine), (el) => el.child(this.chip(r.machine, t)))
       .child(g && !r.dim ? this.gitTail(g, name, t) : div().flex_1())
+      .when(Boolean(toggle), (el) => el.child(toggle))
       .when(Boolean(marks), (el) => el.child(marks));
     const el = v_flex().relative().id(`space-${r.id}`).px(8).h(30).flex_none().justify_center().rounded(8);
     if (r.dim) return el.opacity(0.5).child(content);
@@ -722,7 +779,76 @@ export default class Wranglr extends View {
   }
 
   rows(list, at, indent, d) {
-    return list.map((r, i) => this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d));
+    return list.flatMap((r, i) => [
+      this.row(r, at, list.slice(i + 1).find((x) => !x.dim)?.id ?? null, indent, d),
+      ...(!r.dim && this.state.open?.[r.id] ? this.tabRows(r, indent, d) : []),
+    ]);
+  }
+
+  // A space's tabs under its row. A click shows the space at that tab.
+  tabRows(r, indent, d) {
+    const { t, live } = d;
+    const w = live.get(r.id) ?? r.space;
+    return (w?.tabs ?? []).filter((x) => !x.settled).map((tab) => {
+      const lead = d.leads.get(tab.id);
+      const status = lead?.program?.agent ? lead.status : null;
+      const on = !!w.active && !!tab.active;
+      return h_flex().id(`tab-${tab.id}`).h(24).flex_none().pl(indent + 35).pr(8).gap(7).items_center().rounded(6)
+        .text_size(12).text_color(on ? t.foreground : t.muted).cursor_pointer()
+        .when(on, (el) => el.bg(t.hover))
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); run("space.select", { id: r.id }); run("tab.select", { id: tab.id }); })
+        .child(svg(icon(lead?.program?.agent ? "square" : "terminal")).size(11).flex_none().text_color(t.dim))
+        .child(div().flex_1().min_w(0).truncate().child(tabLabel(tab, lead)))
+        .when(status === "blocked" || status === "working" || status === "done", (el) => el.child(this.agentStatus(t, status)));
+    });
+  }
+
+  // The Agents tab: every agent by how much it needs you, each row naming its space.
+  agentList(d) {
+    const { t } = d;
+    const all = agents();
+    if (!all.length) return [div().px(8).py(10).text_size(12).text_color(t.dim).child("No agents running.")];
+    const leads = d.leads;
+    const tabs = new Map([...d.live.values()].flatMap((s) => s.tabs ?? []).map((tab) => [tab.id, tab]));
+    const out = [];
+    for (const [key, title] of SECTIONS) {
+      const members = all.filter((a) => (key === "pinned" ? a.pinned : !a.pinned && (a.status ?? "idle") === key)).sort((x, y) => (y.seq ?? 0) - (x.seq ?? 0));
+      if (!members.length) continue;
+      out.push(h_flex().h(24).mt(out.length ? 6 : 0).px(8).gap(6).flex_none().items_center().text_size(11).text_color(t[key] ?? t.dim)
+        .child(div().child(title)).child(div().text_color(t.dim).child(String(members.length))));
+      for (const a of members) out.push(this.agentRow(a, agentLabel(a, tabs.get(a.tab), leads.get(a.tab)), d));
+    }
+    return out;
+  }
+
+  agentRow(a, label, d) {
+    const { t } = d;
+    const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+    const pin = div().id(`agent-pin-${a.address}`).flex_none().p(2).rounded(4).text_color(t.dim).cursor_pointer()
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(a.pinned ? "Unpin" : "Pin to the top")
+      .on_click((_e, cx) => { cx.stop_propagation(); run("terminal.pin", { terminal: a.address, pinned: !a.pinned }); this.hovered = null; cx.notify(); })
+      .child(svg(icon(a.pinned ? "pin-off" : "pin")).size(13));
+    const mark = a.status === "blocked" || a.status === "working" || a.status === "done"
+      ? this.agentStatus(t, a.status)
+      : div().size(7).mx(2).flex_none().rounded(4).border_1().border_color(t.dim);
+    return h_flex().id(`agent-${a.address}`).h(30).px(8).gap(8).flex_none().items_center().rounded(8).cursor_pointer()
+      .when(!!a.focused, (el) => el.bg(t.selected))
+      .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_hover((on, cx) => {
+        if (on) this.hovered = a.address;
+        else if (this.hovered === a.address) this.hovered = null;
+        cx.notify();
+      })
+      .on_click(() => run("pane.focus", { pane: a.pane }))
+      .child(h_flex().w(16).flex_none().justify_center().child(mark))
+      .child(div().flex_1().min_w(0).truncate().text_color(a.status === "idle" && !a.focused ? t.muted : t.foreground).child(label))
+      .child(h_flex().flex_shrink(0).max_w(120).min_w(0).gap(5).items_center()
+        .child(this.avatar(a.space, a.space_name ?? "", t).size(14).rounded(4).text_size(9))
+        .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(a.space_name ?? "")))
+      .when(Boolean(machine), (el) => el.child(this.chip(machine, t)))
+      .when(this.hovered === a.address || !!a.pinned, (el) => el.child(pin));
   }
 
   // Each space's agents and what each row's tooltip calls them. Empty when the setting is off.
@@ -814,6 +940,14 @@ export default class Wranglr extends View {
   list(d) {
     const out = [];
     const groups = this.tree.groups;
+    const pinned = this.tree.pinned ?? [];
+    if (pinned.length) {
+      out.push(h_flex().h(24).px(8).gap(6).flex_none().items_center().text_size(11.5).text_color(d.t.muted)
+        .child(svg(icon("pin")).size(11).flex_none().text_color(d.t.dim))
+        .child(div().font_semibold().child("Pinned")));
+      out.push(...this.rows(pinned, null, 0, d));
+      if (groups.length || this.tree.loose.length) out.push(div().h(1).mx(8).my(6).flex_none().bg(d.t.border));
+    }
     groups.forEach((g, i) => {
       out.push(this.groupHead(g, groups[i + 1]?.id ?? null, d));
       if (g.folded) return;
@@ -841,7 +975,7 @@ export default class Wranglr extends View {
     const { t, live } = d;
     const byId = new Map();
     for (const g of this.tree.groups) for (const r of [...g.rows, ...g.subgroups.flatMap((s) => s.rows)]) byId.set(r.id, r);
-    for (const r of this.tree.loose) byId.set(r.id, r);
+    for (const r of [...this.tree.loose, ...(this.tree.pinned ?? [])]) byId.set(r.id, r);
     return this.tree.order.map((id, i) => {
       const w = live.get(id) ?? byId.get(id)?.space;
       return railCell(h_flex()
@@ -926,11 +1060,21 @@ export default class Wranglr extends View {
     this.kick(cx);
 
     const ps = panes();
-    const d = { t, live: new Map(sp.map((s) => [s.id, s])), ps, ...(collapsed ? { agents: new Map(), labels: new Map() } : this.agentData(sp, ps)) };
+    const d = { t, live: new Map(sp.map((s) => [s.id, s])), ps, leads: leadPanes(ps), ...(collapsed ? { agents: new Map(), labels: new Map() } : this.agentData(sp, ps)) };
+    const onAgents = this.tab === "agents" && !collapsed;
+    const waiting = collapsed ? 0 : agents().filter((a) => a.status === "blocked").length;
+    const tabButton = (id, label, badge) => h_flex().id(`wranglr-tab-${id}`).h(24).px(7).gap(5).flex_none().items_center().rounded(6).cursor_pointer()
+      .text_color(this.tab === id ? t.foreground : t.dim)
+      .when(this.tab === id, (el) => el.bg(t.selected))
+      .when(this.tab !== id, (el) => el.hover((s) => s.bg(t.hover).text_color(t.foreground)))
+      .on_click((_e, cx) => { this.showTab(id); cx.notify(); })
+      .child(label)
+      .when(badge > 0, (el) => el.child(div().px(4).rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).child(String(badge))));
     const sort = this.config.settings.sort;
-    const header = h_flex().h(31).pl(16).pr(10).gap(2).items_center().text_size(11.5).text_color(t.dim)
+    const header = h_flex().h(31).pl(9).pr(10).gap(2).items_center().text_size(11.5).text_color(t.dim)
       .when(collapsed, (el) => el.pl(0).pr(0).justify_center())
-      .when(!collapsed, (el) => el.child(div().flex_1().child("Spaces"))
+      .when(!collapsed, (el) => el.child(tabButton("spaces", "Spaces", 0)).child(tabButton("agents", "Agents", waiting)).child(div().flex_1().min_w(0)))
+      .when(!collapsed && !onAgents, (el) => el
         .child(this.headerButton("wranglr-sort", t, div().text_size(11).child(SORT_LABEL[sort] ?? sort), "Sort: click for the next", (_e, cx) => this.dispatch({ type: "sort", value: null }, cx)))
         .child(this.headerButton("wranglr-group", t, svg(icon("folder-plus")).size(14), "New group", () => openInput({ title: "New group", value: "", action: { type: "addCustom" } })))
         .child(this.headerButton("wranglr-settings", t, svg(icon("settings")).size(14), "Wranglr settings", () => this.openSettings())))
@@ -942,7 +1086,7 @@ export default class Wranglr extends View {
       : null;
     const body = !this.tree
       ? [h_flex().h(28).px(collapsed ? 0 : 8).items_center().when(collapsed, (el) => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…")]
-      : collapsed ? this.railRows(d) : this.list(d);
+      : collapsed ? this.railRows(d) : onAgents ? this.agentList(d) : this.list(d);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .on_mouse_up("left", (_e, cx) => { if (this.pressed) { this.pressed = this.over = null; cx.notify(); } })
       .child(header)
@@ -1233,15 +1377,42 @@ export default class Wranglr extends View {
     return this.dialogFrame(t, "wranglr-group", `${kind} settings: ${p.group?.name ?? ""}`, [...fields, ...bad], () => this.saveGroup());
   }
 
+  // Asks before closing a Group's spaces. Enter confirms, Esc cancels.
+  renderConfirm() {
+    const t = theme();
+    const p = props() ?? {};
+    const yes = () => { closeOverlay(p.overlay); if (p.action) send(p.action); };
+    const button = (id, text, primary, action) => h_flex().id(id).h(32).px(14).items_center().rounded(8)
+      .border_1().border_color(primary ? t.blocked : t.input).bg(primary ? t.blocked : t.raised)
+      .text_color(primary ? "#ffffff" : t.foreground).text_size(12.5).font_medium().cursor_pointer()
+      .hover((s) => s.opacity(0.88)).on_click(action).child(text);
+    return v_flex().id("wranglr-confirm").track_focus(this.handle)
+      .on_key_down((e, cx) => {
+        if (e.key === "enter") yes();
+        else if (e.key === "escape") closeOverlay(p.overlay);
+        else return;
+        cx.stop_propagation();
+      })
+      .w_full().min_h(0).p(18).gap(10).bg(t.popover).text_color(t.foreground)
+      .child(div().text_size(15).font_semibold().child(p.title ?? ""))
+      .child(div().text_size(12.5).text_color(t.muted).child(p.detail ?? ""))
+      .child(h_flex().pt(10).gap(8).justify_end()
+        .child(button("wc-cancel", "Cancel", false, () => closeOverlay(p.overlay)))
+        .child(button("wc-yes", p.yes ?? "Close", true, yes)));
+  }
+
   choose(item) {
     closeOverlay(props()?.overlay);
     if (!item) return;
-    if (item.dialog) openOverlay({ mod: "wranglr", kind: "dialog", width: 460, props: item.dialog });
+    if (item.dialog) openOverlay({ mod: "wranglr", kind: "dialog", width: item.width ?? 460, props: item.dialog });
+    else if (item.run) run(item.run.name, item.run.args ?? {});
+    else if (item.shipped) openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: item.shipped });
     else if (item.input) openInput(item.input);
     else if (item.action) send(item.action);
   }
 
   menuIcon(item) {
+    if (item.icon) return item.icon;
     if (item.dialog) return "settings";
     const type = item.input?.action?.type ?? item.action?.type;
     if (type === "plus") return item.input ? "git-branch" : "plus";
@@ -1282,6 +1453,7 @@ export default class Wranglr extends View {
     if (this.dialog === "menu") return this.renderMenu();
     if (this.dialog === "settings") return this.renderSettings();
     if (this.dialog === "group") return this.renderGroup();
+    if (this.dialog === "confirm") return this.renderConfirm();
     if (this.dialog) return div();
     return this.renderOwner(cx);
   }

@@ -10,13 +10,13 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 - **Workspace groups.** Named lists of Repos from the config file, shown even with no spaces open.
 - **Custom groups and Subgroups.** Groups you make and fill by hand. Any group can have Subgroups, such as Working and Review.
 - **Drag and drop.** Drag a space onto a row, a group or out of every group. Drag groups to reorder them.
-- **Start a space from a group.** "+" opens the Repo's main checkout or the Workspace home. Its right-click menu makes a new git worktree or picks the Machine.
-- **Worktree rules.** Where new worktrees go and which ref new branches start from, for all Repos or one.
+- **Start or close a group's spaces.** "+" opens the Repo's main checkout or the Workspace home, or makes a git worktree by rules you set. Close group closes every space in it.
 - **Automatic names.** New spaces are named `<ticket id> <words>` from their branch.
-- **Agent marks.** Each row shows agents that need you, are working or are done. Click the marks to go to the most urgent one.
+- **Spaces and Agents tabs.** The Agents tab lists every agent by how much it needs you, each row naming its space. On the Spaces tab, each row shows marks for its agents.
+- **Pinned spaces.** Pin a space to the top of the list. Unpinned, it returns to its Group.
+- **Tabs under a space.** Expand a space to see its tabs. Click one to open the space at that tab.
 - **Machines.** A space on another Machine shows its name. An unreachable one is dimmed, with Connect below the list.
-- **Sorts and folding.** Recent, Kind, A-Z or Manual. Click a group's header to fold it.
-- **Editor file.** A `<name>.code-workspace` file in each Workspace home lists its Repos.
+- **Sorts, folding and an editor file.** Recent, Kind, A-Z or Manual. Click a group's header to fold it. Each Workspace home gets a `<name>.code-workspace` file.
 - **Palette.** Every command is in the `palette` mod.
 
 ## Needs
@@ -42,7 +42,7 @@ Or by hand:
 
 ## Use
 
-Click a row to go to the space. Right-click a row, a group or "+" for its menu. In the header, the sort button cycles the sorts, the folder adds a Custom group and the gear opens settings.
+Click a row to go to the space. Right-click a row, a group or "+" for its menu. In the header, Spaces and Agents switch the list, the sort button cycles the sorts, the folder adds a Custom group and the gear opens settings.
 
 | Key | Action |
 |---|---|

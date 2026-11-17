@@ -23,11 +23,15 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 
 ## Using it
 
-- Click a row to go to the space. Right-click it for the shipped space menu.
+- The header has two tabs. Spaces is the list of Groups. Agents lists every agent under Pinned, Needs you, Working, Done and Idle, each row naming its space. Click an agent to go to its pane. Hover a row for its pin button. The Agents tab shows a count when agents need you.
+- Click a row to go to the space. Right-click it for Pin to the top, Show tabs, Move to group, Rename and Close. More opens the shipped space menu.
+- A pinned space leaves its Group and shows under Pinned at the top of the list, in the order pinned. Unpin it, or move it to a Group, and it returns to the Group it belongs in. Pinned spaces come first for the select keys.
+- A space with more than one tab shows a count at the end of its row. Click it to list the space's tabs under the row. Click a tab to show the space at that tab. Settled tabs are left out.
 - A space's row ends with marks for what its agents are doing: `!` for agents that need you, a spinner for working ones and a dot for done ones, each with a count above one. Idle agents show nothing. Hover for the list. Click the marks to go to the most urgent agent's pane.
 - Drag a row onto another row (it lands above, or below when you release on the row's lower half), onto a Group or Subgroup header (it goes to the end), or onto the empty area under the list (it leaves every Group).
 - Drag a Group header onto another to reorder Groups. Your drag order shows under the Manual sort.
-- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group) and Settings. Right-click a Subgroup for Rename and Remove.
+- Click a Group or Subgroup header to fold it. Right-click a Group for Add subgroup, Rename and Remove (Custom groups), Dismiss (an empty Repo group), Close group and Settings.
+- Close group asks first, then closes every space in the Group and its Subgroups and ends their terminals. Pinned spaces and spaces on a Machine that is away stay open. A Repo group goes with its last space and comes back when a space opens in that Repo. Workspace and Custom groups stay. Right-click a Subgroup for Rename and Remove.
 - "+" on a Group starts a space there: in the Repo's main checkout, in the Workspace home, or in your home folder for a Custom group. Right-click "+" for Open here, New worktree (Repo groups) and Open on a given Machine.
 - A Group's Settings set its Machines in order of preference. A Repo also has its worktree location and the ref new branches start from, and a Workspace its home on each Machine. A Workspace's and a Repo's settings are written to the config file. A Custom group's are kept in Wranglr's state.
 - In the header: the sort button cycles Recent, Kind, A-Z and Manual. The folder button adds a Custom group. The gear opens the settings menu, which edits the `settings` block of the config file. "+" is Herdr's own new space.
@@ -43,6 +47,9 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 | | `wranglr.new` | New space in the focused space's Group |
 | | `wranglr.name` | Name the focused space again |
 | | `wranglr.fold` | Fold the focused space's Group |
+| | `wranglr.pin` | Pin the focused space, or take its pin off |
+| | `wranglr.tabs` | Show or hide the focused space's tabs |
+| | `wranglr.agents` | Switch between the Spaces and Agents tabs |
 | | `wranglr.sort` | Next sort |
 | | `wranglr.settings` | Open the settings menu |
 | | `wranglr.group` | Open the settings of the focused space's Group |
@@ -99,7 +106,7 @@ Every command is also in the palette (the `palette` mod).
 
 Wranglr writes a `<name>.code-workspace` file in each Workspace home, listing the Workspace's Repos found on that Machine.
 
-Its own state (placements, Groups, folds, order, names) is in `~/.config/herdr-app/data/wranglr/state.json`.
+Its own state (placements, Groups, folds, order, names, pins, open tabs) is in `~/.config/herdr-app/data/wranglr/state.json`.
 
 ## Limits
 
