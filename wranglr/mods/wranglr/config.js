@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS = {
   agent: null,
   machine: null,
   agents: true,
+  revive: true,
 };
 
 const SORTS = ["recent", "kind", "az", "manual"];
@@ -38,6 +39,7 @@ function parseSettings(raw, errors) {
   if (!("agent" in s)) s.agent = DEFAULT_SETTINGS.agent;
   else if (s.agent !== null && !(Array.isArray(s.agent) && s.agent.length && s.agent.every((a) => typeof a === "string"))) fall("agent", "must be null or a list of strings");
   if (!("agents" in s)) s.agents = DEFAULT_SETTINGS.agents; else if (typeof s.agents !== "boolean") fall("agents", "must be true or false");
+  if (!("revive" in s)) s.revive = DEFAULT_SETTINGS.revive; else if (typeof s.revive !== "boolean") fall("revive", "must be true or false");
   if (!("machine" in s)) s.machine = DEFAULT_SETTINGS.machine;
   else if (s.machine !== null && !okMachine(s.machine)) fall("machine", 'must be a Machine name, "" for this computer, or null');
   return s;

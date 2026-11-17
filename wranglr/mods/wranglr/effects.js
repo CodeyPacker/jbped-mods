@@ -1,5 +1,5 @@
 // Runs the model's effects through Herdr, in order. A failing effect is reported and the rest run.
-import { run, notify } from "herdr";
+import { run, notify, hc } from "herdr";
 import { addWorktree } from "./worktree.js";
 import { askName as realAskName } from "./namer.js";
 import { saveSetting as realSaveSetting, saveSettings as realSaveSettings, saveGroup as realSaveGroup } from "./config.js";
@@ -16,6 +16,12 @@ async function runOne(e, { dispatch, askName, saveSetting, saveSettings, saveGro
   switch (e.type) {
     case "select": run("space.select", { id: e.id }); return;
     case "close": for (const id of e.ids) run("space.close", { id, confirmed: true }); return;
+    case "revive": {
+      // Typed into the terminal's new shell, then Enter.
+      const r = await hc(["send", e.terminal, e.command]);
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout || "hc send failed").trim());
+      return;
+    }
     case "rename": run("space.rename", { id: e.id, name: e.name }); return;
     case "start": {
       if (e.worktree && !(await makeWorktree(e.worktree, e.machine ?? null))) return;

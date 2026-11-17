@@ -8,14 +8,14 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 
 - **Repo groups.** Every clone and worktree of a Repo, on any Machine, in one group.
 - **Workspace groups.** Named lists of Repos from the config file, shown even with no spaces open.
-- **Custom groups and Subgroups.** Groups you make and fill by hand. Any group can have Subgroups, such as Working and Review.
-- **Drag and drop.** Drag a space onto a row, a group or out of every group. Drag groups to reorder them.
+- **Custom groups, Subgroups and drag and drop.** Groups you make and fill by hand, each with optional Subgroups. Drag spaces between groups and drag groups to reorder them.
 - **Start or close a group's spaces.** "+" opens the Repo's main checkout or the Workspace home, or makes a git worktree by rules you set. Close group closes every space in it.
 - **Automatic names.** New spaces are named `<ticket id> <words>` from their branch.
 - **Spaces and Agents tabs.** The Agents tab lists every agent by how much it needs you, each row naming its space. On the Spaces tab, each row shows marks for its agents.
 - **Pinned spaces.** Pin a space to the top of the list. Unpinned, it returns to its Group.
 - **Tabs under a space.** Expand a space to see its tabs. Click one to open the space at that tab.
 - **Machines.** A space on another Machine shows its name. An unreachable one is dimmed, with Connect below the list.
+- **Revive.** After Herdr's core restarts, each Claude Code agent that was running is resumed in its terminal with its session.
 - **Sorts, folding and an editor file.** Recent, Kind, A-Z or Manual. Click a group's header to fold it. Each Workspace home gets a `<name>.code-workspace` file.
 - **Palette.** Every command is in the `palette` mod.
 
@@ -23,7 +23,7 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 
 - git. `claude` is used only to name a space whose branch has too many words.
 - It replaces the `spaces` block in your layout and rebinds `alt-1` to `alt-9`, `ctrl-shift-pagedown` and `ctrl-shift-pageup`.
-- It runs git, reads and writes `~/.config/herdr-app/wranglr.json`, keeps its state in `~/.config/herdr-app/data/wranglr/`, reads Claude Code's session files under `~/.claude/` for an agent's current folder, and writes a `<name>.code-workspace` file in each Workspace home. No network of its own.
+- It runs git, reads and writes `~/.config/herdr-app/wranglr.json`, keeps its state in `~/.config/herdr-app/data/wranglr/`, reads Claude Code's session files under `~/.claude/` for an agent's current folder and session, types the resume command into restored terminals, and writes a `<name>.code-workspace` file in each Workspace home. No network of its own.
 
 ## Install
 

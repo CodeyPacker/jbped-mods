@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  emptyState, mkey, clonedMap, arrange, act, ticketOf, branchWords, workspaceHome,
+  emptyState, mkey, clonedMap, arrange, act, ticketOf, branchWords, workspaceHome, keptFlags, resumeCommand,
 } from "../mods/wranglr/model.js";
 
 const TICKET = "^(?:[a-z]+/)?#?(\\d{2,})";
@@ -95,7 +95,7 @@ test("mkey, emptyState and clonedMap", () => {
   assert.equal(mkey(null), "");
   assert.equal(mkey("wsl"), "wsl");
   const s = emptyState();
-  assert.deepEqual(Object.keys(s).sort(), ["active", "closing", "custom", "dismissed", "folded", "names", "naming", "open", "order", "pending", "pinned", "place", "seen", "snap", "started", "subs", "titles", "v"].sort());
+  assert.deepEqual(Object.keys(s).sort(), ["active", "closing", "custom", "dismissed", "folded", "names", "naming", "open", "order", "pending", "pinned", "place", "revive", "seen", "snap", "started", "subs", "titles", "v"].sort());
   const state = { ...s, seen: { [FRONT]: { name: "frontend", on: { "": "/old/frontend", wsl: "/w/frontend" } } } };
   const c = config({ workspaces: [ARDEN], repos: { [BACK]: { machines: [], on: { wsl: { path: "/w/backend" } } } } });
   assert.deepEqual(clonedMap(c, state), {
@@ -866,4 +866,62 @@ test("closing a Custom group closes its spaces and keeps the group, an empty Rep
   r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, empty, c, r.state);
   assert.deepEqual(r.effects, []);
   assert.equal(group(arrange(empty, c, r.state), "repo:github.com/o/hm"), undefined);
+});
+
+// Revive
+
+const SESSION = "a2577da9-364f-4793-b7a1-50e0f1f604cb";
+const seen = (o = {}) => ({ type: "agentSeen", terminal: "wsl/t2c", pid: 876, session: SESSION, cwd: "/r/hm", flags: ["-r"], ...o });
+
+test("keptFlags keeps only the flags a resume may carry", () => {
+  assert.deepEqual(keptFlags(["claude", "-r", "--model", "opus", "fix the login bug", "--dangerously-skip-permissions"]), ["--model", "opus", "--dangerously-skip-permissions"]);
+  assert.deepEqual(keptFlags(["claude", "--permission-mode=plan", "--resume", "abc", "-c", "--continue"]), ["--permission-mode=plan"]);
+  assert.deepEqual(keptFlags(["claude", "--model", "x; rm -rf /", "--model=$(id)", "--model"]), []);
+  assert.deepEqual(keptFlags(null), []);
+});
+
+test("resumeCommand quotes the folder and refuses a record it cannot trust", () => {
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r/hm", flags: [] }), `cd '/r/hm' && claude --resume ${SESSION}`);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r/it's here", flags: ["--model", "opus"] }), `cd '/r/it'\\''s here' && claude --model opus --resume ${SESSION}`);
+  assert.equal(resumeCommand({ session: "x; rm -rf /", cwd: "/r" }), null);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "relative" }), null);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r\nrm -rf /" }), null);
+  assert.equal(resumeCommand(null), null);
+});
+
+test("agentSeen remembers a Claude Code agent's session against its terminal, and only a record it can trust", () => {
+  const w = pinWorld(), c = config();
+  let r = run(seen({ flags: ["-r", "--model", "opus", "do the thing"] }), w, c);
+  assert.deepEqual(r.state.revive, { "wsl/t2c": { pid: 876, session: SESSION, cwd: "/r/hm", flags: ["--model", "opus"] } });
+  assert.deepEqual(r.effects, []);
+  assert.equal(run(seen(), w, c, r.state).state.revive["wsl/t2c"].flags.length, 0);
+  for (const bad of [{ pid: 0 }, { pid: "876" }, { session: "nope" }, { cwd: "rel" }, { terminal: "" }])
+    assert.deepEqual(run(seen(bad), w, c).state.revive, {});
+});
+
+test("a terminal back as a new shell gets its agent resumed once, with one toast for all", () => {
+  const w = pinWorld(), c = config();
+  let r = run(seen(), w, c);
+  r = run(seen({ terminal: "wsl/t7", pid: 900, cwd: "/r/other" }), w, c, r.state);
+  // The same process: nothing was lost.
+  assert.deepEqual(run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 876 }] }, w, c, r.state).effects, []);
+  const back = run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }, { terminal: "wsl/t7", pid: 5002 }, { terminal: "wsl/zz", pid: 5 }] }, w, c, r.state);
+  assert.deepEqual(back.effects, [
+    { type: "revive", terminal: "wsl/t2c", command: `cd '/r/hm' && claude --resume ${SESSION}` },
+    { type: "revive", terminal: "wsl/t7", command: `cd '/r/other' && claude --resume ${SESSION}` },
+    { type: "toast", level: "info", title: "Wranglr", body: "Resumed 2 agents after a restart." },
+  ]);
+  // The new process is remembered, so the same look does not resume it again.
+  assert.equal(back.state.revive["wsl/t2c"].pid, 5001);
+  assert.deepEqual(run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }] }, w, c, back.state).effects, []);
+});
+
+test("with revive off nothing is resumed and the record is dropped, and agentGone forgets a terminal", () => {
+  const w = pinWorld();
+  let r = run(seen(), w, config());
+  const off = run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }] }, w, config({ settings: { revive: false } }), r.state);
+  assert.deepEqual(off.effects, []);
+  assert.deepEqual(off.state.revive, {});
+  r = run({ type: "agentGone", terminals: ["wsl/t2c", "wsl/none"] }, w, config(), r.state);
+  assert.deepEqual(r.state.revive, {});
 });

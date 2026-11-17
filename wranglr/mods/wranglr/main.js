@@ -17,7 +17,7 @@ import { makeResolver } from "./repos.js";
 import { loadState, makeSaver } from "./store.js";
 import { writeWorkspaceFile } from "./workspacefile.js";
 import { runEffects } from "./effects.js";
-import { agentDir } from "./agentdir.js";
+import { agentFacts, terminalNow } from "./agentdir.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -140,8 +140,11 @@ export default class Wranglr extends View {
     this.ready = {}; // machine -> its layout was readable at the last look
     this.at = {}; // space -> its where() at the last look
     this.real = {}; // space -> the folder its Claude Code agent is in now, when it could be told
-    this.realAt = {}; // space -> when that was last asked
-    this.realBusy = new Set(); // spaces being asked about
+    this.realAt = {}; // agent -> when it was last asked about
+    this.realBusy = new Set(); // agents being asked about
+    this.backAt = undefined; // when remembered agents' terminals were last looked at
+    this.backKey = null; // the ready Machines at that look
+    this.backBusy = false;
     this.agentWas = {}; // agent -> its status at the last look
     this.watching = new Set(); // local repos' git folders
     this.pressed = null; // { kind: "row" | "group" | "sub", id, group?, sub? } while the button is down
@@ -532,33 +535,68 @@ export default class Wranglr extends View {
     return this.real[s.id] ? JSON.stringify([s.machine ?? null, this.real[s.id]]) : where(s, ps);
   }
 
-  // Asks where each space's first Claude Code agent is working: once when it is first seen, when
-  // its turn ends, and after the fallback time while the window is in front.
+  // Asks about each Claude Code agent: once when it is first seen, when its turn ends, and after the
+  // fallback time while the window is in front. Its session is remembered for a revive, and the
+  // first one in a space says where that space's git is read.
   refreshReal(now, sp, cx) {
+    const all = agents(), list = all.filter((a) => a.app === "claude-code");
     const first = new Map(), was = {};
-    for (const a of agents()) {
-      was[a.address] = a.status;
-      if (a.app === "claude-code" && !first.has(a.space)) first.set(a.space, a);
-    }
+    for (const a of all) was[a.address] = a.status;
+    for (const a of list) if (!first.has(a.space)) first.set(a.space, a.address);
     for (const id of Object.keys(this.real)) if (!first.has(id)) delete this.real[id];
-    for (const id of Object.keys(this.realAt)) if (!first.has(id)) delete this.realAt[id];
+    const live = new Set(list.map((a) => a.address));
+    for (const t of Object.keys(this.realAt)) if (!live.has(t)) delete this.realAt[t];
     const active = window().active;
-    for (const [id, a] of first) {
+    for (const a of list) {
       const ended = this.agentWas[a.address] === "working" && a.status !== "working";
-      const last = this.realAt[id];
-      if (this.realBusy.has(id) || (last !== undefined && !ended && !(active && now - last > FALLBACK))) continue;
-      const space = sp.find((s) => s.id === id);
+      const last = this.realAt[a.address];
+      if (this.realBusy.has(a.address) || (last !== undefined && !ended && !(active && now - last > FALLBACK))) continue;
+      const space = sp.find((s) => s.id === a.space);
       if (!space) continue;
-      this.realAt[id] = now;
-      this.realBusy.add(id);
+      this.realAt[a.address] = now;
+      this.realBusy.add(a.address);
       cx.spawn(async (cx) => {
-        const dir = await agentDir(a.address, space.machine ?? null);
-        this.realBusy.delete(id);
+        const facts = await agentFacts(a.address, space.machine ?? null);
+        this.realBusy.delete(a.address);
         // Not told this time: what it showed stays.
-        if (dir && this.real[id] !== dir) { this.real[id] = dir; cx.notify(); }
+        if (!facts) return;
+        if (facts.pid && facts.cwd) this.dispatch({ type: "agentSeen", terminal: a.address, pid: facts.pid, session: facts.session, cwd: facts.cwd, flags: facts.flags }, cx);
+        if (facts.dir && first.get(a.space) === a.address && this.real[a.space] !== facts.dir) { this.real[a.space] = facts.dir; cx.notify(); }
       });
     }
     this.agentWas = was;
+    this.checkBack(now, new Set(all.map((a) => a.address)), cx);
+  }
+
+  // Looks at the terminals of remembered agents that have no agent now: at the start, when a
+  // Machine becomes ready, and after the fallback time. A closed terminal, or one whose agent left
+  // by itself, is forgotten. One that is back as a new shell gets its agent resumed.
+  checkBack(now, live, cx) {
+    if (!this.loaded || this.backBusy) return;
+    const ms = machines();
+    const ready = new Set(ms.filter((m) => m.layout === "ready").map((m) => mkey(m.name)));
+    if (!ms.some((m) => m.name === null)) ready.add("");
+    const key = [...ready].sort().join("\n");
+    if (this.backAt !== undefined && key === this.backKey && now - this.backAt <= FALLBACK) return;
+    this.backAt = now;
+    this.backKey = key;
+    const machineOf = (t) => (t.includes("/") ? t.slice(0, t.indexOf("/")) : "");
+    const todo = Object.keys(this.state.revive ?? {}).filter((t) => !live.has(t) && ready.has(machineOf(t)));
+    if (!todo.length) return;
+    this.backBusy = true;
+    cx.spawn(async (cx) => {
+      const gone = [], back = [];
+      for (const t of todo) {
+        const seen = await terminalNow(t);
+        const entry = this.state.revive?.[t];
+        if (!seen || !entry) continue;
+        if (seen.gone || (seen.idle && seen.pid === entry.pid)) gone.push(t);
+        else if (seen.idle) back.push({ terminal: t, pid: seen.pid });
+      }
+      this.backBusy = false;
+      if (gone.length) this.dispatch({ type: "agentGone", terminals: gone }, cx);
+      if (back.length) this.dispatch({ type: "terminalsBack", list: back }, cx);
+    });
   }
 
   // `key` and the other places in its repo (a commit there moves their ahead/behind).
@@ -896,9 +934,7 @@ export default class Wranglr extends View {
       .on_click(() => run("pane.focus", { pane: a.pane }))
       .child(h_flex().w(16).flex_none().justify_center().child(mark))
       .child(div().flex_1().min_w(0).truncate().text_color(a.status === "idle" && !a.focused ? t.muted : t.foreground).child(label))
-      .child(h_flex().flex_shrink(0).max_w(120).min_w(0).gap(5).items_center()
-        .child(this.avatar(a.space, a.space_name ?? "", t).size(14).rounded(4).text_size(9))
-        .child(div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(a.space_name ?? "")))
+      .child(div().flex_shrink(0).max_w(120).min_w(0).truncate().text_size(11.5).text_color(t.dim).child(a.space_name ?? ""))
       .when(Boolean(machine), (el) => el.child(this.chip(machine, t)))
       .when(this.hovered === a.address || !!a.pinned, (el) => el.child(pin));
   }
@@ -1329,7 +1365,7 @@ export default class Wranglr extends View {
     const p = props() ?? {};
     const s = { ...DEFAULT_SETTINGS, ...(p.settings ?? {}) };
     this.known = Array.isArray(p.known) ? p.known.filter((m) => typeof m === "string") : [""];
-    this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname, agents: s.agents !== false, machine: typeof s.machine === "string" ? s.machine : null };
+    this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname, agents: s.agents !== false, revive: s.revive !== false, machine: typeof s.machine === "string" ? s.machine : null };
     this.pick = { ...this.was };
     const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal" };
     this.makeInputs(
@@ -1366,6 +1402,7 @@ export default class Wranglr extends View {
       this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."),
       this.field(t, "Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"),
       this.field(t, "Agent status on each space", pick("agents", [[true, "On"], [false, "Off"]]), "agents", "Marks on a space's row for agents that need you, are working or are done. Click them to go to the most urgent one."),
+      this.field(t, "Resume agents after a restart", pick("revive", [[true, "On"], [false, "Off"]]), "revive", "When Herdr's core restarts, each Claude Code agent that was running is resumed in its terminal with its session."),
       this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern wins."),
       this.field(t, "Ticket pattern", this.textInput(t, "ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."),
       this.field(t, "New spaces run", this.textInput(t, "agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."),

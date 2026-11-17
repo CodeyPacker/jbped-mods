@@ -1,7 +1,7 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { fake, execCalls, hcCalls, reset } from "herdr";
-import { agentDir, lastCwd } from "../mods/wranglr/agentdir.js";
+import { agentDir, agentFacts, terminalNow, lastCwd } from "../mods/wranglr/agentdir.js";
 
 const SID = "a2577da9-364f-4793-b7a1-50e0f1f604cb";
 const ok = (stdout) => Promise.resolve({ code: 0, stdout, stderr: "" });
@@ -62,4 +62,31 @@ test("agentDir gives null for anything it cannot trust", async () => {
   assert.equal(await agentDir("t1", "wsl"), null);
   fake.hc = () => Promise.reject(new Error("no core"));
   assert.equal(await agentDir("t1", "wsl"), null);
+});
+
+test("agentFacts gives the terminal's process, the session, where it started, its flags and where it works now", async () => {
+  fake.hc = () => ok(JSON.stringify({ pid: 876, foreground: { name: "claude", pid: 8887, argv: ["claude", "-r", "--model", "opus"] } }));
+  fake.exec = (_c, args) => (args[1].includes("sessions") ? ok(JSON.stringify({ sessionId: SID, cwd: "/r" })) : ok('"cwd":"/r/wt"'));
+  assert.deepEqual(await agentFacts("wsl/t2c", "wsl"), { pid: 876, session: SID, cwd: "/r", flags: ["-r", "--model", "opus"], dir: "/r/wt" });
+  // No transcript: the rest is still known.
+  fake.exec = (_c, args) => (args[1].includes("sessions") ? ok(JSON.stringify({ sessionId: SID, cwd: "/r" })) : no());
+  assert.equal((await agentFacts("wsl/t2c", "wsl")).dir, null);
+});
+
+test("terminalNow tells an idle shell, a busy terminal, a closed one and one it could not ask about", async () => {
+  fake.hc = () => ok(JSON.stringify({ pid: 19028, state: "live", foreground: { name: "bash", pid: 19028 } }));
+  assert.deepEqual(await terminalNow("wsl/t1"), { pid: 19028, idle: true });
+  assert.deepEqual(hcCalls, [["get", "wsl/t1", "--json"]]);
+  fake.hc = () => ok(JSON.stringify({ pid: 19028, state: "live", foreground: { name: "vim", pid: 20000 } }));
+  assert.deepEqual(await terminalNow("t1"), { pid: 19028, idle: false });
+  fake.hc = () => Promise.resolve({ code: 3, stdout: JSON.stringify({ error: { kind: "not_found", message: 'no terminal "t1"' } }), stderr: "" });
+  assert.deepEqual(await terminalNow("t1"), { gone: true });
+  fake.hc = () => ok(JSON.stringify({ pid: 5, state: "finished" }));
+  assert.deepEqual(await terminalNow("t1"), { gone: true });
+  fake.hc = () => Promise.resolve({ code: 1, stdout: JSON.stringify({ error: { kind: "unreachable" } }), stderr: "" });
+  assert.equal(await terminalNow("t1"), null);
+  fake.hc = () => ok("{}");
+  assert.equal(await terminalNow("t1"), null);
+  fake.hc = () => Promise.reject(new Error("no core"));
+  assert.equal(await terminalNow("t1"), null);
 });

@@ -70,7 +70,8 @@ Every command is also in the palette (the `palette` mod).
     "ticket": "^(?:[a-z]+/)?#?(\\d{2,})",
     "agent": ["claude"],
     "machine": "wsl",
-    "agents": true
+    "agents": true,
+    "revive": true
   },
   "workspaces": [
     {
@@ -101,12 +102,25 @@ Every command is also in the palette (the `palette` mod).
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.
 - `machine`: the default Machine. "+" on a Group starts there when the Group has no `machines` of its own, or when none of them is ready. `""` is this computer. Left out, a Group starts on this computer and the header "+" starts where Herdr does. A default Machine that is away or where the Group cannot start is skipped for this computer.
 - `agents`: show agent status marks on each space's row. `false` leaves them out.
+- `revive`: resume agents after Herdr's core restarts (see Revive). `false` turns it off.
 - A Workspace's `repos` are Repo ids: the remote URL without scheme, user and `.git` (`github.com/Org/Repo`). `machines` lists Machine names in order of preference, `""` being this computer. `on.<machine>.home` sets the Workspace home there. Without it, the home is the folder that holds all of the Workspace's Repos, when there is one. `on.<machine>.paths` says where a Repo is checked out when Wranglr has not seen it there yet.
 - `repos` gives the same Machines and paths for a Repo on its own.
 
 Wranglr writes a `<name>.code-workspace` file in each Workspace home, listing the Workspace's Repos found on that Machine.
 
 Its own state (placements, Groups, folds, order, names, pins, open tabs) is in `~/.config/herdr-app/data/wranglr/state.json`.
+
+## Revive
+
+When Herdr's core stops (a reboot, a crash, a core restart), Herdr brings each terminal back as a plain shell in the same space and tab. Its agent is gone. Wranglr resumes Claude Code agents in those shells.
+
+- While a Claude Code agent runs, Wranglr remembers its session id, the folder it was started in, and its terminal's process, in its state file. It reads them from Claude Code's own files under `~/.claude/` on the agent's Machine, when the agent is first seen, when its turn ends and once a minute.
+- When Wranglr starts, when a Machine becomes ready and once a minute, it looks at the remembered terminals that have no agent. One that is a new process with nothing running in it was lost and restored, so Wranglr types `cd '<folder>' && claude --resume <session>` into it. Each terminal is resumed once, and a toast says how many were.
+- The resumed command keeps `--dangerously-skip-permissions`, `--permission-mode` and `--model` from the original command line. Everything else, a first message included, is left out. The agent resumes idle: nothing is sent to it.
+- An agent you exit yourself, or whose terminal you close, is forgotten and not resumed.
+- A restored terminal with something already running in it is left alone.
+- Only Claude Code agents are resumed, and not ones on this computer under Windows, since reading the session needs `sh`. The session remembered can be up to a minute old.
+- `"revive": false`, or the switch in the settings menu, turns it off.
 
 ## Limits
 

@@ -250,3 +250,13 @@ test("agents is on by default, a boolean, and anything else falls back", () => {
   assert.equal(settingError("agents", false), null);
   assert.ok(settingError("agents", 0));
 });
+
+test("revive is on by default, a boolean, and anything else falls back", () => {
+  assert.equal(parseConfig(null).config.settings.revive, true);
+  assert.equal(parseConfig(JSON.stringify({ settings: { revive: false } })).config.settings.revive, false);
+  const { config, errors } = parseConfig(JSON.stringify({ settings: { revive: "no" } }));
+  assert.equal(config.settings.revive, true);
+  assert.equal(errors.length, 1);
+  assert.equal(settingError("revive", false), null);
+  assert.ok(settingError("revive", 1));
+});

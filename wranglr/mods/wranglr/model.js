@@ -11,7 +11,7 @@ export function emptyState() {
     v: 1, place: {}, started: {}, custom: [], subs: {}, folded: {},
     order: { groups: [], spaces: {} }, dismissed: [], seen: {}, snap: {},
     names: {}, titles: {}, naming: {}, pending: [], active: {},
-    pinned: [], open: {}, closing: [],
+    pinned: [], open: {}, closing: [], revive: {},
   };
 }
 
@@ -643,7 +643,7 @@ function doSort(a, c) {
 }
 
 // The settings menu's Save: the changed settings, written in one go.
-const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine", "agents"];
+const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine", "agents", "revive"];
 function doSettings(a, c) {
   const values = {};
   for (const key of SETTINGS) if (a.values && typeof a.values === "object" && key in a.values) values[key] = a.values[key];
@@ -837,6 +837,64 @@ function doPlus(a, c) {
   else plusWorkspace(a, c, group, mode);
 }
 
+// Revive: each Claude Code agent's session is remembered against its terminal while it runs.
+// After the core restarts, the terminal is back as a new shell (a new process) and the agent is resumed in it.
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FLAG_VALUE = /^[A-Za-z0-9._:\[\]-]+$/;
+const VALUE_FLAGS = ["--permission-mode", "--model"];
+const okPid = (pid) => Number.isInteger(pid) && pid > 0;
+const okFolder = (p) => typeof p === "string" && /^(?:[A-Za-z]:)?[\\/]/.test(p) && !/[\r\n\0]/.test(p);
+
+/** The flags of a Claude Code command line that a resume keeps. Everything else, a first message included, is dropped. */
+export function keptFlags(argv) {
+  const out = [], list = Array.isArray(argv) ? argv.filter((x) => typeof x === "string") : [];
+  for (let i = 1; i < list.length; i++) {
+    const arg = list[i];
+    if (arg === "--dangerously-skip-permissions") out.push(arg);
+    else if (VALUE_FLAGS.includes(arg) && FLAG_VALUE.test(list[i + 1] ?? "")) out.push(arg, list[++i]);
+    else {
+      const [flag, value] = arg.split(/=(.*)/s);
+      if (VALUE_FLAGS.includes(flag) && FLAG_VALUE.test(value ?? "")) out.push(arg);
+    }
+  }
+  return out;
+}
+
+const quote = (text) => "'" + text.replace(/'/g, "'\\''") + "'";
+
+/** What is typed into the shell to resume a remembered agent, or null when the record cannot be trusted. */
+export function resumeCommand(entry) {
+  if (!entry || !SESSION_ID.test(entry.session ?? "") || !okFolder(entry.cwd)) return null;
+  return ["cd", quote(entry.cwd), "&&", "claude", ...keptFlags(["claude", ...(entry.flags ?? [])]), "--resume", entry.session].join(" ");
+}
+
+function doAgentSeen(a, c) {
+  if (typeof a.terminal !== "string" || !a.terminal || !okPid(a.pid) || !SESSION_ID.test(a.session ?? "") || !okFolder(a.cwd)) return;
+  c.s.revive[a.terminal] = { pid: a.pid, session: a.session, cwd: a.cwd, flags: keptFlags(["claude", ...(Array.isArray(a.flags) ? a.flags : [])]) };
+}
+
+// The agent left by itself, or its terminal closed: nothing to resume.
+function doAgentGone(a, c) {
+  for (const t of Array.isArray(a.terminals) ? a.terminals : []) delete c.s.revive[t];
+}
+
+// Terminals seen again with nothing running in them: { terminal, pid }. One whose process is not the one
+// remembered was lost and given a new shell, so its agent is resumed there. Each is resumed once.
+function doTerminalsBack(a, c) {
+  let n = 0;
+  for (const t of Array.isArray(a.list) ? a.list : []) {
+    const entry = c.s.revive[t?.terminal];
+    if (!entry || !okPid(t.pid) || t.pid === entry.pid) continue;
+    const command = resumeCommand(entry);
+    if (c.config.settings.revive === false || !command) { delete c.s.revive[t.terminal]; continue; }
+    entry.pid = t.pid;
+    c.effects.push({ type: "revive", terminal: t.terminal, command });
+    n++;
+  }
+  if (n) c.effects.push({ type: "toast", level: "info", title: "Wranglr", body: `Resumed ${n} agent${n > 1 ? "s" : ""} after a restart.` });
+}
+
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
   select: doSelect, next: doStep, prev: doStep, plus: doPlus,
@@ -845,6 +903,7 @@ const HANDLERS = {
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,
   dismiss: doDismiss, name: doName, named: doNamed,
   pin: doPin, expand: doExpand, closeGroup: doCloseGroup,
+  agentSeen: doAgentSeen, agentGone: doAgentGone, terminalsBack: doTerminalsBack,
 };
 
 export function act(action, world, config, state) {

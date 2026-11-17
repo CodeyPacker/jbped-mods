@@ -1,6 +1,6 @@
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { fake, execCalls, runCalls, notes, reset } from "herdr";
+import { fake, execCalls, runCalls, notes, hcCalls, reset } from "herdr";
 import { runEffects } from "../mods/wranglr/effects.js";
 
 const ok = { code: 0, stdout: "", stderr: "" };
@@ -90,4 +90,17 @@ test("settings and group save through the config module, and a failed save says 
 test("close closes each space without asking again", async () => {
   await runEffects([{ type: "close", ids: ["s1", "s2"] }], noDeps);
   assert.deepEqual(runCalls, [{ name: "space.close", args: { id: "s1", confirmed: true } }, { name: "space.close", args: { id: "s2", confirmed: true } }]);
+});
+
+test("revive types the resume command into the terminal, and a failed send is reported", async () => {
+  hcCalls.length = 0;
+  fake.hc = () => Promise.resolve(ok);
+  await runEffects([{ type: "revive", terminal: "wsl/t2c", command: "cd '/r' && claude --resume x" }], noDeps);
+  assert.deepEqual(hcCalls, [["send", "wsl/t2c", "cd '/r' && claude --resume x"]]);
+  assert.equal(notes.length, 0);
+  fake.hc = () => Promise.resolve({ code: 3, stdout: "", stderr: "no terminal" });
+  await runEffects([{ type: "revive", terminal: "wsl/t2c", command: "x" }], noDeps);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0].body, /no terminal/);
+  fake.hc = null;
 });
