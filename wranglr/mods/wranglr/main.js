@@ -435,7 +435,9 @@ export default class Wranglr extends View {
 
   // The cursor's look on a row.
   ring(el, key, t) {
-    return el.when(this.isCursor(key), (e) => e.bg(t.hover).border_1().border_color(t.accent));
+    // Drawn over the row, not as its border: a border would move the row's content by its width.
+    return el.when(this.isCursor(key), (e) => e.relative().bg(t.hover)
+      .child(div().absolute().top(0).bottom(0).left(0).right(0).rounded(6).border_1().border_color(t.accent)));
   }
 
   // The row the keys start on: the shown space or the focused agent, else the first.
