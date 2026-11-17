@@ -457,6 +457,9 @@ export default class Wranglr extends View {
     const toKey = (key) => { if (nav.some((x) => x.key === key)) { this.cursor = key; this.reveal = true; } };
     const head = it?.kind === "group" || it?.kind === "sub";
     const fold = () => this.dispatch({ type: "fold", group: it.group, sub: it.sub }, cx);
+    // The header the cursor is on or under: a row's Subgroup or Group, a tab's through its space.
+    const byKey = (key) => nav.find((x) => x.key === key);
+    const over = head ? it : byKey((it?.kind === "tab" ? byKey(it.parent) : it)?.parent);
     if (k === "j" || k === "down") to(i + 1);
     else if (k === "k" || k === "up") to(i - 1);
     else if (k === "g") to(0);
@@ -464,6 +467,15 @@ export default class Wranglr extends View {
     // Not Tab: the window takes it to step the keyboard to the next control.
     else if (k === "s" || k === "a") this.showTab(k === "a" ? "agents" : "spaces");
     else if (k === "escape" || k === "q") this.leaveKeys();
+    else if (k === "c") {
+      if (over) { this.dispatch({ type: "fold", group: over.group, sub: over.sub }, cx); this.cursor = over.key; this.reveal = true; }
+    }
+    else if (k === "shift-c") {
+      // Folds every Group while any is open, else opens them all.
+      const groups = this.tree?.groups ?? [], open = groups.some((g) => !g.folded);
+      for (const g of groups) if (g.folded !== open) this.dispatch({ type: "fold", group: g.id, sub: null }, cx);
+      if (over) { this.cursor = `g:${over.group}`; this.reveal = true; }
+    }
     else if (k === "enter" || k === "space") {
       if (head) fold();
       else if (it?.kind === "row") { run("space.select", { id: it.space }); this.leaveKeys(); }
@@ -1300,7 +1312,7 @@ export default class Wranglr extends View {
       .child(v_flex().id("wranglr-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(6).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
         .children(body))
       .when(this.kb && !collapsed, (el) => el.child(div().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim).truncate()
-        .child("j k move · enter open · h l fold · s a lists · esc")))
+        .child("j/k move · enter open · h/l fold · c group · C all groups · s/a lists · esc")))
       .child(v_flex().flex_none().pb(8).children(this.machineLines(t, collapsed)));
   }
 
