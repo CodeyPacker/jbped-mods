@@ -50,3 +50,14 @@ Mods are edited in `~/.config/herdr-app/mods/`, where Herdr hot-reloads them, th
 ## preview.png
 
 Take it with `herdr-app shot <share>/preview.png` in a private Herdr app, showing the mod in use with made-up repos, branches, tickets and names. The picture is public, so every word in it must be one you would publish.
+
+For a styled preview, treat Dockr's preview as the composition reference:
+
+- Keep the real mod interface dominant, large and readable. Do not invent, redraw or substantially crop its UI.
+- Put the display title above the interface and align its left edge with the interface frame. Use the public product name, not the folder slug; for example, `Agents+` and `Tabs+`.
+- Use one clean sans-serif typeface and consistent title sizing across the set.
+- Give each mod its own restrained accent palette while keeping the overall dark developer-tool aesthetic.
+- Add depth with soft directional light, an illuminated frame, shadow and sparse corner geometry. Avoid flat template backgrounds, decorative ribbons, stages and busy glass layers.
+- Preserve a 16:9 canvas and comparable outer margins, but let the interface's natural proportions determine its exact height.
+- Generate or capture each interface first, then add title, framing and layout deterministically so image generation cannot drift typography or alignment.
+- Review the previews together before publishing. Check title spelling, alignment, interface fidelity, public-safe data and visual weight at gallery size.
