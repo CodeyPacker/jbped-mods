@@ -66,7 +66,7 @@ Brunr shows Run results, not agent statuses. It does not touch agents.
 - The toolbar filters a finished Run's list by text (every word in the name, path or URL, ignoring case), by result (pass and fail as the marks show them, never the HTTP status alone) by status class and by HTTP method, combined. It sorts by Run order, slowest or fastest response time, status number or name ignoring case, inside each folder, with folders in Run order, no-response Requests last and ties in Run order. A folder with nothing left is hidden, and folder counts always describe the whole Run. A hidden selection moves to the first Request shown. "Clear filters" resets the four filters and keeps the sort. The filters and sort stay for later Runs in the same pane and are never saved. When a new Run ends and the chosen method does not occur in it, the method filter goes back to "Any". The live list ignores them.
 - A Request Run starts at once. A folder or Collection Run asks first. A folder with no Requests shows the toast "Nothing to run".
 - The Response goes to the focused tab's Response pane. A tab without one gets a pane split to the right of the focused pane. With no focused pane, a new tab opens. The pane's content goes when the pane closes.
-- `ctrl-shift-u` shows or hides the panel without giving it the keyboard. While the panel holds the keyboard, the same key hides the panel and hands the keyboard back. The "Brunr: Keys" palette entry shows a hidden panel and gives it the keyboard. Keys in the panel: `up`/`k`, `down`/`j`, `home`, `end`, `left`/`h`, `right`/`l`, `enter`, `r`, `e`, `o`, `b`, `esc`/`q`. A key with `ctrl`, `alt` or the platform key is ignored.
+- `ctrl-shift-u` is a toggle. It shows a hidden panel and gives it the keyboard. It hides a shown panel, handing the keyboard back when the panel held it and leaving it alone otherwise. Keys in the panel: `up`/`k`, `down`/`j`, `home`, `end`, `left`/`h`, `right`/`l`, `enter`, `r`, `e`, `o`, `b`, `esc`/`q`. A key with `ctrl`, `alt` or the platform key is ignored.
 - `o` shows the Request's file in the pane, read only. `b` and "Open Bruno" start Bruno desktop and show the toast "Bruno desktop was not found" when it is missing.
 - Copy URL and Copy path put text on the clipboard.
 - A chosen Environment of the Collection is used by every Run of it. A Global environment is added to Runs of the workspace's Collections.
@@ -93,7 +93,7 @@ Modules: `main.js`, `panel.js`, `response.js`, `popup.js`, `tree.js`, `runtree.j
 Keys, in `keys.json`:
 
 ```json
-{ "global": { "ctrl-shift-u": "layout.toggle:brunr" }, "mod:brunr": { "ctrl-shift-u": "brunr.hide" } }
+{ "global": { "ctrl-shift-u": "mod.open:brunr" }, "mod:brunr": { "ctrl-shift-u": "brunr.hide" } }
 ```
 
 Config, `brunr.json` in the app home: `{ "workspace": "<path of a workspace.yml>", "collections": [ { "machine": "<name, optional>", "path": "<Collection root or a folder of them>" } ] }`.
@@ -141,8 +141,8 @@ Facts of Herdr that a fresh build gets wrong:
 - `fs` reads are refused outside the granted roots (the home folder). `readTextFile` reads anywhere. List a Collection with `fs` first and fall back to one `exec` listing.
 - Work a popup starts in the turn that closes it never runs, and its `cx.timer.after` never fires. A popup passes its choice through shared state (`brunr.request`) and the panel takes it the next time it draws.
 - Only Herdr moves the keyboard off a terminal, one `pane.go` at a time. The key's pass-through copy asks the panel to step right every 150ms, at most 8 times, until the panel's `focus` command arrives.
-- `"place": "right"` is not enough to place the panel. On the Herdr version tested, the shipped `main` layout did not dock it, and a personal layout docked it at the window root, full height, with a generated id. The layout block above is what places it, and it replaces a block Herdr added. "Brunr: Keys" and the hide key find the block by its mod. `ctrl-shift-u` and the palette toggle use the id `brunr`.
-- A hidden panel hears no commands, which is why "Brunr: Keys" opens through `mod.open`. The key uses `layout.toggle`, which needs the block id `brunr`.
+- `"place": "right"` is not enough to place the panel. On the Herdr version tested, the shipped `main` layout did not dock it, and a personal layout docked it at the window root, full height, with a generated id. The layout block above is what places it, and it replaces a block Herdr added. The open and hide key finds the block by its mod, so it works with any id. The palette toggle uses the id `brunr`.
+- A hidden panel hears no commands, which is why the key opens through `mod.open`.
 - localStorage is kept by Herdr in store files under `data/brunr/`. The cleanup of `run-*.json` and `run-*.log` leaves that file alone.
 
 Limits and assumptions:
@@ -168,7 +168,7 @@ Limits and assumptions:
 8. A `brunr.json` entry with a `machine` shows that Machine's Collections under a heading and runs `bru` there. The report file is gone afterwards.
 9. Adding a Request file to a Collection on this computer shows it in the tree without a reload.
 10. With `bru` off the PATH the tree still shows, Runs are inert, and a notice gives the install step with a working Copy button.
-11. `ctrl-shift-u` shows a hidden panel and hides a shown one. "Brunr: Keys" shows it with an `accent` border. `j`, `k`, `enter`, `r`, `e`, `o` and `q` act as described.
+11. `ctrl-shift-u` shows a hidden panel with an `accent` border, and the same key hides it. `j`, `k`, `enter`, `r`, `e`, `o` and `q` act as described.
 12. Closing the Response pane clears its Run. No `run-*.json` or `run-*.log` file stays in `data/brunr/`.
 13. A folder Run of slow Requests shows "1 of 16", then a higher count, with the running Request named in the pane, on its tree row and in the footer, then the normal result. On Windows this works for a Collection root with spaces and an Environment name with `%` and `&`.
 14. A Collection Run over nested folders lists its Requests under folder rows with `<passed>/<total>` counts, both while it runs (the running Request under its folder, a ring beside that folder's count) and in the result. Clicking a folder row folds it, and the next Run starts unfolded.

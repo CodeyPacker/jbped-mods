@@ -1,6 +1,6 @@
 {
   "global": {
-    "ctrl-shift-u": "layout.toggle:brunr"
+    "ctrl-shift-u": "mod.open:brunr"
   },
   "mod:brunr": {
     "ctrl-shift-u": "brunr.hide"

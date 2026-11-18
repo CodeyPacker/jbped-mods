@@ -2,7 +2,7 @@
 // One mod draws every part. The copy is chosen by its props:
 //   { view: "response", tab }  the Response pane of a tab (response.js)
 //   { picker } / { menu }       a popup over the panel (popup.js)
-//   { overlay } alone           opened by its key (mod.open): passes the key to the panel, closes
+//   { overlay } alone           opened by its key (mod.open): toggles the panel, closes
 //   none                        the panel (panel.js)
 // Config: brunr.json in the app home. Nothing from a Response is written to disk.
 import { View } from "gpui-kit";
@@ -32,8 +32,12 @@ export default class Brunr extends View {
       // Opened by its key: a hidden panel hears no commands, and mod.open always runs.
       this.mode = "pass";
       const block = tree.findBlock(layout(), "brunr");
-      if (block?.id && !block.shown) run("layout.show", { id: block.id });
-      store.ask({ kind: "keys" });
+      // A toggle: a shown panel is hidden, a hidden one is shown and given the keyboard.
+      if (block?.shown) store.ask({ kind: "hide" });
+      else {
+        if (block?.id) run("layout.show", { id: block.id });
+        store.ask({ kind: "keys" });
+      }
       closeOverlay(p.overlay);
       return;
     }
@@ -194,7 +198,13 @@ export default class Brunr extends View {
     if (block?.id) run("layout.hide", { id: block.id });
   }
 
-  /** The panel's key: hidden or without the keyboard, it takes it; holding it, it hides. */
+  /** Hides the panel when another pane holds the keyboard, so focus stays where it is. */
+  hideOnly() {
+    const block = tree.findBlock(layout(), "brunr");
+    if (block?.id) run("layout.hide", { id: block.id });
+  }
+
+  /** The key on a hidden panel: it takes the keyboard. Pressed again while holding it, it hides. */
   keysCommand(cx) {
     if (Date.now() - this.heldAt < 1500) return this.hidePanel();
     if (this.grabbing) return;
@@ -238,6 +248,7 @@ export default class Brunr extends View {
 
   takeAsk(cx, a) {
     if (a.kind === "keys") return this.keysCommand(cx);
+    if (a.kind === "hide") return this.kb ? this.hidePanel() : this.hideOnly();
     if (a.kind === "env") return this.saved.setEnv(a.key, a.value);
     if (a.kind === "global") return this.saved.setGlobalEnv(a.key, a.value);
     if (a.kind === "act") {
