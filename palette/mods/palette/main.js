@@ -1,7 +1,8 @@
 // Command palette with user and mod entries. Lists the user's entries from
 // ~/.config/herdr-app/palette.json, then what mods declare in their mod.json ("palette":
 // [{ "title", "command", "args" }]), then every app command from commands(), each with its
-// key from keys.json. Type to filter, ↑/↓ (or ctrl-j/k) and Enter to run, Esc to leave. A command with
+// key from keys.json. It opens on the list: j/k or ↑/↓ move, Enter runs, s goes to the search box
+// (type to filter), tab comes back, Esc leaves. A command with
 // required arguments asks for them first: one value fills the first argument, or a JSON object.
 // ctrl-b asks for a key for the selected row and writes it to keys.json's global section.
 // Open it with mod.open {"name": "palette"}, e.g. bound to ctrl-shift-p in keys.json.
@@ -97,19 +98,27 @@ const parseValue = (v) => (/^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v === "true" 
 export default class Palette extends View {
   init(_props, cx) {
     this.filter = ""; this.at = 0; this.top = 0; this.asking = null; this.error = null;
-    this.binding = null; this.confirmed = null;
+    this.binding = null; this.confirmed = null; this.searching = false;
     this.mods = []; this.keys = new Map();
-    this.input = InputState.new({ placeholder: "Type a command…" });
+    this.input = InputState.new({ placeholder: "Press s to search…" });
     this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = 0; this.top = 0; this.error = null; cx.notify(); });
     this.input.on("submit", (_e, cx) => { this.submit(); cx.notify(); });
+    this.input.on("focus", (_e, cx) => { this.searching = true; cx.notify(); });
+    // Leaving the box (tab, a click beside it) puts the keyboard on the list. The box's own tab
+    // handling moves focus after ours, so the list takes it once that has settled.
+    this.input.on("blur", (_e, cx) => {
+      this.searching = false; cx.notify();
+      cx.timer.after(30, (cx) => { if (!this.searching && !this.asking && !this.binding) { this.handle.focus(); cx.notify(); } });
+    });
     this.argInput = InputState.new({ placeholder: "Value, or {\"name\": value, …}" });
     this.argInput.on("submit", (_e, cx) => { this.runAsked(); cx.notify(); });
     this.bindInput = InputState.new({ placeholder: "Key, such as ctrl-shift-g. Empty removes it" });
     this.bindInput.on("change", (_e, cx) => { this.error = null; this.confirmed = null; cx.notify(); });
     this.bindInput.on("submit", (_e, cx) => this.saveKey(cx));
-    this.input.focus();
-    cx.timer.after(600, () => this.input.focus());
+    // It opens with the keyboard on the list: s goes to the search box, tab comes back.
     this.handle = cx.focus_handle();
+    this.handle.focus();
+    cx.timer.after(600, () => { if (!this.searching && !this.asking && !this.binding) this.handle.focus(); });
     cx.spawn(async (cx) => {
       this.mods = [...(await userEntries()), ...(await modEntries())];
       try { this.keys = keysBySig(JSON.parse((await readTextFile(`${appHome()}/keys.json`)) ?? "{}")); } catch {}
@@ -134,7 +143,7 @@ export default class Palette extends View {
     if (!r) return;
     // Required arguments: ask for them in the same box.
     if (r.kind === "app" && r.spec.some((a) => a.required)) {
-      this.asking = r; this.error = null;
+      this.wasSearching = this.searching; this.asking = r; this.error = null;
       this.argInput.set_value(""); this.argInput.focus();
       return;
     }
@@ -154,8 +163,11 @@ export default class Palette extends View {
     try { run(name, args); } catch (e) { console.log(`palette: ${name}: ${e.message ?? e}`); }
   }
 
+  /** Puts the keyboard back on the search box or the list, whichever had it. */
+  refocus() { if (this.wasSearching) this.input.focus(); else this.handle.focus(); }
+
   back(cx) {
-    this.asking = null; this.binding = null; this.confirmed = null; this.error = null; this.input.focus();
+    this.asking = null; this.binding = null; this.confirmed = null; this.error = null; this.refocus();
     cx.notify();
   }
 
@@ -164,7 +176,7 @@ export default class Palette extends View {
 
   /** Asks for the selected row's key in the same box. */
   bind(r) {
-    this.binding = r; this.confirmed = null;
+    this.wasSearching = this.searching; this.binding = r; this.confirmed = null;
     this.error = this.bindable(r) ? null : "A key can't fill in arguments. Add this command with its arguments to palette.json, then set that entry's key.";
     this.bindInput.set_value(this.keys.get(sig(r.name, r.args ?? {})) ?? ""); this.bindInput.focus();
   }
@@ -212,7 +224,7 @@ export default class Palette extends View {
   jump(head, cx) {
     const rows = this.rows(), i = rows.findIndex((r) => groupOf(r) === head);
     if (i < 0) return;
-    this.at = i; this.top = this.headY.get(head) ?? 0; this.input.focus(); cx.notify();
+    this.at = i; this.top = this.headY.get(head) ?? 0; if (this.searching) this.input.focus(); else this.handle.focus(); cx.notify();
   }
 
   /** The index of groups down the left; the selected row's group is marked. */
@@ -261,9 +273,14 @@ export default class Palette extends View {
     return v_flex().id("palette").track_focus(this.handle).w_full().min_h(0).p(12).gap(6).bg(t.popover).text_size(13)
       .on_key_down((e, cx) => {
         // ctrl-j/k, ctrl-n/p and ctrl-d/u move as the arrows and page keys do.
-        const k = { "ctrl-j": "down", "ctrl-n": "down", "ctrl-k": "up", "ctrl-p": "up", "ctrl-d": "pagedown", "ctrl-u": "pageup" }[e.keystroke] ?? e.key;
+        // On the list, j and k move, enter runs and s goes to the search box. In the box they are text.
+        const onList = !ask && !this.searching;
+        const k = { "ctrl-j": "down", "ctrl-n": "down", "ctrl-k": "up", "ctrl-p": "up", "ctrl-d": "pagedown", "ctrl-u": "pageup", ...(onList ? { j: "down", k: "up" } : {}) }[e.keystroke] ?? e.key;
         if (k === "escape") { if (ask) this.back(cx); else this.close(); }
         else if (ask) return;
+        else if (onList && e.keystroke === "s") this.input.focus();
+        else if (!onList && e.keystroke === "tab") this.handle.focus();
+        else if (onList && e.keystroke === "enter") this.submit();
         else if (e.keystroke === "ctrl-b" && rows.length) this.bind(rows[this.at]);
         // Shift+arrows jump between groups, as the sidebar does.
         else if ((k === "down" || k === "up") && e.modifiers.shift && rows.length) {
@@ -277,7 +294,7 @@ export default class Palette extends View {
         else return;
         cx.stop_propagation(); cx.notify();
       })
-      .child(h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(8).border_1().border_color(t.accent).bg(t.background)
+      .child(h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(8).border_1().border_color(ask || this.searching ? t.accent : t.border).bg(t.background)
         .child(svg("mods/workspace-chrome/search.svg").size(14).flex_none().text_color(t.dim))
         .when(!!ask, (e) => e.child(div().flex_none().text_size(12.8).text_color(t.muted).child(`${ask.title} ›`)))
         .child(Input.new(this.binding ? this.bindInput : this.asking ? this.argInput : this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))

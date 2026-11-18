@@ -10,7 +10,8 @@ A command palette that mods can add entries to: your entries, each mod's entries
 - **Mod entries.** A mod adds entries with a `palette` list in its `mod.json`. The other mods in this repo do.
 - **Every Herdr command.** Grouped as Herdr groups them, each with its key from `keys.json`.
 - **Set keys.** `ctrl-b` asks for a key for the selected entry and saves it to `keys.json`. It warns before it takes a key that is in use.
-- **Filter.** Type to filter. Every word must match.
+- **Filter.** Press `s` and type to filter. Every word must match. `tab` returns to the list.
+- **Vim keys.** The palette opens on the list, where `j` and `k` move. `ctrl-j` / `ctrl-k` and `ctrl-d` / `ctrl-u` move from the search box too.
 - **Group index.** A sidebar lists the groups. Click one to jump to it.
 - **Arguments.** A command with required arguments asks for them first: a value, or a JSON object.
 
@@ -38,9 +39,10 @@ Or by hand:
 | Key | Action |
 |---|---|
 | `ctrl-shift-p` | open |
-| `up` / `down`, `pageup` / `pagedown` | move |
+| `j` / `k`, `up` / `down`, `pageup` / `pagedown` | move |
+| `s` / `tab` | go to the search box / back to the list |
 | `shift-up` / `shift-down` | previous / next group |
-| `ctrl-j` / `ctrl-k`, `ctrl-d` / `ctrl-u` | move, as in vim |
+| `ctrl-j` / `ctrl-k`, `ctrl-d` / `ctrl-u` | move a row / a page, in the search box too |
 | `enter` | run |
 | `ctrl-b` | set the selected entry's key |
 | `escape` | close, or go back from the argument prompt |
