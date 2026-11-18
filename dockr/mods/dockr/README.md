@@ -1,17 +1,17 @@
 # Dockr
 
-A side panel for Herdr that lists Docker containers and sets which checkout each compose service runs from: its repo's Main checkout or one of its git worktrees.
+A dialog for Herdr that lists Docker containers and sets which checkout each compose service runs from: its repo's Main checkout or one of its git worktrees.
 
 ## Install
 
 1. Copy `mods/dockr/` to `~/.config/herdr-app/mods/dockr/`.
-2. In your own layout, add a block beside the work area and keep its id `dockr`:
-   `{ "id": "dockr", "type": "block", "content": { "mod": "dockr" }, "size": { "px": 400 }, "min": 300, "hidden": true }`
-3. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-d` twice: globally to `mod.open:dockr`, which shows the panel and gives it the keyboard, and in the `mod:dockr` section to `dockr.hide`, which hides the panel while it has the keyboard.
-4. Write `~/.config/herdr-app/dockr.json` (below).
-5. Run `herdr-app check ~/.config/herdr-app/mods/dockr`.
+2. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-d` to `mod.open:dockr`, which opens the dialog and closes it again.
+3. Write `~/.config/herdr-app/dockr.json` (below).
+4. Run `herdr-app check ~/.config/herdr-app/mods/dockr`.
 
-Dockr starts the first time its panel is shown. Toasts only arrive after that.
+**Toasts.** The dialog only runs while it is open. For notices while it is closed, add Dockr's mark to your layout, for example beside the status bar:
+`{ "id": "dockr-chip", "type": "block", "size": { "px": 64 }, "content": { "mod": "dockr", "props": { "chip": true } } }`
+The mark shows how many containers run and turns red when one has failed. It watches Docker's events and posts a toast when a Stack's service starts, exits with an error, turns unhealthy or keeps restarting. A click opens the dialog. While the dialog is open the mark posts nothing.
 
 ## The config file
 
@@ -47,7 +47,14 @@ Dockr starts the first time its panel is shown. Toasts only arrive after that.
 
 ## Using it
 
-The panel is a list of containers, grouped the way Docker Desktop groups them: one group per compose project, then the containers in none. No config is needed for that. A project listed in `dockr.json` also gets the checkout picker.
+The dialog is a list of containers, grouped the way Docker Desktop groups them: one group per compose project, then the containers in none. No config is needed for that. A project listed in `dockr.json` also gets the checkout picker.
+
+**The dashboard** (the second tab, or `2`; `1` returns to the list)
+- Totals: containers running, CPU, memory, network and disk in and out.
+- CPU and memory in all over the last minutes, as bars. A sample arrives about every two seconds, only while the dialog is open, so the history starts when you open it.
+- "Needs a look": containers that failed, were killed for memory, sit at 90% of their memory limit or keep restarting.
+- One line per group, then every container with its CPU, memory, network, disk, restart count and uptime. Click `CPU` or `Memory`, or press `s`, to sort. A click on a container opens it.
+- Docker's disk use for the whole engine, read once when the tab first shows and again on Refresh.
 
 **The toolbar**
 - **Search** filters by name, image, branch or published port. `Running` hides everything that is not running.
@@ -61,7 +68,9 @@ The panel is a list of containers, grouped the way Docker Desktop groups them: o
 **A container**
 - A green dot is running, a turning ring is starting or being worked on, red is unhealthy or exited with an error, a hollow ring is stopped.
 - The second line shows the checkout it runs from, or its image, then its links. A container with no configured link shows its published ports. Click one to open it in the browser.
-- **Hover** for Logs, Terminal, Restart, Stop or Start, and `⋯`. **Right-click** for the same menu, which also has Rebuild image, Change checkout, Diagnose and Copy name, ID or image.
+- **While it is built or brought up** a third line shows the newest step from that work's terminal, such as `[web 4/6] RUN npm ci`. It is read when the terminal prints, about once a second at most.
+- **While it boots** a third line shows `booting` and the container's newest log line, which is the step it is on. A container boots until its health check passes, or for its first minute when it has no health check. The line is followed only while the dialog is open.
+- **Hover**, or select a row with the keys, for Logs, Diagnose, Terminal, Restart, Stop or Start, and `⋯`. **Right-click** for the same menu, which also has Rebuild image, Change checkout, Diagnose and Copy name, ID or image.
 - **Click** the row to open the container: Logs, Inspect and Stats tabs, with Terminal, Restart and Stop in the title bar.
 
 **The container window**
@@ -71,7 +80,7 @@ The panel is a list of containers, grouped the way Docker Desktop groups them: o
 
 **Keys**
 
-The keys follow CodeyPacker's mods (`run`, `jump`, `branch`), so they are the same letters you use there. `ctrl-shift-d` shows the panel and gives it the keyboard. Letter badges and a short legend (move, open, start or stop, restart) appear while it has it. `?` lists every key that works on the selected row.
+The keys follow CodeyPacker's mods (`run`, `jump`, `branch`), so they are the same letters you use there. `ctrl-shift-d` opens the dialog, which has the keyboard while it is open, and closes it again. Letter badges and a legend show at all times. The legend lists every key that acts on the selected container: logs, diagnose, terminal, restart, stop or start, build output, checkout, rebuild and menu, in the order of the row's buttons. `?` adds browser, copy name, the group keys, search and the rest.
 
 | Key | Action |
 |---|---|
@@ -82,24 +91,26 @@ The keys follow CodeyPacker's mods (`run`, `jump`, `branch`), so they are the sa
 | `t` | terminal |
 | `c` | change checkout |
 | `b` | rebuild image |
-| `d` | diagnose a failed container |
+| `p` | read the build or bring-up's output as it runs, while one is working or has failed |
+| `d` | investigate the container with an agent (Diagnose when it has failed) |
 | `o` | open its first link or port in the browser |
 | `y` | copy the container name |
 | `u` / `X` | start all / stop all in the group |
 | `D` | remove the group's containers (asks first) |
 | `h` / `l` | fold / unfold the group |
 | `g` / `G` | first / last |
-| `/` | search (`enter` or `esc` returns to the list) |
+| `/` | search (`enter` returns to the list) |
 | `m` | the `⋯` menu (`j`/`k`, `enter`) |
-| `q`, `esc` | hand the keyboard back to your pane |
+| `q`, `esc` | close the dialog. `esc` closes it from anywhere, the search box and the key list included |
 
 - **Container window:** `h`/`l` switch tabs, `j`/`k` move a line, `g`/`G` top and end, `/` search, `n`/`N` next and previous match, `f` follow, `t` timestamps, `y` copy, `s`/`x`/`r` start, stop and restart, `T` terminal, `q` close.
 - **Checkout picker:** it has a filter box, so plain letters type. Arrows or `ctrl-j`/`ctrl-k` move, `enter` switches, `ctrl-r` rebuilds, `ctrl-s` toggles "Start if stopped".
-- The panel is `focusable`, so Herdr's pane movement keys reach it too, and "Dockr: Keys" in the palette does what `ctrl-shift-d` does.
-- Dockr reaches the panel by stepping focus to the right, and leaves to the left. A layout with the panel on the left needs those two directions swapped in `main.js`.
+- "Dockr: Open" in the palette does what `ctrl-shift-d` does.
+- A container or log view opens on top of the dialog. `esc` closes it and returns to the list.
 
 **Choosing a checkout** (projects in `dockr.json`)
 - Click the branch on a container's second line. Type to filter, arrow keys to move, Enter to switch. Each checkout says what it costs: `recreate` takes seconds, `rebuild` builds the image first.
+- **Branches with no worktree** are listed under the checkouts. Picking one runs `git switch <branch>` in the Main checkout and runs the service from there, so worktrees are optional. Every service that runs from that Main checkout follows. Git keeps uncommitted work and refuses when it would be overwritten, and Dockr then changes nothing. A branch that is checked out in a worktree is picked as that worktree. Undo puts the Main checkout back on the branch it had.
 - When other services have a worktree on the picked branch, the picker offers "also move <service>", ticked by default. Unticked, `Start if stopped` leaves a stopped service stopped.
 - A Switch or build shows its step on the row: checking, building, recreating, waiting for healthy. A failed one becomes a red chip that opens the output.
 - `Undo: back to <branch>` appears after a Switch.
@@ -107,7 +118,7 @@ The keys follow CodeyPacker's mods (`run`, `jump`, `branch`), so they are the sa
 
 **When something needs you**, the row says so in a sentence, with buttons:
 - **A failure:** why (`exited 137, out of memory`, `health check: connection refused`), the last three log lines, and `Diagnose`, `Logs`, `Start`. Three exits inside a minute show as `restart loop`.
-- **Diagnose** shows the exact text an agent will get: what Docker reports and the last 100 log lines, with no environment values. Read the log lines first, since a program can print a secret. `Send` starts the agent you pick in a new tab, in the space on that branch when there is one.
+- **Diagnose** shows the exact text an agent will get: what Docker reports and the last 100 log lines, with no environment values. When a build or bring-up of that service is working or has failed, its last 80 lines of output go along. Read the log and build lines first, since a program or a build step can print a secret. `Send` starts the agent you pick in a new tab, in the space on that branch when there is one.
 - **A different checkout than the one set** (drift), which a compose command run outside Dockr causes: switch back, or keep what runs.
 - **Dependency files changed since the image was built:** `Rebuild`.
 

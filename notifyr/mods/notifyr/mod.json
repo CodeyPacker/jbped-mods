@@ -1,0 +1,19 @@
+{
+  "place": "none",
+  "title": "Notifyr",
+  "overlay": {
+    "kind": "dialog",
+    "width": 440,
+    "height": 0.7
+  },
+  "palette": [
+    {
+      "title": "Notifyr: Open",
+      "command": "mod.open",
+      "args": {
+        "name": "notifyr"
+      },
+      "about": "Open the list of past notifications (ctrl-shift-i). Again closes it"
+    }
+  ]
+}

@@ -435,7 +435,8 @@ export function parseOps(terms) {
 
 /** The build or bring-up that is working on a Service, or null. Without a service: any in the Stack. */
 export const opFor = (ops, stack, service) =>
-  ops.find((o) => o.kind === "op" && o.stack === stack && (service == null || o.services.includes(service))) ?? null;
+  ops.filter((o) => o.kind === "op" && o.stack === stack && (service == null || o.services.includes(service)))
+    .sort((a, b) => b.at - a.at)[0] ?? null; // the newest: an old failed one left open must not hide it
 
 /** Where a Service is in a running build or bring-up: { text, failed? }, or null with none. */
 export function phase(name, op, container) {
@@ -477,7 +478,7 @@ export function programIcon(c) {
 /** A Docker or compose error in words that say what to do. Unknown ones keep their last line. */
 export function explain(text, machine = null) {
   const s = String(text ?? ""), where = machine ? ` on ${machine}` : "";
-  if (/cannot connect to the docker daemon|is the docker daemon running|error during connect|dockerDesktopLinuxEngine/i.test(s)) return `Docker is not running${where}. Start Docker Desktop, then press Reload.`;
+  if (/cannot connect to the docker daemon|is the docker daemon running|error during connect|dockerDesktopLinuxEngine|could not be found in this WSL 2 distro|docker (events|stats) ended|timed out/i.test(s)) return "Docker is not running. Start it, then press Refresh.";
   if (/port is already allocated|address already in use/i.test(s)) {
     const port = /(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]|:::?):(\d+)/.exec(s)?.[1];
     return `Port ${port ?? "it needs"} is already in use. Stop what holds it, then try again.`;
@@ -486,7 +487,7 @@ export function explain(text, machine = null) {
   if (/program not found|command not found|executable file not found|cannot start (docker|bash|sh)\b/i.test(s)) return `Docker's command line was not found${where}.`;
   if (/no such service/i.test(s)) return "The compose file has no service by that name. Check dockr.json.";
   if (/no such file or directory/i.test(s) && /\.ya?ml|compose/i.test(s)) return "The compose file is not where dockr.json says it is.";
-  if (/unreachable|not connected|no such machine/i.test(s)) return `Herdr cannot reach${machine ? ` ${machine}` : " that Machine"}. Connect it, then press Reload.`;
+  if (/unreachable|not connected|no such machine/i.test(s)) return `Herdr cannot reach${machine ? ` ${machine}` : " that Machine"}. Connect it, then press Refresh.`;
   return s.trim().split(/\r?\n/).pop() ?? "";
 }
 
@@ -494,13 +495,13 @@ export function explain(text, machine = null) {
  * What an agent is told about a failing container. It holds what Docker reports and the last log
  * lines, and no environment values.
  */
-export function brief({ stack, row, container: c, lines, loop }) {
+export function brief({ stack, row, container: c, lines, loop, build = null }) {
   const src = row?.actual ?? row?.set ?? null;
   const facts = [
     `Container: ${c.name}`,
     `Image: ${c.image}`,
     `State: ${c.state}${c.health ? `, health ${c.health}` : ""}${loop ? ", in a restart loop" : ""}`,
-    `Problem: ${why(c) || (loop ? "it keeps restarting" : "not known")}`,
+    `Problem: ${why(c) || (loop ? "it keeps restarting" : "none that Docker reports")}`,
     `Restarts: ${c.restarts ?? 0}`,
     c.healthOutput ? `Health check output: ${c.healthOutput.split(/\r?\n/).filter(Boolean).slice(-3).join(" | ")}` : null,
     c.command ? `Command: ${c.command}` : null,
@@ -509,20 +510,26 @@ export function brief({ stack, row, container: c, lines, loop }) {
     stack?.compose ? `Compose file: ${stack.compose}` : null,
   ].filter(Boolean);
   const log = (lines ?? []).slice(-100).map((l) => (l.length > 400 ? `${l.slice(0, 400)}…` : l));
+  const built = build?.lines?.length ? build : null, broke = built && built.failed != null;
   return [
-    `The Docker container for "${row?.name ?? c.name}"${stack ? ` in the compose project "${stack.name}"` : ""} is failing. Find the cause and propose a fix.`,
+    broke && !(why(c) || loop)
+      ? `"${built.title}" failed for "${row?.name ?? c.name}"${stack ? ` in the compose project "${stack.name}"` : ""}. Find the cause in its output below and propose a fix.`
+      : why(c) || loop
+      ? `The Docker container for "${row?.name ?? c.name}"${stack ? ` in the compose project "${stack.name}"` : ""} is failing. Find the cause and propose a fix.`
+      : `Look into the Docker container for "${row?.name ?? c.name}"${stack ? ` in the compose project "${stack.name}"` : ""}. Docker reports no failure. Say what state it is in and point out anything in its logs that looks wrong.`,
     "",
     "What Docker reports:",
     ...facts.map((f) => `- ${f}`),
     "",
     log.length ? `Its last ${log.length} log lines:` : "It wrote no log lines.",
     ...log,
+    ...(built ? ["", `The last ${built.lines.length} lines that "${built.title}" printed (${broke ? `it failed with exit code ${built.failed}` : "it is still working"}):`, ...built.lines] : []),
     "",
     "Rules:",
     "- Do not run docker compose up, down, build or restart, and do not stop or remove containers. Dockr manages them.",
     "- Read-only commands such as docker logs and docker inspect are fine.",
     "- Do not print environment values or open .env files.",
-    "- Say the cause first, then the fix. Ask before you change files.",
+    why(c) || loop || broke ? "- Say the cause first, then the fix. Ask before you change files." : "- Say what you found first. Ask before you change files.",
   ].join("\n");
 }
 
@@ -697,7 +704,7 @@ export function looseBranches(branches, sources) {
 }
 
 /** The letters Dockr's own keys use, so no row is given one of them as its hint. */
-export const KEY_LETTERS = "sxrutcbdoyhlgmqjk";
+export const KEY_LETTERS = "sxrutcbpdoyhlgmqjk";
 
 /**
  * The panel as one list for the keyboard: each group's header, then its rows unless it is folded.
@@ -744,17 +751,21 @@ export function keyAction(k, item, facts = {}) {
   if (k === "t") return facts.running ? row("terminal") : null;
   if (k === "c") return facts.service ? row("source") : null;
   if (k === "b") return facts.service ? row("rebuild") : null;
-  if (k === "d") return facts.bad ? row("diagnose") : null;
+  if (k === "d") return facts.created ? row("diagnose") : null;
   if (k === "o") return facts.link ? row("browser") : null;
+  if (k === "p") return facts.output ? row("output") : null;
   if (k === "y") return facts.created ? row("copy") : null;
   if (k === "m") return row("menu");
   return null;
 }
 
-/** The few keys the legend always shows: move, open, the start or stop that applies, restart, and how to see the rest. */
+/**
+ * The legend under the list: every key that acts on the selected item, and how to see the rest.
+ * For a container that leaves out browser, copy name, its group's keys, search and leave, which "?" lists.
+ */
 export function coreHints(item, facts = {}) {
-  const core = new Set(["j/k", "enter", "s", "x", "r"]);
-  return [...keyHints(item, facts).filter(([k]) => core.has(k)), ["?", "all keys"]];
+  const rest = new Set(item?.kind === "row" ? ["o", "y", "u", "X", "D", "/", "q"] : ["/", "q"]);
+  return [...keyHints(item, facts).filter(([k]) => !rest.has(k)), ["?", "all keys"]];
 }
 
 /** Every key hint for the selected item: [key, what] pairs, only the ones that do something now. */
@@ -762,11 +773,137 @@ export function keyHints(item, facts = {}) {
   const all = [["j/k", "move"]];
   const add = (k, label, what) => { if (keyAction(k, item, facts)) all.push([label ?? k, what]); };
   if (item?.kind === "group") { add("enter", "enter", "fold"); }
-  add("enter", "enter", item?.kind === "row" ? "open" : null);
-  add("s", null, "start"); add("x", null, "stop"); add("r", null, "restart"); add("t", null, "terminal");
-  add("c", null, "checkout"); add("b", null, "rebuild"); add("d", null, "diagnose"); add("o", null, "browser"); add("y", null, "copy name");
+  add("enter", "enter", item?.kind === "row" ? "logs" : null);
+  // The row's buttons, left to right, then what only its menu has, in the menu's order.
+  add("d", null, "diagnose"); add("t", null, "terminal"); add("r", null, "restart"); add("x", null, "stop"); add("s", null, "start");
+  add("p", null, "build output"); add("o", null, "browser"); add("c", null, "checkout"); add("b", null, "rebuild"); add("y", null, "copy name");
   add("u", null, "start all"); add("shift-x", "X", "stop all"); add("shift-d", "D", "remove");
   add("m", null, "menu");
   all.push(["/", "search"], ["q", "leave"]);
   return all.filter(([, what]) => what);
+}
+
+/** Why `git switch` refused, in a sentence. */
+export function gitRefusal(text) {
+  const s = String(text ?? "");
+  if (/would be overwritten by checkout/i.test(s)) return "Git kept the branch: uncommitted changes there would be overwritten. Commit or stash them first.";
+  if (/already (checked out|used by worktree) at/i.test(s)) return "That branch is checked out in a worktree. Pick the worktree instead.";
+  if (/invalid reference|did not match any/i.test(s)) return "Git has no such branch.";
+  const line = s.split(/\r?\n/).map((l) => l.trim()).find((l) => /^(error|fatal):/i.test(l)) ?? s.trim().split(/\r?\n/).pop() ?? "";
+  return line.replace(/^(error|fatal):\s*/i, "") || "git switch failed.";
+}
+
+// The dashboard
+
+/** Docker's "1.2MB / 340kB" as [in, out] bytes. */
+export function pair(text) {
+  const [a, b] = String(text ?? "").split("/").map((x) => bytes(x.trim()));
+  return [a || 0, b || 0];
+}
+
+/** How long ago `iso` was, as "45s", "12m", "3h" or "2d". Empty when it is not a time. */
+export function ago(iso, now = Date.now()) {
+  const at = new Date(iso).getTime();
+  if (Number.isNaN(at) || at <= 0) return "";
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
+}
+
+/**
+ * What the dashboard shows, from the panel's groups and the stats history ({ container name: samples }).
+ * `statusOf_` says whether a container has failed. `sort`: "cpu" or "mem", highest first.
+ * - totals: containers running and in all, CPU percent, memory, the engine's memory, network and disk bytes
+ * - groups: one line per group with its CPU and memory
+ * - rows: one per created container
+ * - attention: the containers to look at, each with why
+ * - history: total CPU and memory per sample, oldest first
+ */
+export function dashboard(groups, stats, statusOf_ = statusOf, sort = "cpu", now = Date.now()) {
+  const rows = [], perGroup = [];
+  for (const g of groups) {
+    let cpu = 0, mem = 0, running = 0, total = 0;
+    for (const r of g.rows) {
+      const c = r.container;
+      if (!c) continue;
+      total++;
+      const up = c.state === "running", samples = stats[c.name] ?? [], s = up ? samples[samples.length - 1] ?? null : null;
+      const [netIn, netOut] = pair(s?.net), [diskIn, diskOut] = pair(s?.disk), status = statusOf_(c);
+      if (up) running++;
+      cpu += s?.cpu ?? 0;
+      mem += s?.mem ?? 0;
+      rows.push({
+        key: r.key, row: r, name: r.name, group: g.name ?? "", running: up, sampled: !!s, cpu: s?.cpu ?? 0, mem: s?.mem ?? 0, limit: s?.limit ?? 0,
+        memPct: s?.limit ? (s.mem / s.limit) * 100 : 0, netIn, netOut, diskIn, diskOut, restarts: c.restarts ?? 0,
+        up: up ? ago(c.startedAt, now) : "", bad: status.kind === "bad", status: status.text, oom: !!c.oom,
+      });
+    }
+    if (total) perGroup.push({ key: g.key, name: g.name ?? "No project", running, total, cpu, mem });
+  }
+  const sum = (f) => rows.reduce((n, r) => n + f(r), 0);
+  const totals = {
+    running: rows.filter((r) => r.running).length, total: rows.length, cpu: sum((r) => r.cpu), mem: sum((r) => r.mem),
+    limit: Math.max(0, ...rows.map((r) => r.limit)), netIn: sum((r) => r.netIn), netOut: sum((r) => r.netOut), diskIn: sum((r) => r.diskIn), diskOut: sum((r) => r.diskOut),
+  };
+  const attention = [];
+  for (const r of rows) {
+    const why = r.bad ? r.status : r.oom ? "killed for memory" : r.memPct >= 90 ? `memory at ${Math.round(r.memPct)}% of its limit` : r.restarts >= 3 && r.running ? `restarted ${r.restarts} times` : "";
+    if (why) attention.push({ key: r.key, row: r.row, name: r.name, why, bad: r.bad || r.oom });
+  }
+  const names = rows.filter((r) => r.running).map((r) => r.row.container.name);
+  const length = Math.max(0, ...names.map((n) => (stats[n] ?? []).length));
+  const history = { cpu: [], mem: [] };
+  for (let back = length; back >= 1; back--) {
+    let cpu = 0, mem = 0;
+    for (const n of names) { const list = stats[n] ?? [], s = list[list.length - back]; if (s) { cpu += s.cpu; mem += s.mem; } }
+    history.cpu.push(cpu);
+    history.mem.push(mem);
+  }
+  rows.sort((a, b) => (sort === "mem" ? b.mem - a.mem : b.cpu - a.cpu) || a.name.localeCompare(b.name));
+  return { totals, groups: perGroup, rows, attention, history };
+}
+
+// The line a booting container shows
+
+/**
+ * Whether a container is still booting: Docker says its health is "starting", or it has no
+ * health check and started less than `window` ms ago.
+ */
+export function booting(c, now = Date.now(), window = 60000) {
+  if (!c || c.state !== "running") return false;
+  if (c.health === "starting") return true;
+  if (c.health) return false;
+  const at = Date.parse(c.startedAt);
+  return !Number.isNaN(at) && now - at >= 0 && now - at < window;
+}
+
+/** The newest line worth showing from log lines ({ text }), or "": the last one that says something. */
+export function bootLine(lines) {
+  for (let i = (lines ?? []).length - 1; i >= 0; i--) {
+    const text = String(lines[i]?.text ?? "").replace(/\s+/g, " ").trim();
+    if (/[A-Za-z0-9]/.test(text)) return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+  }
+  return "";
+}
+
+/**
+ * The step a build or bring-up is on, from its terminal's screen: the newest build step line
+ * (" => [web 4/6] RUN npm ci"), for `service` when the screen names services, else the last line
+ * that says something. "" when there is none.
+ */
+export function buildLine(screen, service = null) {
+  const lines = clean(screen).split(/\r?\n/).map((l) => l.replace(/\s+/g, " ").trim()).filter((l) => /[A-Za-z0-9]/.test(l));
+  const steps = lines.map((l) => /^=> (?:CACHED )?(\[(?:(\S+) )?\d+\/\d+\] .*)$/.exec(l)).filter(Boolean);
+  const mine = service ? steps.filter((m) => m[2] === service) : [];
+  const step = (mine.length ? mine : steps.filter((m) => !service || !m[2])).pop() ?? steps[steps.length - 1];
+  const text = step ? step[1].replace(/ \d+(\.\d+)?s$/, "") : (lines.filter((l) => !/^Failed with exit code|^=> =>/.test(l)).pop() ?? "");
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
+}
+
+/**
+ * What a build or bring-up printed, from its terminal's screen and history: its last `max` lines
+ * that say something, each cut to 400 characters, without Dockr's own "Failed with exit code" line.
+ */
+export function buildLog(screen, max = 80) {
+  return clean(screen).split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => /\S/.test(l) && !/^Failed with exit code \d+\. Press Enter/.test(l))
+    .slice(-max).map((l) => (l.length > 400 ? `${l.slice(0, 400)}…` : l));
 }

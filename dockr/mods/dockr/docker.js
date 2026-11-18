@@ -1,6 +1,6 @@
 // Everything Dockr asks of Docker, git and herdr-core. Each call runs on the Stack's Machine.
 import { exec, hc, readTextFile, window as win } from "herdr";
-import { clean, composeArgs, desktopBinds, explain, parseContainers, parseWorktrees, q } from "./model.js";
+import { clean, composeArgs, desktopBinds, explain, gitRefusal, parseContainers, parseWorktrees, q } from "./model.js";
 
 const on = (machine) => (machine ? { on: machine } : {});
 const failed = (e) => ({ code: 1, stdout: "", stderr: String(e?.message ?? e) });
@@ -41,10 +41,23 @@ last=""
 if IFS= read -r -t "$max" line <&"\${D[0]}"; then
   last="$line"
   while IFS= read -r -t 0.7 line <&"\${D[0]}"; do last="$line"; done
+  # Docker Desktop's stand-in for a stopped engine prints its message here, not an event.
+  case "$last" in "{"*) ;; *) echo "$last" >&2; echo "docker events ended" >&2; exit 3 ;; esac
+elif [ $? -le 128 ]; then
+  # Not a timeout: the stream ended by itself, so Docker is not running. Say why and fail.
+  docker version --format '{{.Server.Version}}' >&2 2>&1 || true
+  echo "docker events ended" >&2
+  exit 3
 fi
 kill "$D_PID" 2>/dev/null
 printf '%s\\n' "$last"
 `;
+
+/** Null when Docker answers on the Machine, else why it does not, in words for the person. */
+export async function alive(machine) {
+  const r = await exec("docker", ["version", "--format", "{{.Server.Version}}"], { ...on(machine), timeout: 8000 }).catch(failed);
+  return r.code === 0 ? null : explain(r.stderr || r.stdout || "cannot connect to the docker daemon", machine);
+}
 
 /** A decimal string plus one. */
 function plusOne(digits) {
@@ -63,7 +76,7 @@ function plusOne(digits) {
  */
 export async function waitEvent(machine, since) {
   const r = await exec("bash", ["-c", WAIT, "dockr", since ?? "", "570"], { ...on(machine), timeout: 600000 }).catch(failed);
-  if (r.code !== 0) return { error: said(r) };
+  if (r.code !== 0) return { error: (r.stderr || r.stdout || `exited ${r.code}`).trim() };
   const nano = /"timeNano":(\d{10,})/.exec(r.stdout)?.[1];
   if (!nano) return { event: false };
   const next = plusOne(nano);
@@ -118,6 +131,8 @@ while IFS= read -r -t "$1" line <&"\${D[0]}"; do
   case "$line" in *$'\\033[H'*) [ $seen -eq 1 ] && [ -n "$out" ] && break; seen=1; out="" ;; esac
   out="$out$line"$'\\n'
 done
+# No frame at all: the stream ended by itself, so Docker is not running.
+[ $seen -eq 0 ] && { echo "docker stats ended" >&2; exit 3; }
 kill "$D_PID" 2>/dev/null
 printf '%s' "$out"
 `;
@@ -180,6 +195,15 @@ export async function branches(machine, main) {
   return r.code === 0 ? r.stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean) : [];
 }
 
+/**
+ * Checks `branch` out in the Main checkout with a plain `git switch`: git keeps uncommitted work
+ * and refuses when it would be overwritten. Null, or why git refused.
+ */
+export async function checkout(machine, main, branch) {
+  const r = await exec("git", ["-C", main, "switch", branch], on(machine)).catch(failed);
+  return r.code === 0 ? null : gitRefusal(r.stderr || r.stdout);
+}
+
 /** Which of the Stack's env files exist. Neither is opened. */
 export async function envFiles(machine, stack) {
   const r = await exec("sh", ["-c", '[ -f "$1" ] && echo env; [ -f "$2" ] && echo dockr; true', "dockr", `${stack.dir}/.env`, `${stack.dir}/.dockr.env`], on(machine)).catch(failed);
@@ -227,10 +251,11 @@ export async function compose(machine, stack, has, args) {
 
 /**
  * A terminal script that runs `lines` in order. On failure it labels its own terminal `dockr.failed`
- * (so the panel can say so) and waits for Enter, so the output stays to be read.
+ * (so the panel can say so) and waits for Enter, so the output stays to be read. A background
+ * terminal's PATH may lack hc (on WSL it does), so it is looked for in its usual places.
  */
 export function opScript(lines) {
-  return `${lines.join(" && ")}; code=$?; if [ "$code" -ne 0 ]; then hc label "$HC_TERMINAL_ID" dockr.failed="$code" >/dev/null 2>&1; printf '\\nFailed with exit code %s. Press Enter to close.\\n' "$code"; read _; fi; exit "$code"`;
+  return `${lines.join(" && ")}; code=$?; if [ "$code" -ne 0 ]; then for h in hc "$HOME/.local/bin/hc" hc.exe; do "$h" label "$HC_TERMINAL_ID" dockr.failed="$code" >/dev/null 2>&1 && break; done; printf '\\nFailed with exit code %s. Press Enter to close.\\n' "$code"; read _; fi; exit "$code"`;
 }
 
 /** The words of a compose command for a terminal's script. */
@@ -251,6 +276,24 @@ export async function terminal(machine, cwd, labels, script) {
     const address = String(JSON.parse(r.stdout).address);
     return { address: machine && !address.includes("/") ? `${machine}/${address}` : address };
   } catch { return { error: "herdr-core did not say which terminal it started" }; }
+}
+
+/** The screen of a terminal Dockr started, as text, with `history` lines from above it. "" when it cannot be read. */
+export async function screen(address, history = 0) {
+  const r = await hc(["read", address, ...(history ? ["--lines", String(history)] : [])]).catch(failed);
+  return r.code === 0 ? r.stdout : "";
+}
+
+/**
+ * Waits until a terminal prints a new line, at most a minute, then a second more so a busy build
+ * is read about once a second. Resolves false when the terminal has ended or cannot be waited on.
+ */
+export async function waitOutput(address) {
+  const r = await hc(["wait", address, "--output", "\n", "--timeout", "60", "--json"]).catch(failed);
+  if (r.code !== 0) return false;
+  try { if (JSON.parse(r.stdout).reason === "exit") return false; } catch { return false; }
+  const pause = await hc(["wait", address, "--timeout", "1", "--json"]).catch(failed);
+  try { return pause.code === 0 && JSON.parse(pause.stdout).reason !== "exit"; } catch { return false; }
 }
 
 /** Ends a terminal Dockr started. */

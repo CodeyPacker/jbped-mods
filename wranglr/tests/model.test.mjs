@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  emptyState, mkey, clonedMap, arrange, act, ticketOf, branchWords, workspaceHome,
+  emptyState, mkey, clonedMap, arrange, act, ticketOf, branchWords, workspaceHome, keptFlags, resumeCommand,
 } from "../mods/wranglr/model.js";
 
 const TICKET = "^(?:[a-z]+/)?#?(\\d{2,})";
@@ -95,7 +95,7 @@ test("mkey, emptyState and clonedMap", () => {
   assert.equal(mkey(null), "");
   assert.equal(mkey("wsl"), "wsl");
   const s = emptyState();
-  assert.deepEqual(Object.keys(s).sort(), ["active", "custom", "dismissed", "folded", "names", "naming", "order", "pending", "place", "seen", "snap", "started", "subs", "titles", "v"].sort());
+  assert.deepEqual(Object.keys(s).sort(), ["active", "closing", "custom", "dismissed", "folded", "names", "naming", "open", "order", "pending", "pinned", "place", "revive", "seen", "snap", "started", "subs", "titles", "v"].sort());
   const state = { ...s, seen: { [FRONT]: { name: "frontend", on: { "": "/old/frontend", wsl: "/w/frontend" } } } };
   const c = config({ workspaces: [ARDEN], repos: { [BACK]: { machines: [], on: { wsl: { path: "/w/backend" } } } } });
   assert.deepEqual(clonedMap(c, state), {
@@ -476,6 +476,7 @@ test("plus in worktree mode starts in a new worktree under the Repo, and needs a
   assert.deepEqual(r.effects, [{
     type: "start", machine: null, folder: "/home/me/front/.worktrees/feature/46382-x", argv: null, name: null,
     worktree: { main: "/home/me/front", branch: "feature/46382-x", path: "/home/me/front/.worktrees/feature/46382-x", from: null },
+    place: { group: "repo:" + FRONT, sub: null },
   }]);
   const abs = config({ repos: MULTI, settings: { worktrees: "/wt/{branch}" } });
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: null, branch: "b" }, w, abs, s).effects[0].folder, "/wt/b");
@@ -501,6 +502,109 @@ test("{clone} expands to the Repo's clone on each Machine, so one pattern works 
   const at = (machine) => run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine, branch: "foo" }, w, c, s).effects[0].folder;
   assert.equal(at("wsl"), "/mnt/c/dev/arden/.worktrees/foo/frontend");
   assert.equal(at(null), "C:/dev/arden/.worktrees/foo/frontend");
+});
+
+// Published Repos and actions from other mods
+
+const SEEN_FRONT = { name: "frontend", on: { "": "/d/front" } };
+
+test("repos lists a Repo group, shown or empty, with its main root per Machine", () => {
+  const c = config();
+  const w = world([space("s1")], { repos: { s1: repo(FRONT, "/d/front") } });
+  assert.deepEqual(view(w, c).tree.repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+  const empty = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT } };
+  assert.deepEqual(arrange(world([]), c, empty).repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+});
+
+test("repos lists a Repo only in a Workspace, with no Repo group", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const tree = arrange(world([]), c, emptyState());
+  assert.deepEqual(groupIds(tree), ["ws:Arden"]);
+  assert.deepEqual(tree.repos, [
+    { identity: BACK, name: "backend", on: { "": "/home/me/dev/arden/backend" } },
+    { identity: FRONT, name: "frontend", on: { "": "/home/me/dev/arden/frontend" } },
+  ]);
+});
+
+test("repos leaves out a dismissed Repo group unless a Workspace lists it", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT }, dismissed: [FRONT] };
+  assert.deepEqual(arrange(world([]), config(), s).repos, []);
+  const ws = { name: "W", repos: [FRONT], machines: [], on: {} };
+  assert.deepEqual(arrange(world([]), config({ workspaces: [ws] }), s).repos, [{ identity: FRONT, name: "frontend", on: { "": "/d/front" } }]);
+});
+
+test("repos gives a Repo on two Machines both paths, sorted by name", () => {
+  const c = config({ repos: MULTI });
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} }, [BACK]: { name: "backend", on: { wsl: "/srv/back" } } } };
+  assert.deepEqual(arrange(world([]), c, s).repos, [
+    { identity: BACK, name: "backend", on: { wsl: "/srv/back" } },
+    { identity: FRONT, name: "frontend", on: { wsl: "/srv/front", "": "/home/me/front" } },
+  ]);
+});
+
+test("repos leaves out a Repo with no path on any Machine", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const ws = { name: "Lone", repos: [BACK], machines: [], on: {} };
+  const tree = arrange(world([]), config({ workspaces: [ws] }), s);
+  assert.deepEqual(groupIds(tree), ["ws:Lone", "repo:" + FRONT]);
+  assert.deepEqual(tree.repos, []);
+});
+
+test("start runs the agent in the folder on the Machine, filed by the Repo's pending entry", () => {
+  const c = config({ settings: { agent: ["claude"] } });
+  const s0 = { ...emptyState(), seen: { [FRONT]: SEEN_FRONT } };
+  const w0 = world([]);
+  const r = run({ type: "start", repo: FRONT, machine: null, folder: "/d/front/.worktrees/x" }, w0, c, s0);
+  assert.deepEqual(r.effects, [{ type: "start", machine: null, folder: "/d/front/.worktrees/x", argv: ["claude"], name: null, worktree: null }]);
+  assert.deepEqual(r.state.pending.map((p) => [p.group, p.sub, p.workspace, p.machine, p.folder]), [["repo:" + FRONT, null, null, null, "/d/front/.worktrees/x"]]);
+  assert.deepEqual(r.state.place, {}, "no manual placement");
+  const w1 = world([space("s1", { folder: "/d/front/.worktrees/x" })]);
+  const { tree, state } = view(w1, c, r.state);
+  assert.deepEqual(rowIds(tree, "repo:" + FRONT), ["s1"], "in its Group before git answers");
+  assert.deepEqual(state.place, {});
+  assert.equal(run({ type: "start", repo: FRONT, folder: "/d/front" }, w0, c, s0).effects[0].machine, null, "no machine is this computer");
+});
+
+test("start on a Machine that is not ready warns and starts nothing", () => {
+  const c = config({ repos: MULTI });
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const w = world([], { machines: [{ name: null, layout: "ready" }, { name: "wsl", layout: "loading" }] });
+  const r = run({ type: "start", repo: FRONT, machine: "wsl", folder: "/srv/front" }, w, c, s);
+  assert.deepEqual(r.effects.map((e) => [e.type, e.level]), [["toast", "warning"]]);
+  assert.deepEqual(r.state.pending, []);
+  assert.equal(run({ type: "start", repo: FRONT, machine: "gone", folder: "/srv/front" }, w, c, s).effects[0].type, "toast", "a Machine not listed is not ready");
+});
+
+test("start for a Repo not published warns and starts nothing", () => {
+  const s = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } } };
+  const w = world([]);
+  for (const repoId of [FRONT, BACK, undefined]) {
+    const r = run({ type: "start", repo: repoId, machine: null, folder: "/d/x" }, w, config(), s);
+    assert.deepEqual(r.effects.map((e) => [e.type, e.level]), [["toast", "warning"]], String(repoId));
+    assert.deepEqual(r.state.pending, []);
+  }
+});
+
+test("worktree plus works for a Workspace-only Repo and a dismissed Repo group, with an explicit Machine", () => {
+  const c = config({ workspaces: [ARDEN] });
+  const w = world([]);
+  const r = run({ type: "plus", group: "repo:" + BACK, sub: null, mode: "worktree", machine: null, branch: "fix" }, w, c);
+  assert.deepEqual(r.effects, [{
+    type: "start", machine: null, folder: "/home/me/dev/arden/backend/.worktrees/fix", argv: null, name: null,
+    worktree: { main: "/home/me/dev/arden/backend", branch: "fix", path: "/home/me/dev/arden/backend/.worktrees/fix", from: null },
+    place: { group: "repo:" + BACK, sub: null },
+  }]);
+  assert.deepEqual(r.state.pending, [], "nothing is pending while git makes the worktree");
+  const made = { type: "made", group: "repo:" + BACK, sub: null, machine: null, folder: "/home/me/dev/arden/backend/.worktrees/fix" };
+  assert.deepEqual(run({ ...made, ok: false }, w, c, r.state).state.pending, [], "a worktree that failed leaves nothing pending");
+  assert.deepEqual(run({ ...made, ok: true }, w, c, r.state).state.pending.map((p) => [p.group, p.machine, p.folder]), [["repo:" + BACK, null, "/home/me/dev/arden/backend/.worktrees/fix"]]);
+  const dismissed = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } }, dismissed: [FRONT] };
+  const listed = config({ repos: MULTI, workspaces: [{ name: "W", repos: [FRONT], machines: [], on: {} }] });
+  const wsl = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: "wsl", branch: "b" }, w, listed, dismissed);
+  assert.equal(wsl.effects[0].folder, "/srv/front/.worktrees/b", "dismissed, still in a Workspace");
+  assert.deepEqual(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: "wsl", branch: "b" }, w, config({ repos: MULTI }), dismissed).effects, [], "dismissed and in no Workspace: not published");
+  assert.deepEqual(run({ type: "plus", group: "repo:" + BACK, sub: "x", mode: "worktree", machine: null, branch: "b" }, w, c).effects, [], "no Subgroups");
+  assert.deepEqual(run({ type: "plus", group: "repo:github.com/org/none", sub: null, mode: "worktree", machine: null, branch: "b" }, w, c).effects, []);
 });
 
 test("plus on a Workspace passes Repos outside the home to Claude as added directories", () => {
@@ -751,4 +855,177 @@ test("act never mutates frozen inputs and returns the identical state when nothi
   const moved = run({ type: "move", space: "s1", group: "", sub: null }, w, c, s);
   assert.notEqual(moved.state, s);
   assert.equal(s.place.s1, undefined);
+});
+
+// Pins, tabs and closing a Group
+
+const HM = repo("github.com/o/hm", "/r/hm");
+function pinWorld(extra = {}) {
+  return world([space("a", { folder: "/r/hm" }), space("b", { folder: "/r/hm" }), space("c")], { repos: { a: HM, b: HM, c: null }, ...extra });
+}
+
+test("a pinned space leaves its Group for the pinned list and returns on unpin", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  assert.deepEqual(r.tree.pinned, []);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  let tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["b"]);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), ["a"]);
+  assert.deepEqual(tree.order, ["b", "a", "c"]);
+  r = run({ type: "pin", space: "c" }, w, c, r.state);
+  tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["b", "c"]);
+  assert.deepEqual(looseIds(tree), []);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  tree = arrange(w, c, r.state);
+  assert.deepEqual(tree.pinned.map((x) => x.id), ["c"]);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), ["a", "b"]);
+});
+
+test("pin with `on` sets it, an unknown space is ignored, and a Group whose only space is pinned stays", () => {
+  const w = world([space("a", { folder: "/r/hm" })], { repos: { a: HM } }), c = config();
+  let r = view(w, c);
+  assert.equal(run({ type: "pin", space: "zz" }, w, c, r.state).state, r.state);
+  r = run({ type: "pin", space: "a", on: true }, w, c, r.state);
+  assert.equal(run({ type: "pin", space: "a", on: true }, w, c, r.state).state, r.state);
+  const tree = arrange(w, c, r.state);
+  assert.deepEqual(rowIds(tree, "repo:github.com/o/hm"), []);
+  assert.equal(group(tree, "repo:github.com/o/hm").can.dismiss, false);
+  r = run({ type: "pin", space: "a", on: false }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+});
+
+test("moving or dropping a pinned space takes its pin off, and a closed space's pin and open tabs are forgotten", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, { a: true });
+  r = run({ type: "move", space: "a", group: "", sub: null }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  r = run({ type: "drop", space: "a", group: "repo:github.com/o/hm", sub: null, before: null }, w, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  r = run({ type: "pin", space: "a" }, w, c, r.state);
+  const gone = world([space("b", { folder: "/r/hm" }), space("c")], { repos: { b: HM, c: null } });
+  r = view(gone, c, r.state);
+  assert.deepEqual(r.state.pinned, []);
+  assert.deepEqual(r.state.open, {});
+});
+
+test("expand flips a space's tabs open and shut", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, { a: true });
+  r = run({ type: "expand", space: "a" }, w, c, r.state);
+  assert.deepEqual(r.state.open, {});
+  assert.equal(run({ type: "expand", space: "zz" }, w, c, r.state).state, r.state);
+});
+
+test("closing a Repo group closes its spaces, Subgroups included, and the group goes with the last one", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "addSub", group: "repo:github.com/o/hm", name: "Review" }, w, c, r.state);
+  const sub = r.state.subs["repo:github.com/o/hm"][0].id;
+  r = run({ type: "move", space: "b", group: "repo:github.com/o/hm", sub }, w, c, r.state);
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["a", "b"] }]);
+  // One space still open: the group stays.
+  const half = world([space("b", { folder: "/r/hm" }), space("c")], { repos: { b: HM, c: null } });
+  r = view(half, c, r.state);
+  assert.ok(group(r.tree, "repo:github.com/o/hm"));
+  const none = world([space("c")], { repos: { c: null } });
+  r = view(none, c, r.state);
+  assert.equal(group(r.tree, "repo:github.com/o/hm"), undefined);
+  assert.deepEqual(r.state.closing, []);
+  // A new space in that Repo brings the group back.
+  r = view(world([space("d", { folder: "/r/hm" })], { repos: { d: HM } }), c, r.state);
+  assert.deepEqual(rowIds(r.tree, "repo:github.com/o/hm"), ["d"]);
+});
+
+test("closing a group leaves pinned spaces open and keeps a Repo group that still has one", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "pin", space: "b" }, w, c, r.state);
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["a"] }]);
+  assert.deepEqual(r.state.closing, []);
+});
+
+test("closing a Custom group closes its spaces and keeps the group, an empty Repo group is dismissed, an unknown one is ignored", () => {
+  const w = pinWorld(), c = config();
+  let r = view(w, c);
+  r = run({ type: "addCustom", name: "Mine" }, w, c, r.state);
+  const gid = "custom:" + r.state.custom[0].id;
+  r = run({ type: "move", space: "c", group: gid, sub: null }, w, c, r.state);
+  r = run({ type: "closeGroup", group: gid }, w, c, r.state);
+  assert.deepEqual(r.effects, [{ type: "close", ids: ["c"] }]);
+  assert.ok(group(arrange(w, c, r.state), gid));
+  assert.deepEqual(run({ type: "closeGroup", group: "custom:nope" }, w, c, r.state).effects, []);
+  const empty = world([space("c")], { repos: { c: null } });
+  r = view(empty, c, r.state);
+  assert.ok(group(r.tree, "repo:github.com/o/hm"));
+  r = run({ type: "closeGroup", group: "repo:github.com/o/hm" }, empty, c, r.state);
+  assert.deepEqual(r.effects, []);
+  assert.equal(group(arrange(empty, c, r.state), "repo:github.com/o/hm"), undefined);
+});
+
+// Revive
+
+const SESSION = "a2577da9-364f-4793-b7a1-50e0f1f604cb";
+const seen = (o = {}) => ({ type: "agentSeen", terminal: "wsl/t2c", pid: 876, session: SESSION, cwd: "/r/hm", flags: ["-r"], ...o });
+
+test("keptFlags keeps only the flags a resume may carry", () => {
+  assert.deepEqual(keptFlags(["claude", "-r", "--model", "opus", "fix the login bug", "--dangerously-skip-permissions"]), ["--model", "opus", "--dangerously-skip-permissions"]);
+  assert.deepEqual(keptFlags(["claude", "--permission-mode=plan", "--resume", "abc", "-c", "--continue"]), ["--permission-mode=plan"]);
+  assert.deepEqual(keptFlags(["claude", "--model", "x; rm -rf /", "--model=$(id)", "--model"]), []);
+  assert.deepEqual(keptFlags(null), []);
+});
+
+test("resumeCommand quotes the folder and refuses a record it cannot trust", () => {
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r/hm", flags: [] }), `cd '/r/hm' && claude --resume ${SESSION}`);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r/it's here", flags: ["--model", "opus"] }), `cd '/r/it'\\''s here' && claude --model opus --resume ${SESSION}`);
+  assert.equal(resumeCommand({ session: "x; rm -rf /", cwd: "/r" }), null);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "relative" }), null);
+  assert.equal(resumeCommand({ session: SESSION, cwd: "/r\nrm -rf /" }), null);
+  assert.equal(resumeCommand(null), null);
+});
+
+test("agentSeen remembers a Claude Code agent's session against its terminal, and only a record it can trust", () => {
+  const w = pinWorld(), c = config();
+  let r = run(seen({ flags: ["-r", "--model", "opus", "do the thing"] }), w, c);
+  assert.deepEqual(r.state.revive, { "wsl/t2c": { pid: 876, session: SESSION, cwd: "/r/hm", flags: ["--model", "opus"] } });
+  assert.deepEqual(r.effects, []);
+  assert.equal(run(seen(), w, c, r.state).state.revive["wsl/t2c"].flags.length, 0);
+  for (const bad of [{ pid: 0 }, { pid: "876" }, { session: "nope" }, { cwd: "rel" }, { terminal: "" }])
+    assert.deepEqual(run(seen(bad), w, c).state.revive, {});
+});
+
+test("a terminal back as a new shell gets its agent resumed once, with one toast for all", () => {
+  const w = pinWorld(), c = config();
+  let r = run(seen(), w, c);
+  r = run(seen({ terminal: "wsl/t7", pid: 900, cwd: "/r/other" }), w, c, r.state);
+  // The same process: nothing was lost.
+  assert.deepEqual(run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 876 }] }, w, c, r.state).effects, []);
+  const back = run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }, { terminal: "wsl/t7", pid: 5002 }, { terminal: "wsl/zz", pid: 5 }] }, w, c, r.state);
+  assert.deepEqual(back.effects, [
+    { type: "revive", terminal: "wsl/t2c", command: `cd '/r/hm' && claude --resume ${SESSION}` },
+    { type: "revive", terminal: "wsl/t7", command: `cd '/r/other' && claude --resume ${SESSION}` },
+    { type: "toast", level: "info", title: "Wranglr", body: "Resumed 2 agents after a restart." },
+  ]);
+  // The new process is remembered, so the same look does not resume it again.
+  assert.equal(back.state.revive["wsl/t2c"].pid, 5001);
+  assert.deepEqual(run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }] }, w, c, back.state).effects, []);
+});
+
+test("with revive off nothing is resumed and the record is dropped, and agentGone forgets a terminal", () => {
+  const w = pinWorld();
+  let r = run(seen(), w, config());
+  const off = run({ type: "terminalsBack", list: [{ terminal: "wsl/t2c", pid: 5001 }] }, w, config({ settings: { revive: false } }), r.state);
+  assert.deepEqual(off.effects, []);
+  assert.deepEqual(off.state.revive, {});
+  r = run({ type: "agentGone", terminals: ["wsl/t2c", "wsl/none"] }, w, config(), r.state);
+  assert.deepEqual(r.state.revive, {});
 });

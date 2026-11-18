@@ -266,7 +266,7 @@ test("programIcon and explain", () => {
   assert.equal(m.programIcon({ image: "shop-local-gateway", command: "npm run dev" }), "icons/node.svg");
   assert.equal(m.programIcon({ image: "shop-local-billing", command: "dotnet Billing.API.dll" }), "icons/dotnet.svg");
   assert.equal(m.programIcon({ image: "mcr.microsoft.com/mssql/server", command: "/opt/mssql/bin/sqlservr" }), "icons/docker.svg");
-  assert.match(m.explain("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", "wsl"), /^Docker is not running on wsl\./);
+  assert.match(m.explain("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?", "wsl"), /^Docker is not running\./);
   assert.match(m.explain("Bind for 127.0.0.1:3010 failed: port is already allocated"), /^Port 3010 is already in use/);
   assert.equal(m.explain("line one\nno configuration file provided: not found\n"), "no configuration file provided: not found");
 });
@@ -451,6 +451,8 @@ test("panelItems, keyAction and keyHints follow the run mod's keys", () => {
   assert.equal(act("c", row, up), "row:source");
   assert.equal(act("c", row, down), null);
   assert.equal(act("d", row, down), "row:diagnose");
+  assert.equal(act("d", row, up), "row:diagnose"); // a running container can be looked into too
+  assert.equal(act("d", row, { ...up, created: false }), null);
   assert.equal(act("o", row, up), "row:browser");
   assert.equal(act("enter", row, up), "row:open");
   assert.equal(act("u", row, up), "group:up");
@@ -471,8 +473,111 @@ test("panelItems, keyAction and keyHints follow the run mod's keys", () => {
   assert.ok(m.keyHints(row, up).some(([k, w]) => k === "x" && w === "stop"));
   assert.ok(!m.keyHints(row, up).some(([k]) => k === "s"));
   assert.ok(m.keyHints(head).some(([k, w]) => k === "enter" && w === "fold"));
-  assert.deepEqual(m.coreHints(row, up).map(([k]) => k), ["j/k", "enter", "x", "r", "?"]);
-  assert.deepEqual(m.coreHints(row, down).map(([k]) => k), ["j/k", "enter", "s", "?"]);
+  assert.deepEqual(m.coreHints(row, up).map(([k]) => k), ["j/k", "enter", "d", "t", "r", "x", "c", "b", "m", "?"]);
+  assert.ok(m.coreHints(row, up).some(([k, w]) => k === "enter" && w === "logs"));
+  assert.deepEqual(m.coreHints(row, down).map(([k]) => k).slice(0, 4), ["j/k", "enter", "d", "s"]);
+  assert.ok(!m.coreHints(row, down).some(([k]) => k === "t" || k === "u"));
+  assert.ok(m.coreHints(head, up).some(([k]) => k === "u"));
   assert.equal(act("?", row, up), "panel:help");
   assert.equal(act("shift-/", null), "panel:help");
+});
+
+test("the dashboard sums what the stats say and names what needs a look", () => {
+  const c = (name, over = {}) => ({ name, state: "running", restarts: 0, oom: false, startedAt: new Date(10_000_000 - 7_200_000).toISOString(), ...over });
+  const groups = [
+    { key: "stack:a", name: "a", rows: [{ key: "a/web", name: "web", container: c("a-web-1") }, { key: "a/db", name: "db", container: c("a-db-1") }, { key: "a/new", name: "new", container: null }] },
+    { key: "loose", name: null, rows: [{ key: "x", name: "x", container: c("x", { state: "exited", exitCode: 2 }) }] },
+  ];
+  const s = (cpu, mem, limit = 1000) => ({ cpu, mem, limit, net: "1kB / 2kB", disk: "0B / 3MB" });
+  const stats = { "a-web-1": [s(10, 100), s(30, 200)], "a-db-1": [s(5, 950)], x: [s(99, 99)] };
+  const status = (k) => (k.state === "exited" ? { kind: "bad", text: "exited 2" } : { kind: "up", text: "" });
+  const d = m.dashboard(groups, stats, status, "cpu", 10_000_000);
+  assert.deepEqual([d.totals.running, d.totals.total, d.totals.cpu, d.totals.mem, d.totals.limit], [2, 3, 35, 1150, 1000]);
+  assert.deepEqual([d.totals.netIn, d.totals.netOut, d.totals.diskOut], [2000, 4000, 6e6]);
+  assert.deepEqual(d.groups.map((g) => [g.name, g.running, g.total, g.cpu]), [["a", 2, 2, 35], ["No project", 0, 1, 0]]);
+  assert.deepEqual(d.rows.map((r) => r.name), ["web", "db", "x"]);
+  assert.equal(d.rows[0].up, "2h");
+  assert.deepEqual(m.dashboard(groups, stats, status, "mem").rows.map((r) => r.name), ["db", "web", "x"]);
+  assert.deepEqual(d.attention.map((a) => [a.name, a.why]), [["db", "memory at 95% of its limit"], ["x", "exited 2"]]);
+  assert.deepEqual(d.history, { cpu: [10, 35], mem: [100, 1150] });
+});
+
+test("a stopped Docker Desktop is named as such, whatever it printed", () => {
+  const stub = "\nThe command 'docker' could not be found in this WSL 2 distro.\nWe recommend to activate the WSL integration in Docker Desktop settings.\n\nhttps://docs.docker.com/go/wsl2/\n";
+  for (const text of [stub, "Cannot connect to the Docker daemon at unix:///var/run/docker.sock.", "docker events ended"]) {
+    assert.equal(m.explain(text, "wsl"), "Docker is not running. Start it, then press Refresh.");
+  }
+});
+
+test("the newest build or bring-up speaks for a Service, not an old failed one left open", () => {
+  const op = (at, failed) => ({ kind: "op", stack: "s", services: ["web"], at, failed });
+  assert.equal(m.opFor([op(1, "1"), op(5, null)], "s", "web").at, 5);
+  assert.equal(m.opFor([op(5, null), op(1, "1")], "s", "web").at, 5);
+});
+
+test("a refused git switch is said in a sentence", () => {
+  assert.match(m.gitRefusal("error: Your local changes to the following files would be overwritten by checkout:\n\tf\nPlease commit your changes or stash them before you switch branches.\nAborting"), /^Git kept the branch: uncommitted changes/);
+  assert.match(m.gitRefusal("fatal: 'other' is already used by worktree at '/x/wt'"), /checked out in a worktree/);
+  assert.match(m.gitRefusal("fatal: 'other' is already checked out at '/x/wt'"), /checked out in a worktree/);
+  assert.equal(m.gitRefusal("fatal: invalid reference: nope"), "Git has no such branch.");
+  assert.equal(m.gitRefusal("fatal: something else\n"), "something else");
+});
+
+test("the brief for a container that has not failed asks for a look, not a fix", () => {
+  const c = { name: "p-web-1", image: "web", state: "running", health: "healthy", exitCode: 0, restarts: 0, oom: false, error: "", healthOutput: "", ports: [], command: "" };
+  const text = m.brief({ stack: { name: "p", compose: "/s/c.yml" }, row: { name: "web" }, container: c, lines: ["ready"] });
+  assert.match(text, /^Look into the Docker container for "web" in the compose project "p"\. Docker reports no failure\./);
+  assert.match(text, /- Problem: none that Docker reports/);
+  assert.doesNotMatch(text, /is failing/);
+});
+
+test("a container boots until it is healthy, or for a minute when it has no health check", () => {
+  const now = 1_000_000_000, at = (ms) => new Date(now - ms).toISOString();
+  assert.equal(m.booting({ state: "running", health: "starting", startedAt: at(600_000) }, now), true);
+  assert.equal(m.booting({ state: "running", health: "healthy", startedAt: at(1_000) }, now), false);
+  assert.equal(m.booting({ state: "running", health: "", startedAt: at(20_000) }, now), true);
+  assert.equal(m.booting({ state: "running", health: "", startedAt: at(61_000) }, now), false);
+  assert.equal(m.booting({ state: "exited", health: "", startedAt: at(1_000) }, now), false);
+  assert.equal(m.booting(null, now), false);
+});
+
+test("the boot line is the newest log line that says something", () => {
+  assert.equal(m.bootLine([{ text: "Starting up" }, { text: "  Now   listening on: http://[::]:80 " }, { text: "   " }, { text: "---" }]), "Now listening on: http://[::]:80");
+  assert.equal(m.bootLine([{ text: "x".repeat(300) }]).length, 201);
+  assert.equal(m.bootLine([]), "");
+});
+
+test("the build line is the newest step on the terminal's screen, for the row's service when named", () => {
+  const screen = [" => [internal] load build context", " => => transferring context: 25B", " => CACHED [2/6] WORKDIR /app", " => [3/6] RUN echo one && sleep 3     3.1s", " => [4/6] RUN npm ci", " => => # added 12 packages", ""].join("\n");
+  assert.equal(m.buildLine(screen), "[4/6] RUN npm ci");
+  const two = [" => [web 2/5] COPY package.json ./", " => [api 3/4] RUN dotnet restore   12.0s", " => [web 3/5] RUN npm ci"].join("\n");
+  assert.equal(m.buildLine(two, "api"), "[api 3/4] RUN dotnet restore");
+  assert.equal(m.buildLine(two, "web"), "[web 3/5] RUN npm ci");
+  assert.equal(m.buildLine(two, "other"), "[web 3/5] RUN npm ci");
+  assert.equal(m.buildLine(" ✔ Container p-web-1  Recreated   0.4s\n ⠋ Container p-web-1  Starting\n"), "⠋ Container p-web-1 Starting");
+  assert.equal(m.buildLine("\n\n"), "");
+});
+
+test("the brief carries what a failed build printed, and buildLog keeps only its last lines", () => {
+  const c = { name: "p-web-1", image: "p-web", state: "running", health: null, restarts: 0 };
+  const screen = "\x1b[32m => [web 3/6] RUN npm ci\x1b[0m\r\n\n" + "y".repeat(900) + "\nnpm ERR! missing script\n\nFailed with exit code 17. Press Enter to close.\n";
+  const lines = m.buildLog(screen);
+  assert.deepEqual([lines[0], lines[2]], [" => [web 3/6] RUN npm ci", "npm ERR! missing script"]);
+  assert.equal(lines.length, 3);
+  assert.equal(lines[1].length, 401);
+  assert.equal(m.buildLog("a\nb\nc", 2).join(), "b,c");
+  const text = m.brief({ stack: { name: "p" }, row: { name: "web" }, container: c, lines: ["ready"], build: { title: "Rebuild web", failed: "17", lines } });
+  assert.match(text, /^"Rebuild web" failed for "web" in the compose project "p"\./);
+  assert.match(text, /The last 3 lines that "Rebuild web" printed \(it failed with exit code 17\):\n => \[web 3\/6\] RUN npm ci\n/);
+  assert.match(text, /Say the cause first/);
+  const working = m.brief({ stack: null, row: { name: "web" }, container: c, lines: [], build: { title: "Rebuild web", failed: null, lines: ["step"] } });
+  assert.match(working, /printed \(it is still working\):\nstep/);
+  assert.equal(m.brief({ stack: null, row: { name: "web" }, container: c, lines: [], build: { title: "x", failed: "1", lines: [] } }).includes("printed"), false);
+});
+
+test("p opens the build output only while a build or bring-up has a terminal open", () => {
+  const item = { kind: "row", group: { name: "p", managed: true } };
+  assert.deepEqual(m.keyAction("p", item, { output: true }), { on: "row", action: "output" });
+  assert.equal(m.keyAction("p", item, {}), null);
+  assert.ok(m.coreHints(item, { output: true }).some(([k, what]) => k === "p" && what === "build output"));
 });

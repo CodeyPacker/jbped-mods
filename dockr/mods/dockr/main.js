@@ -8,7 +8,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { closeOverlay, focused, hc, layout, nextCommand, notify, openOverlay, panes, props, run, setShared, settings, shared, spaces, terminals, theme } from "herdr";
+import { closeOverlay, focused, layout, nextCommand, notify, openOverlay, panes, props, run, setShared, settings, shared, spaces, terminals, theme } from "herdr";
 import * as model from "./model.js";
 import * as docker from "./docker.js";
 import { Store } from "./store.js";
@@ -16,11 +16,16 @@ import * as diagnose from "./diagnose.js";
 import * as logs from "./logs.js";
 import * as disk from "./disk.js";
 import * as menu from "./menu.js";
+import * as dashboard from "./dashboard.js";
 import { legend } from "./kit/legend.js";
 import { assignLetters, letterBadge, navigateByLetter } from "./kit/letters.js";
 
 const icon = (name) => `mods/dockr/icons/${name}.svg`;
+const OPEN = "dockr.open"; // true while the dialog is open: the status bar's copy then posts no toasts
+const BACK = "dockr.back"; // set when a popup or dialog opened from the list closes: the list then takes the keyboard again
+const WAKE = "dockr.wake"; // set when the dialog reads Docker again: the status bar's copy then does too, which restarts a watch that ended
 const REQUEST = "dockr.request"; // the picker's ask, handed to the panel through shared state
+const LAST = "dockr.last"; // what the dialog knew when it closed, so the next one opens on it and not on an empty list
 const load = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key) ?? "null") ?? fallback; } catch { return fallback; } };
 const idOf = (s) => String(s).replace(/[^A-Za-z0-9_-]/g, "_");
 const mainTag = (s) => (s?.main ? "  · Main checkout" : "");
@@ -41,17 +46,15 @@ export default class Dockr extends View {
     this.disking = props()?.disk ?? null;
     if (this.disking) return disk.init(this, cx);
 
-    // Opened by its key (mod.open): this copy only passes the key on to the panel and closes.
-    // A hidden panel hears no commands, and Herdr's mod.open is the one key action that always runs.
-    this.passing = props()?.overlay != null;
-    if (this.passing) {
-      if (!model.modShown(layout(), "dockr")) run("layout.show", { id: "dockr" });
-      setShared(REQUEST, { n: Date.now(), kind: "keys" });
-      closeOverlay(props().overlay);
-      return;
-    }
+    // Opened by its key (mod.open): the list is a dialog, which has the keyboard while it is open.
+    // In a layout block it still draws, and takes keys when Herdr hands it the keyboard.
+    this.modal = props()?.overlay != null;
+    if (this.modal) { this.handle.focus(); setShared(OPEN, true); }
+    // In the status bar (props { chip: true }): a small mark that stays alive to watch Docker and post the toasts.
+    this.chip = !!props()?.chip;
 
     this.store = new Store(load("built", {}), (built) => localStorage.setItem("built", JSON.stringify(built)));
+    if (this.modal) this.store.restore(shared(LAST)?.store);
     this.watching = new Set(); // machines with an event wait running
     this.watchErrors = {};     // machine -> why its wait stopped
     this.busy = {};            // row or stack key -> what a short action is doing to it
@@ -65,9 +68,10 @@ export default class Dockr extends View {
     this.search.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.search.on("submit", (_e, cx) => { this.enterKeys(); cx.notify(); });
     this.typing = false;       // the search box has the keyboard
-    this.heldAt = 0;           // when the panel was last drawn holding the keyboard
+    this.tab = localStorage.getItem("tab") === "dash" ? "dash" : "list"; // the list of containers, or the dashboard
+    this.dashSort = localStorage.getItem("dashSort") === "mem" ? "mem" : "cpu";
+    this.dashDisk = null;      // Docker's disk use, read once when the dashboard first shows
     this.help = false;         // every key is listed, after "?"
-    this.gone = false;         // the keyboard left: a press outside the panel, or a key that hands it back
     this.kb = false;           // the panel has the keyboard, asked of its focus handle at each render: letters, selection and the legend show
     this.sel = null;           // the selected item's key
     this.typed = "";           // the hint letters typed so far
@@ -78,13 +82,17 @@ export default class Dockr extends View {
     this.hover = null;         // the row under the pointer
     this.pendingDown = null;   // the Stack a confirm dialog is asking about
     this.told = new Set();     // failed builds already announced
-    this.stats = {};           // container name -> its last CPU and memory samples, while the panel shows
+    this.stats = (this.modal && shared(LAST)?.stats) || {}; // container name -> its last CPU and memory samples, while the panel shows
     this.sampling = new Set(); // machines with a stats wait running
+    this.screens = {};         // a build or bring-up's terminal address -> its screen, while it works
+    this.boot = {};            // container name -> its newest log line, while it boots
+    this.following = new Set(); // container names with a boot line wait running
     this.statsOff = new Set(); // machines whose stats wait could not run
     this.folded = load("folded2", {});
     this.startStopped = localStorage.getItem("start") === "1";
     this.seenRequest = shared(REQUEST)?.n ?? 0;
-    this.wasShown = model.modShown(layout(), "dockr");
+    this.wasShown = this.visible();
+    this.seenBack = shared(BACK) ?? 0;
 
     cx.spawn(async (cx) => { await this.reload(cx); });
     cx.spawn(async (cx) => {
@@ -92,10 +100,8 @@ export default class Dockr extends View {
         const c = await nextCommand();
         this.noteHidden();
         if (c === "reload") await this.reload(cx);
-        else if (c === "focus") { this.gotFocus = true; this.enterKeys(); }
-        else if (c === "keys") this.keysCommand(cx);
-        else if (c === "hide") this.hidePanel();
-        else if (c === "disk" || c === "logs") { const g = this.groups().find((x) => x.managed) ?? this.groups().find((x) => x.name); if (g) await this.doAction(cx, g.key, c); }
+        else if (c === "focus") this.enterKeys();
+        else if ((c === "disk" || c === "logs") && !(this.chip && shared(OPEN))) { const g = this.groups().find((x) => x.managed) ?? this.groups().find((x) => x.name); if (g) await this.doAction(cx, g.key, c); }
         else if (c === "downConfirmed" && this.pendingDown) { const name = this.pendingDown; this.pendingDown = null; await this.runOp(cx, await this.store.prepareStack(name, "down")); }
         cx.notify();
       }
@@ -105,11 +111,16 @@ export default class Dockr extends View {
   // The panel: loading
 
   post(toasts) {
-    if (model.modShown(layout(), "dockr")) return;
-    for (const t of toasts) notify({ title: t.title, body: t.body ? `${t.stack}: ${t.body}` : t.stack, level: t.level, action: { name: "layout.show", args: { id: "dockr" } } });
+    if (this.visible() || (this.chip && shared(OPEN))) return;
+    for (const t of toasts) notify({ title: t.title, body: t.body ? `${t.stack}: ${t.body}` : t.stack, level: t.level, action: { name: "mod.open", args: { name: "dockr" } } });
   }
 
   async reload(cx) {
+    this.note = "";
+    this.undo = null;
+    this.dashDisk = null;
+    if (!this.chip) setShared(WAKE, Date.now());
+    this.seenWake = shared(WAKE) ?? 0;
     this.statsOff.clear();
     this.post(await this.store.reload());
     for (const m of this.store.machines()) this.watch(cx, m);
@@ -126,10 +137,13 @@ export default class Dockr extends View {
     cx.spawn(async (cx) => {
       let since = "";
       for (;;) {
+        const began = Date.now();
         const r = await docker.waitEvent(machine || null, since);
+        // A wait that ends at once with nothing to say did not wait: stop, never spin.
+        if (!r.error && !r.event && Date.now() - began < 3000) r.error = "docker events ended";
         if (r.error) {
           this.watching.delete(machine);
-          this.watchErrors[machine] = `Not watching Docker${machine ? ` on ${machine}` : ""}: ${model.explain(r.error, machine || null)} Reload tries again.`;
+          this.watchErrors[machine] = `Not watching Docker${machine ? ` on ${machine}` : ""}: ${model.explain(r.error, machine || null)} Refresh tries again.`;
           cx.notify();
           return;
         }
@@ -150,7 +164,7 @@ export default class Dockr extends View {
     this.sampling.add(machine);
     cx.spawn(async (cx) => {
       try {
-        while (model.modShown(layout(), "dockr")) {
+        while (this.visible()) {
           const r = await docker.waitStats(machine || null);
           if (r.error) { this.statsOff.add(machine); return; } // Reload tries again
           const now = model.parseStats(r.text);
@@ -165,64 +179,100 @@ export default class Dockr extends View {
   }
 
   /**
+   * Follows the terminal of a build or bring-up for its screen, which its rows show a line of as
+   * the step it is on. It ends when the work ends or fails, or the list is not shown.
+   */
+  followOp(cx, address) {
+    if (address in this.screens) return;
+    this.screens[address] = "";
+    const still = () => this.visible() && this.ops().some((o) => o.address === address && o.failed == null);
+    cx.spawn(async (cx) => {
+      try {
+        while (still()) {
+          this.screens[address] = await docker.screen(address);
+          cx.notify();
+          if (!(await docker.waitOutput(address))) return;
+        }
+      } finally { delete this.screens[address]; cx.notify(); }
+    });
+  }
+
+  /**
+   * Follows a booting container's log for its newest line, which the row shows as what it is
+   * doing. It ends when the container is no longer booting, stops, or the list is not shown.
+   */
+  followBoot(cx, machine, name) {
+    if (this.following.has(name)) return;
+    this.following.add(name);
+    const still = () => this.visible() && model.booting((this.store.byMachine[machine] ?? []).find((c) => c.name === name));
+    cx.spawn(async (cx) => {
+      try {
+        let since = "";
+        while (still()) {
+          const r = await docker.waitLogs(machine || null, name, since, 5);
+          if (r.error) return;
+          const got = model.parseLogs(r.text);
+          for (const l of got.lines) if (l.at > since) since = l.at;
+          const line = model.bootLine(got.lines);
+          if (line) { this.boot[name] = line; cx.notify(); }
+          if (got.ended) return;
+        }
+      } finally { this.following.delete(name); delete this.boot[name]; cx.notify(); }
+    });
+  }
+
+  /**
    * Nothing draws while the panel is hidden, so drawing cannot notice that it was. The loops that
    * keep running do: they call this, and the next draw then knows the panel has just been shown.
    */
-  noteHidden() { if (!model.modShown(layout(), "dockr")) this.wasShown = false; }
+  noteHidden() { if (!this.visible()) this.wasShown = false; }
+
+  /** The list is on screen: always as a dialog, and in a layout block while that block shows. */
+  visible() { return !this.chip && (this.modal || model.modShown(layout(), "dockr")); }
+
+  /** The dialog has closed: the status bar's copy posts the toasts again. */
+  async close() {
+    if (this.modal) { setShared(OPEN, false); setShared(LAST, { store: this.store.snapshot(), stats: this.stats }); }
+    else if (!this.chip && props()?.overlay != null) setShared(BACK, Date.now());
+  }
+
+  /** The status bar's mark: how many containers run, red when one has failed. A click opens the dialog. */
+  renderChip(t, cx) {
+    if ((shared(WAKE) ?? 0) !== this.seenWake) { this.seenWake = shared(WAKE) ?? 0; cx.spawn(async (cx) => { await this.reload(cx); }); }
+    const all = this.store.containers(), up = all.filter((c) => c.state === "running").length;
+    const bad = all.filter((c) => this.store.status(c).kind === "bad");
+    const deaf = Object.values(this.watchErrors);
+    if (deaf.length) return h_flex().id("dockr-chip").size_full().px(10).gap(6).items_center().justify_center().bg(t.chrome).border_t(1).border_color(t.border)
+      .text_size(11.8).text_color(t.ansi3).cursor_pointer().tooltip(`${deaf.join(" ").replace(/ Refresh tries again\./g, "")} Opening Dockr tries again.`).on_click(() => run("mod.open", { name: "dockr" }))
+      .child(svg("icons/docker.svg").size(14).flex_none().text_color(t.ansi3)).child(div().child("!"));
+    const tip = bad.length ? `${bad.map((c) => c.name).join(", ")}: ${bad.length === 1 ? "needs" : "need"} a look` : `${up} of ${all.length} containers running`;
+    return h_flex().id("dockr-chip").size_full().px(10).gap(6).items_center().justify_center().bg(t.chrome).border_t(1).border_color(t.border)
+      .text_size(11.8).text_color(bad.length ? t.ansi1 : t.muted).cursor_pointer().hover((x) => x.text_color(t.foreground)).tooltip(`${tip}. Click to open Dockr (ctrl-shift-d)`)
+      .on_click(() => run("mod.open", { name: "dockr" }))
+      .child(svg("icons/docker.svg").size(14).flex_none().text_color(bad.length ? t.ansi1 : t.muted))
+      .child(div().child(all.length ? `${up}/${all.length}` : "0"));
+  }
 
   // The panel: keys, as CodeyPacker's run mod has them
 
   /** Herdr has handed this panel the keyboard (its "focus" command), or the search box gave it back. */
   enterKeys() {
-    this.gone = false;
     this.typed = "";
     this.handle.focus();
   }
 
-  /**
-   * The panel's key (ctrl-shift-d): hidden, it shows and takes the keyboard. Shown without the
-   * keyboard, it takes it. Holding the keyboard, it gives it back and hides.
-   */
-  keysCommand(cx) {
-    // While the panel holds the keyboard its own key section hides it (hidePanel), so this is
-    // reached only without it. Should that section be missing, the key's popup has just taken the
-    // keyboard off the panel: ask whether the panel held it a moment ago.
-    if (Date.now() - this.heldAt < 1500) return this.hidePanel();
-    cx.spawn(async (cx) => { await this.grabKeys(cx); });
-  }
-
-  /** Gives the keyboard back to the pane and hides the panel. */
-  hidePanel() {
-    this.gone = true;
-    this.heldAt = 0;
-    this.typed = "";
-    this.help = false;
-    run("pane.go", { direction: "left" });
-    run("layout.hide", { id: "dockr" });
-  }
-
-  /**
-   * Asks Herdr for the keyboard. Only Herdr can move it off a terminal, and it does so with
-   * pane.go, one step at a time: step toward the panel until its "focus" command arrives.
-   */
-  async grabKeys(cx) {
-    if (this.grabbing) return;
-    this.grabbing = true;
-    this.gotFocus = false;
-    try {
-      for (let i = 0; i < 6 && !this.gotFocus; i++) {
-        run("pane.go", { direction: "right" });
-        await hc(["--version"]).catch(() => null); // lets the "focus" command arrive before the next step
-      }
-    } finally { this.grabbing = false; cx.notify(); }
-  }
-
-  /** Hands the keyboard back to the pane beside the panel. */
+  /** q and esc: the dialog closes. A layout block hands the keyboard back to the pane beside it. */
   leaveKeys() {
-    this.gone = true;
     this.typed = "";
-    run("pane.go", { direction: "left" });
+    if (this.modal) closeOverlay(props().overlay);
+    else run("pane.go", { direction: "left" });
   }
+
+  /** How a log or container view opens. Herdr draws windows under dialogs, so the dialog opens them as dialogs on top of itself. */
+  over(key) { return this.modal ? { kind: "dialog" } : { kind: "window", key }; }
+
+  /** The build or bring-up of a row's Service whose terminal is still open: working, or failed and not dismissed. */
+  opOf(r) { return r?.stack ? model.opFor(this.ops(), r.stack, r.name) : null; }
 
   /** What the keys need to know about the selected item. */
   facts(item) {
@@ -230,8 +280,10 @@ export default class Dockr extends View {
     const gs = item.group.state, group = { anyDown: gs.running < gs.total, anyUp: gs.running > 0 };
     if (item.kind !== "row") return group;
     const r = item.row, c = r.container;
-    return { ...group, running: c?.state === "running", created: !!c, service: !!r.service, bad: !!c && this.store.status(c).kind === "bad", link: !!this.links[r.key] };
+    return { ...group, running: c?.state === "running", created: !!c, service: !!r.service, bad: !!c && this.store.status(c).kind === "bad", link: !!this.links[r.key], output: !!this.opOf(r) };
   }
+
+  setTab(tab) { this.tab = tab; this.help = false; localStorage.setItem("tab", tab); }
 
   panelKey(e, cx) {
     if (this.typing) {
@@ -239,6 +291,15 @@ export default class Dockr extends View {
       return;
     }
     if (!this.kb) return;
+    if (!(e.modifiers.control || e.modifiers.alt || e.modifiers.platform)) {
+      if (e.key === "1" || e.key === "2") { this.setTab(e.key === "2" ? "dash" : "list"); cx.stop_propagation(); cx.notify(); return; }
+      if (this.tab === "dash") {
+        if (e.key === "q") this.leaveKeys();
+        else if (e.key === "s") { this.dashSort = this.dashSort === "mem" ? "cpu" : "mem"; localStorage.setItem("dashSort", this.dashSort); }
+        else return;
+        cx.stop_propagation(); cx.notify(); return;
+      }
+    }
     const items = this.items;
     const state = { at: Math.max(0, items.findIndex((i) => i.key === this.sel)), typed: this.typed };
     const nav = navigateByLetter(state, e, items);
@@ -260,7 +321,7 @@ export default class Dockr extends View {
       else pick(a.action === "first" ? 0 : items.length - 1);
     } else if (a.on === "group") {
       const g = item.group;
-      if (a.action === "menu") this.openMenu(g.key, this.groupItems(g));
+      if (a.action === "menu") this.openMenu(g.key, this.groupItems(g), true);
       else if (a.action === "fold" || a.action === "unfold" || a.action === "toggle") {
         const want = a.action === "fold" ? true : a.action === "unfold" ? false : !this.folded[g.key];
         if (!!this.folded[g.key] !== want) this.fold(cx, g.key);
@@ -268,7 +329,7 @@ export default class Dockr extends View {
       } else cx.spawn(async (cx) => { await this.doAction(cx, g.key, a.action); cx.notify(); });
     } else {
       const r = item.row;
-      if (a.action === "menu") this.openMenu(r.key, this.menuItems(r));
+      if (a.action === "menu") this.openMenu(r.key, this.menuItems(r), true);
       else if (a.action === "copy") { cx.write_to_clipboard(r.container.name); this.note = `Copied ${r.container.name}`; }
       else cx.spawn(async (cx) => { await this.doAction(cx, r.key, a.action, a.action === "browser" ? this.links[r.key] : null); cx.notify(); });
     }
@@ -304,7 +365,10 @@ export default class Dockr extends View {
 
   /** Starts a prepared action's script in a background terminal. The row shows its progress. */
   async runOp(cx, p, show = false) {
-    if (p.undo !== undefined) this.undo = Object.keys(p.undo.targets).length ? { ...p.undo, label: Object.values(p.undo.targets).map(model.sourceName).join(", ") } : null;
+    // With Docker stopped the script would only fail in a terminal nobody is looking at: say so here.
+    const down = p.script && !p.error ? await docker.alive(p.stack.machine ?? null) : null;
+    if (down) { this.note = `${p.title}: ${down}`; cx.notify(); return; }
+    if (p.undo !== undefined) this.undo = Object.keys(p.undo.targets).length ? { ...p.undo, label: p.undo.checkout?.branch ?? Object.values(p.undo.targets).map(model.sourceName).join(", ") } : null;
     if (p.error || !p.script) { this.note = p.error ?? p.note ?? ""; cx.notify(); return; }
     const r = await docker.terminal(p.stack.machine, p.stack.dir, { stack: p.stack.name, ...p.labels }, p.script);
     this.note = r.error ? `${p.title}: ${model.explain(r.error, p.stack.machine)}` : p.note ?? "";
@@ -312,12 +376,12 @@ export default class Dockr extends View {
     cx.notify();
   }
 
-  async doSwitch(cx, name, targets, start, title) {
+  async doSwitch(cx, name, targets, start, title, checkout = null) {
     const key = Object.keys(targets).length === 1 ? `${name}/${Object.keys(targets)[0]}` : name;
     if (this.busy[key]) return;
     this.busy[key] = "checking";
     cx.notify();
-    try { await this.runOp(cx, await this.store.prepareSwitch(name, targets, start, title)); }
+    try { await this.runOp(cx, await this.store.prepareSwitch(name, targets, start, title, checkout)); }
     finally { delete this.busy[key]; cx.notify(); }
   }
 
@@ -334,7 +398,7 @@ export default class Dockr extends View {
   openLogs(title, key, machine, rows, terminal) {
     const sources = rows.filter((r) => r.container).map((r) => ({ name: r.container.name, label: r.name }));
     if (!sources.length) { this.note = "Nothing has been created yet, so there are no logs."; return; }
-    openOverlay({ mod: "dockr", kind: "window", key: `dockr-logs-${idOf(key)}`, width: 1100, height: 680, props: { logs: { title, machine: machine ?? null, sources, terminal } } });
+    openOverlay({ mod: "dockr", ...this.over(`dockr-logs-${idOf(key)}`), width: 1100, height: 680, props: { logs: { title, machine: machine ?? null, sources, terminal } } });
   }
 
   async tail(cx, row, kind) {
@@ -343,20 +407,23 @@ export default class Dockr extends View {
     await this.runOp(cx, await this.store.prepareTail(row, kind), true);
   }
 
-  /** Opens the Diagnose dialog for a container that is not well, with the text an agent would get. */
+  /** Opens the Diagnose dialog for a container, failing or not, with the text an agent would get. */
   async openDiagnose(cx, r) {
     const c = r.container;
     if (!c) return;
     const stack = r.stack ? this.store.stack(r.stack) : null;
     const machine = stack ? stack.machine ?? null : this.store.machineOf(c);
     const lines = await docker.lastLines(machine, c.id, 100);
+    // A build or bring-up for it that is working, or failed and still open: what it printed goes along.
+    const op = r.stack && r.service ? model.opFor(this.ops(), r.stack, r.name) : null;
+    const build = op ? { title: op.title, failed: op.failed, lines: model.buildLog(await docker.screen(op.address, 300)) } : null;
     const src = r.actual ?? r.set ?? null;
     openOverlay({
       mod: "dockr", kind: "dialog", width: 720, height: 560,
       props: { diagnose: {
         service: r.name, machine, folder: src?.path ?? stack?.dir ?? null, branch: src?.branch ?? null,
-        why: model.why(c) || this.store.status(c).text,
-        brief: model.brief({ stack, row: r, container: c, lines, loop: this.store.looping(c) }),
+        why: model.why(c) || this.store.status(c).text || c.state,
+        brief: model.brief({ stack, row: r, container: c, lines, loop: this.store.looping(c), build }),
       } },
     });
     cx.notify();
@@ -391,12 +458,14 @@ export default class Dockr extends View {
     const req = shared(REQUEST);
     if (!req?.n || req.n === this.seenRequest) return;
     this.seenRequest = req.n;
-    if (req.kind === "keys") return this.keysCommand(cx);
     if (req.kind !== "tail" && req.kind !== "act") {
       this.startStopped = !!req.start;
       localStorage.setItem("start", this.startStopped ? "1" : "0");
     }
     cx.spawn(async (cx) => {
+      // This starts while the list is being drawn, and Herdr refuses a redraw asked for then: the
+      // actions ask for one at once, so step out of the draw first.
+      await null;
       if (req.kind === "act") await this.doAction(cx, req.key, req.action, req.arg);
       else if (req.kind === "tail") {
         const row = this.store.rows(req.stack).find((r) => r.name === req.service);
@@ -404,7 +473,7 @@ export default class Dockr extends View {
       } else if (req.kind === "rebuild") {
         const row = this.store.rows(req.stack).find((r) => r.name === req.service);
         if (row) await this.runOp(cx, await this.store.prepareRebuild(row));
-      } else await this.doSwitch(cx, req.stack, req.targets, req.start, req.title);
+      } else await this.doSwitch(cx, req.stack, req.targets, req.start, req.title, req.checkout ?? null);
     });
   }
 
@@ -427,7 +496,7 @@ export default class Dockr extends View {
     const c = r.container;
     if (!c) { this.note = `${r.name} has no container yet. Start it first.`; return; }
     const stack = r.stack ? this.store.stack(r.stack) : null;
-    openOverlay({ mod: "dockr", kind: "window", key: `dockr-c-${idOf(r.key)}`, width: 1100, height: 680, props: { logs: {
+    openOverlay({ mod: "dockr", ...this.over(`dockr-c-${idOf(r.key)}`), width: 1100, height: 680, props: { logs: {
       title: r.name, machine: stack ? stack.machine ?? null : this.store.machineOf(c), sources: [{ name: c.name, label: r.name }],
       terminal: stack ? { stack: r.stack, service: r.name } : null,
       info: { key: r.key, container: c, running: c.state === "running", why: model.why(c), runs: r.service ? r.actual?.path ?? null : null, set: r.service ? r.set?.path ?? null : null, drift: r.drift },
@@ -471,6 +540,7 @@ export default class Dockr extends View {
     if (!r) return;
     const c = r.container, managed = !!r.stack;
     if (action === "open") return this.openContainer(r);
+    if (action === "output") { const op = this.opOf(r); if (op) this.peek(op.address, op.title, true); return; }
     if (action === "browser") return docker.openUrl(arg);
     if (action === "diagnose") return this.openDiagnose(cx, r);
     if (action === "source") return this.openPicker(cx, r);
@@ -536,6 +606,7 @@ export default class Dockr extends View {
   /** What a container offers, in the order Docker Desktop lists it. */
   menuItems(r) {
     const c = r.container, running = c?.state === "running", items = [];
+    if (this.opOf(r)) items.push({ label: "Show build output", action: "output", hint: "live" });
     if (c) items.push({ label: "Open", action: "open", hint: "Logs · Inspect · Stats" });
     if (running) items.push({ label: "Open terminal", action: "terminal" });
     for (const p of (c?.ports ?? []).slice(0, 3)) items.push({ label: `Open localhost:${p.host} in browser`, action: "browser", arg: model.portUrl(p.host) });
@@ -543,7 +614,7 @@ export default class Dockr extends View {
     if (running) items.push({ label: "Stop", action: "stop" }, { label: "Restart", action: "restart" });
     else items.push({ label: c ? "Start" : "Create and start", action: "start" });
     if (r.service) items.push({ sep: true }, { label: "Change checkout…", action: "source", hint: "branch or worktree" }, { label: "Rebuild image", action: "rebuild" });
-    if (c && (model.why(c) || this.store.looping(c))) items.push({ sep: true }, { label: "Diagnose with an agent…", action: "diagnose" });
+    if (c) items.push({ sep: true }, { label: model.why(c) || this.store.looping(c) ? "Diagnose with an agent…" : "Investigate with an agent…", action: "diagnose" });
     if (c) items.push({ sep: true }, { label: "Copy name", copy: c.name }, { label: "Copy ID", copy: c.id.slice(0, 12) }, { label: "Copy image", copy: c.image });
     return items;
   }
@@ -560,8 +631,19 @@ export default class Dockr extends View {
     return items;
   }
 
-  openMenu(key, items) {
-    openOverlay({ mod: "dockr", kind: "popup", width: 270, height: menu.height(items), props: { menu: { key, items } } });
+  /**
+   * Opens a menu. `byKey`: a key asked for it, so it goes to the dialog's top right corner.
+   * Else it goes to the pointer, read here: over a dialog Herdr's own idea of the pointer is the
+   * spot where it last was over the layout.
+   */
+  openMenu(key, items, byKey = false) {
+    const width = 270, height = menu.height(items);
+    let at;
+    try {
+      if (!byKey) at = window.mouse_position();
+      else if (this.modal) { const v = window.viewport_size(); at = { x: (v.width + 760) / 2 - width - 12, y: v.height * 0.1 + 84 }; }
+    } catch {}
+    openOverlay({ mod: "dockr", kind: "popup", width, height, ...(at ? { at: { x: Math.round(at.x), y: Math.round(at.y) } } : {}), props: { menu: { key, items } } });
   }
 
   /** The panel's groups: each configured Stack, each other compose project, then the containers in none. */
@@ -587,7 +669,8 @@ export default class Dockr extends View {
     const op = managed ? model.opFor(ops, r.stack, r.name) : null;
     const ph = model.phase(r.name, op, c);
     const busy = this.busy[r.key] ?? (ph && !ph.failed ? ph.text : null);
-    const hovered = this.hover === r.key && !busy;
+    // The row's buttons show under the pointer, and on the row the keys have selected.
+    const hovered = (this.hover === r.key || (this.kb && !this.typing && this.sel === r.key)) && !busy;
     const hint = model.suggestion(r, branch);
     const shownSource = r.service ? (c ? r.actual : r.set) : null;
     const gone = !!r.set?.missing;
@@ -604,6 +687,7 @@ export default class Dockr extends View {
         .when(!!op, (el) => el.child(this.iconButton(t, `out-${id}`, "output", "Show the output", () => this.peek(op.address, op.title, true))));
     } else if (hovered) {
       if (c) right.child(this.iconButton(t, `logs-${id}`, "logs", "Logs", act("open")));
+      if (c) right.child(this.iconButton(t, `diagnose-${id}`, "diagnose", "Investigate with an agent: shows what it will be told first", act("diagnose")));
       if (running) right.child(this.iconButton(t, `shell-${id}`, "shell", "Open terminal", act("terminal")));
       if (running) right.child(this.iconButton(t, `restart-${id}`, "restart", "Restart", act("restart")));
       if (running) right.child(this.iconButton(t, `stop-${id}`, "stop", "Stop", act("stop")));
@@ -657,6 +741,20 @@ export default class Dockr extends View {
         .child(right))
       .child(second);
     if (cause) out.child(this.renderFailure(t, r, cause));
+    else if (op && op.failed == null && !model.booting(c) && model.buildLine(this.screens[op.address], r.name)) {
+      // What its build or bring-up is doing: the newest step on that terminal's screen.
+      const line = model.buildLine(this.screens[op.address], r.name);
+      out.child(h_flex().id(`step-${id}`).w_full().pl(this.kb ? 78 : 49).pr(10).pb(5).gap(6).items_center().cursor_pointer()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => this.peek(op.address, op.title, true))
+        .child(div().flex_1().min_w(0).truncate().tooltip(`${line}\nClick to read the whole output as it runs`).font_family(settings().font_family ?? "JetBrains Mono").text_size(10.5).text_color(t.muted).child(line)));
+    } else if (model.booting(c)) {
+      // What it is doing while it boots: its newest log line, else what its health check last said.
+      const line = this.boot[c.name] || (c.healthOutput ?? "").split(/\r?\n/).filter(Boolean).pop() || "";
+      if (line) out.child(h_flex().w_full().pl(this.kb ? 78 : 49).pr(10).pb(5).gap(6).items_center()
+        .child(div().flex_none().text_size(10.5).text_color(t.working).child("booting"))
+        .child(div().flex_1().min_w(0).truncate().tooltip(line).font_family(settings().font_family ?? "JetBrains Mono").text_size(10.5).text_color(t.muted).child(line)));
+    }
     if (gone) out.child(this.notice(t, `gone-${id}`, "The worktree this service is set to no longer exists.", t.ansi1, [["Pick another", (cx) => this.openPicker(cx, r), true]]));
     else if (r.drift && !busy) {
       const a = model.sourceName(r.actual), b = model.sourceName(r.set);
@@ -734,16 +832,20 @@ export default class Dockr extends View {
 
   renderPanel(t, cx) {
     // Shown again after being hidden: read the files and Docker once.
-    const shown = model.modShown(layout(), "dockr");
+    const shown = this.visible();
     if (shown && !this.wasShown) cx.spawn(async (cx) => { await this.reload(cx); });
     this.wasShown = shown;
     if (shown) for (const m of Object.keys(this.store.byMachine)) this.sample(cx, m);
+    if (shown) for (const [m, list] of Object.entries(this.store.byMachine)) for (const c of list) if (model.booting(c)) this.followBoot(cx, m, c.name);
+    if (shown) for (const o of this.ops()) if (o.kind === "op" && o.failed == null) this.followOp(cx, o.address);
     this.takeRequest(cx);
+    // A popup or dialog over the list has closed. Herdr does not hand the keyboard back to a dialog.
+    if (this.modal && (shared(BACK) ?? 0) !== this.seenBack) {
+      this.seenBack = shared(BACK) ?? 0;
+      cx.spawn(async (cx) => { await null; if (!this.typing) this.handle.focus(); cx.notify(); });
+    }
 
-    // The handle still answers "focused" in the render that follows a press elsewhere or a leave,
-    // and nothing draws the panel again once the keyboard has moved, so those two say so themselves.
-    this.kb = (this.handle.is_focused() && !this.gone) || this.typing;
-    if (this.kb) this.heldAt = Date.now();
+    this.kb = this.modal || this.handle.is_focused() || this.typing;
     const ops = this.ops(), branch = this.branch();
     this.announce(ops);
     const groups = this.groups(), filtering = !!this.query.trim() || this.onlyRunning;
@@ -773,12 +875,11 @@ export default class Dockr extends View {
     if (!this.store.stacks.length && !this.store.problems.length && Object.keys(this.store.byMachine).length) {
       body.child(div().px(12).pt(10).text_size(11).text_color(t.dim).child("To pick the branch or worktree each service runs from, list its compose project in dockr.json. The README shows how."));
     }
-    const undo = this.undo;
+    const undo = this.undo, dash = this.tab === "dash";
+    if (dash) dashboard.loadDisk(this, cx);
 
-    return v_flex().id("dockr").track_focus(this.handle).size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(this.kb ? t.accent : t.border).text_color(t.foreground).text_size(12.5)
+    return v_flex().id("dockr").track_focus(this.handle).size_full().min_h(0).overflow_hidden().bg(t.background).when(!this.modal, (el) => el.rounded(10).border_1().border_color(this.kb ? t.accent : t.border)).text_color(t.foreground).text_size(12.5)
       .on_key_down((e, cx) => this.panelKey(e, cx))
-      .on_mouse_down("left", (_e, cx) => { this.gone = false; cx.notify(); })
-      .on_mouse_down_out((_e, cx) => { if (!this.gone) { this.gone = true; this.help = false; cx.notify(); } })
       .child(h_flex().w_full().h(40).pl(10).pr(6).gap(6).flex_none().items_center().border_b(1).border_color(t.border)
         .child(svg("icons/docker.svg").size(15).flex_none().text_color(t.muted))
         .child(h_flex().flex_1().min_w(0).h(26).pl(7).gap(5).items_center().rounded(6).border_1().border_color(t.border).bg(t.surface)
@@ -790,6 +891,11 @@ export default class Dockr extends View {
           .on_click((_e, cx) => { this.onlyRunning = !this.onlyRunning; localStorage.setItem("running", this.onlyRunning ? "1" : "0"); cx.notify(); })
           .child(h_flex().h_full().items_center().child("Running")))
         .child(this.iconButton(t, "reload", "restart", "Refresh: read Docker, the worktrees and dockr.json again", (cx) => this.reload(cx))))
+      .child(h_flex().w_full().h(30).px(10).gap(4).flex_none().items_end().border_b(1).border_color(t.border).children(
+        [["list", "Containers", "1"], ["dash", "Dashboard", "2"]].map(([id, label, key]) => h_flex().id(`tab-${id}`).h(30).px(10).gap(6).items_center().cursor_pointer()
+          .border_b(2).border_color(this.tab === id ? t.accent : "#00000000").text_color(this.tab === id ? t.foreground : t.muted).hover((x) => x.text_color(t.foreground))
+          .on_click((_e, cx) => { this.setTab(id); cx.notify(); })
+          .child(div().font_semibold().child(label)).when(this.kb, (x) => x.child(div().text_size(10.5).text_color(t.dim).child(key))))))
       .when(warnings.length > 0, (el) => el.child(
         div().w_full().flex_none().px(10).py(5).text_size(11).text_color(t.ansi3).bg(t.raised).tooltip(warnings.join("\n"))
           .child(warnings.length === 1 ? warnings[0] : `${warnings.length} problems. ${warnings[0]}`)))
@@ -799,17 +905,21 @@ export default class Dockr extends View {
           .when(!!undo, (x) => x.child(this.button(t, "undo", `Undo: back to ${undo.label}`, async (cx) => {
             const u = this.undo;
             this.undo = null;
-            await this.doSwitch(cx, u.stack, u.targets, false, `Back to ${u.label}`);
-          }, { tip: "Undo the last Switch" })))))
-      .child(body)
-      .when(this.kb && this.help && !this.typing, (el) => el.child(this.renderKeys(t, model.keyHints(current, this.facts(current)))))
-      .when(this.kb && !(this.help && !this.typing), (el) => el.child(div().w_full().flex_none().px(12).py(8).border_t(1).border_color(t.border)
-        .child(legend(t, this.typing ? [["enter", "back to the list"], ["esc", "back to the list"]] : model.coreHints(current, this.facts(current))))));
+            await this.doSwitch(cx, u.stack, u.targets, false, `Back to ${u.label}`, u.checkout ?? null);
+          }, { tip: "Undo the last Switch" })))
+          .child(div().id("note-close").flex_none().px(5).py(1).rounded(4).cursor_pointer().hover((x) => x.bg(t.raised)).tooltip("Dismiss").child("✕")
+            .on_click((_e, cx) => { this.note = ""; this.undo = null; cx.notify(); }))))
+      .child(dash ? dashboard.render(this, t, groups) : body)
+      .when(dash && this.kb, (el) => el.child(div().w_full().flex_none().px(12).py(8).border_t(1).border_color(t.border)
+        .child(legend(t, [["1", "containers"], ["s", this.dashSort === "mem" ? "sort by CPU" : "sort by memory"], ["q", this.modal ? "close" : "leave"]]))))
+      .when(!dash && this.kb && this.help && !this.typing, (el) => el.child(this.renderKeys(t, model.keyHints(current, this.facts(current)))))
+      .when(!dash && this.kb && !(this.help && !this.typing), (el) => el.child(div().w_full().flex_none().px(12).py(8).border_t(1).border_color(t.border)
+        .child(legend(t, this.typing ? [["enter", "back to the list"], ["esc", this.modal ? "close" : "back to the list"]] : model.coreHints(current, this.facts(current))))));
   }
 
   /** Every key that works on the selected item, in two columns, after "?". */
   renderKeys(t, hints) {
-    const all = [...hints.filter(([k]) => k !== "q"), ["g / G", "first / last"], ["h / l", "fold / unfold group"], ["a letter", "jump to that row"], ["q", "leave"], ["?", "hide this list"]];
+    const all = [...hints.filter(([k]) => k !== "q"), ["g / G", "first / last"], ["h / l", "fold / unfold group"], ["a letter", "jump to that row"], ["q", this.modal ? "close" : "leave"], ["?", "hide this list"]];
     const half = Math.ceil(all.length / 2);
     const col = (list) => v_flex().flex_1().min_w(0).gap(3).children(list.map(([k, what]) => h_flex().w_full().h(18).gap(8).items_center().text_size(11)
       .child(div().w(46).flex_none().font_semibold().text_color(t.accent).child(k))
@@ -859,12 +969,23 @@ export default class Dockr extends View {
     return this.picking.row.sources.filter((s) => words.every((w) => `${s.branch ?? ""} ${s.path}`.toLowerCase().includes(w)));
   }
 
+  /** The branches no checkout is on that match the filter. Picking one checks it out in the Main checkout. */
+  looseMatches() {
+    const words = this.text.toLowerCase().split(/\s+/).filter(Boolean);
+    return this.picking.row.sources.some((s) => s.main) ? this.loose.filter((b) => words.every((w) => b.toLowerCase().includes(w))).slice(0, 30) : [];
+  }
+
   /** Hands the ask to the panel and closes. */
   ask(kind) {
-    const p = this.picking, s = this.matches()[this.at];
-    if (kind === "switch" && !s) return;
+    const p = this.picking, list = this.matches(), s = list[this.at], branch = s ? null : this.looseMatches()[this.at - list.length];
+    if (kind === "switch" && !s && !branch) return;
     const req = { n: Date.now(), kind, stack: p.stack.name, service: p.row.name, start: this.start };
-    if (kind === "switch") {
+    if (kind === "switch" && branch) {
+      const main = p.row.sources.find((x) => x.main);
+      req.targets = { [p.row.name]: { ...main, branch } };
+      req.checkout = { main: main.path, branch };
+      req.title = `Check out ${branch} for ${p.row.name}`;
+    } else if (kind === "switch") {
       req.targets = { [p.row.name]: s };
       for (const o of p.others[s.path] ?? []) if (this.also[o.name] !== false) req.targets[o.name] = o.source;
       req.title = `Switch ${Object.keys(req.targets).join(", ")} to ${model.sourceName(s)}`;
@@ -889,25 +1010,29 @@ export default class Dockr extends View {
         .child(div().flex_none().text_size(10.5).text_color(cost === "rebuild" ? t.ansi3 : t.dim).child(cost ? costText[cost] : "…")));
     });
     if (!list.length) rows.child(div().p(8).text_size(11.5).text_color(t.dim).child(p.row.sources.length ? "No checkout matches." : this.reading ? "Reading the worktrees…" : "No checkouts found for this Service."));
-    const words = this.text.toLowerCase().split(/\s+/).filter(Boolean);
-    const loose = this.loose.filter((b) => words.every((w) => b.toLowerCase().includes(w)));
+    const loose = this.looseMatches(), mainAt = p.row.sources.find((s) => s.main)?.path;
     if (loose.length) {
       rows.child(div().w_full().px(8).pt(8).pb(2).text_size(10.5).text_color(t.dim).child("BRANCHES WITH NO WORKTREE"));
-      for (const b of loose.slice(0, 30)) {
-        rows.child(h_flex().w_full().h(24).px(8).gap(8).items_center().tooltip(`Nothing is checked out on ${b}. Add a worktree for it, and it shows above.`)
-          .child(svg(icon("branch")).size(11).flex_none().text_color(t.dim))
-          .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(b))
-          .child(div().flex_none().text_size(10.5).text_color(t.dim).child("add a worktree to run it")));
-      }
+      loose.forEach((b, j) => {
+        const i = list.length + j, on = i === this.at;
+        rows.child(h_flex().id(`pick-loose-${j}`).w_full().h(24).px(8).gap(8).items_center().rounded(5).cursor_pointer()
+          .hover((x) => x.bg(t.hover)).when(on, (el) => el.bg(t.selected))
+          .tooltip(`Runs git switch ${b} in ${mainAt}. Every Service that runs from the Main checkout follows. Git keeps uncommitted work and refuses if it would be overwritten.`)
+          .on_click((_e, cx) => { this.at = i; this.also = {}; cx.notify(); })
+          .child(svg(icon("branch")).size(11).flex_none().text_color(on ? t.accent : t.dim))
+          .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(b))
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child("check out in the Main checkout")));
+      });
     }
+    const count = list.length + loose.length, pickedBranch = picked ? null : loose[this.at - list.length] ?? null;
 
     const runs = p.row.runs ? p.row.sources.find((s) => model.norm(s.path) === model.norm(p.row.runs)) : null;
-    const idle = !picked || (p.row.set && model.norm(p.row.set) === model.norm(picked.path) && !p.row.drift && !others.some((o) => this.also[o.name] !== false));
+    const idle = (!picked && !pickedBranch) || (!!picked && p.row.set && model.norm(p.row.set) === model.norm(picked.path) && !p.row.drift && !others.some((o) => this.also[o.name] !== false));
     return v_flex().id("dockr-picker").track_focus(this.handle).w_full().p(10).gap(8).bg(t.popover).text_color(t.foreground).text_size(12.5)
       .on_key_down((e, cx) => {
         // A filter box takes the plain letters, so actions are ctrl chords, as in CodeyPacker's branch mod.
         const k = e.keystroke;
-        if (e.key === "down" || k === "ctrl-j" || k === "ctrl-n") this.at = Math.min(list.length - 1, this.at + 1);
+        if (e.key === "down" || k === "ctrl-j" || k === "ctrl-n") this.at = Math.min(count - 1, this.at + 1);
         else if (e.key === "up" || k === "ctrl-k" || k === "ctrl-p") this.at = Math.max(0, this.at - 1);
         else if (e.key === "enter") this.ask("switch");
         else if (k === "ctrl-r") this.ask("rebuild");
@@ -930,7 +1055,7 @@ export default class Dockr extends View {
       .child(h_flex().w_full().flex_none().gap(6).items_center()
         .child(div().flex_1().min_w(0).child(this.check(t, "start", this.start, "Start if stopped", () => { this.start = !this.start; })))
         .child(this.button(t, "rebuild", "Rebuild", () => this.ask("rebuild"), { tip: "Rebuild the image from the Source it is set to" }))
-        .child(this.button(t, "switch", "Switch", () => this.ask("switch"), { primary: !idle, dim: idle, tip: p.row.running ? "Enter. The Service is recreated from this checkout." : "Enter. The Service stays stopped unless Start if stopped is ticked." })))
+        .child(this.button(t, "switch", pickedBranch ? "Check out" : "Switch", () => this.ask("switch"), { primary: !idle, dim: idle, tip: p.row.running ? "Enter. The Service is recreated from this checkout." : "Enter. The Service stays stopped unless Start if stopped is ticked." })))
       .child(legend(t, [["↑/↓", "move"], ["ctrl-j/k", "move"], ["enter", "switch"], ["ctrl-r", "rebuild"], ["ctrl-s", "start if stopped"], ["esc", "close"]]));
   }
 
@@ -954,13 +1079,13 @@ export default class Dockr extends View {
 
   render(cx) {
     const t = theme();
-    if (this.passing) return div();
     if (this.peeked) return this.renderBar(t);
     if (this.picking) return this.renderPicker(t);
     if (this.diagnosing) return diagnose.render(this, t);
     if (this.logging) return logs.render(this, t);
     if (this.menuing) return menu.render(this, t);
     if (this.disking) return disk.render(this, t);
+    if (this.chip) return this.renderChip(t, cx);
     return this.renderPanel(t, cx);
   }
 }

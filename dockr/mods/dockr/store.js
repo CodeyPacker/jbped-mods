@@ -30,6 +30,24 @@ export class Store {
     this.save = save;
   }
 
+  /**
+   * What was read at the last look, for the next copy of the list to draw at once instead of
+   * starting empty. It holds no log lines, and containers carry environment names only.
+   */
+  snapshot() {
+    const { stacks, problems, env, has, sources, hosts, byMachine, errors, exits, stale, imageHashes } = this;
+    return { stacks, problems, env, has, sources, hosts, byMachine, errors, exits, stale, imageHashes, loops: [...this.loops] };
+  }
+
+  /** Takes a snapshot() back. The next reload() replaces it with what is true now. */
+  restore(snap) {
+    if (!snap || typeof snap !== "object" || !snap.byMachine) return;
+    const { loops, ...rest } = snap;
+    Object.assign(this, rest);
+    this.loops = new Set(loops ?? []);
+    this.prev = this.containers();
+  }
+
   machines() {
     const list = [...new Set(this.stacks.map((s) => s.machine ?? ""))];
     return list.length ? list : [""];
@@ -183,17 +201,25 @@ export class Store {
    * dependencies differ. Returns { error }, { note } when nothing needs to run, or an op with
    * `note` and `undo` ({ stack, targets } that puts the old Sources back).
    */
-  async prepareSwitch(name, targets, start, title) {
+  /** `checkout` ({ main, branch }): the Main checkout is first put on that branch, for a branch with no worktree. */
+  async prepareSwitch(name, targets, start, title, checkout = null) {
     try {
       await this.loadConfig();
       const stack = this.stack(name);
       if (!stack) return { error: `${name} is no longer in dockr.json.` };
+      let was = null;
+      if (checkout) {
+        was = (await docker.worktrees(stack.machine, checkout.main)).find((s) => s.main)?.branch ?? null;
+        const refused = await docker.checkout(stack.machine, checkout.main, checkout.branch);
+        if (refused) return { error: `${title}: ${refused}` };
+      }
       const text = await this.loadStack(stack);
       const before = this.rows(name);
       const plan = model.planSwitch(stack, this.env[name], targets);
       // The first write also records the Services already on a worktree, so they do not turn into Drift.
       const changes = this.has[name].dockr ? plan.changes : { ...model.adoptChanges(before, targets), ...plan.changes };
       const undo = { stack: name, targets: Object.fromEntries(before.filter((r) => plan.services.includes(r.name) && r.set && !r.set.missing).map((r) => [r.name, r.set])) };
+      if (checkout && was && was !== checkout.branch) undo.checkout = { main: checkout.main, branch: was };
       if (Object.keys(changes).length) {
         await docker.writeDockrEnv(stack.machine, stack, model.setEnv(text ?? HEADER, changes));
         await this.loadStack(stack);
@@ -204,7 +230,8 @@ export class Store {
       const build = [];
       for (const r of bring) {
         const target = targets[r.name];
-        if (r.container && r.actual && model.norm(r.actual.path) === model.norm(target.path)) continue; // Already there.
+        // Already there. After a checkout the path is the same and the files are not, so the image is checked.
+        if (!checkout && r.container && r.actual && model.norm(r.actual.path) === model.norm(target.path)) continue;
         const [hostHash, imageHash] = r.mounted
           ? await Promise.all([docker.sourceHash(stack.machine, target.path, r.service.manifests), docker.imageHash(stack.machine, r.container.image, r.service.manifests)])
           : [null, null];

@@ -11,6 +11,7 @@
     "alt-9": "wranglr.select9",
     "ctrl-shift-pagedown": "wranglr.next",
     "ctrl-shift-pageup": "wranglr.prev",
-    "ctrl-shift-m": "wranglr.move"
+    "ctrl-shift-m": "wranglr.move",
+    "alt-s": "wranglr.keys"
   }
 }

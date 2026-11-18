@@ -1,12 +1,17 @@
 {
   "place": "none",
   "title": "Wranglr",
+  "focusable": true,
   "palette": [
     { "title": "Wranglr: Move space to group", "command": "wranglr.move", "about": "Pick a Group or Subgroup for the focused space" },
     { "title": "Wranglr: Next space", "command": "wranglr.next", "about": "The next space in the order the sidebar shows" },
     { "title": "Wranglr: Previous space", "command": "wranglr.prev", "about": "The previous space in the order the sidebar shows" },
     { "title": "Wranglr: New space in this group", "command": "wranglr.new", "about": "Start a space in the focused space's Group, as its + does" },
     { "title": "Wranglr: Name space again", "command": "wranglr.name", "about": "Redo the automatic name of the focused space" },
+    { "title": "Wranglr: Pin space", "command": "wranglr.pin", "about": "Pin the focused space above the Groups, or take its pin off" },
+    { "title": "Wranglr: Show tabs", "command": "wranglr.tabs", "about": "Show or hide the focused space's tabs under its row" },
+    { "title": "Wranglr: Spaces or Agents", "command": "wranglr.agents", "about": "Switch the sidebar between its Spaces and Agents lists" },
+    { "title": "Wranglr: Keys", "command": "wranglr.keys", "about": "Give the sidebar the keyboard: j/k move, enter opens, ? lists the keys" },
     { "title": "Wranglr: Fold group", "command": "wranglr.fold", "about": "Fold or unfold the focused space's Group" },
     { "title": "Wranglr: Next sort", "command": "wranglr.sort", "about": "Recent, Kind, A-Z, Manual" },
     { "title": "Wranglr: Group settings", "command": "wranglr.group", "about": "Machines, worktree rules or homes of the focused space's Group" },

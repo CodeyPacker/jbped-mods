@@ -239,6 +239,33 @@ test("a compose run by hand shows as Drift, and Apply brings the Service back", 
   assert.equal(who(), "feat");
 });
 
+test("a branch with no worktree is checked out in the Main checkout, and its undo goes back", opts, async () => {
+  const main = join(root, "web");
+  git(main, "switch", "-q", "-c", "solo");
+  writeFileSync(join(main, "src/who.txt"), "solo\n");
+  git(main, "commit", "-qam", "solo");
+  git(main, "switch", "-q", "main");
+  const target = { ...source("web", "main"), branch: "solo" };
+  const op = await store.prepareSwitch(NAME, { web: target }, false, "Check out solo for web", { main, branch: "solo" });
+  assert.equal(op.error, undefined);
+  assert.equal(run(op).status, 0);
+  assert.equal(git(main, "branch", "--show-current").trim(), "solo");
+  assert.equal(who(), "solo");
+  assert.deepEqual(op.undo.checkout, { main, branch: "main" });
+  assert.equal(op.undo.targets.web.branch, "feat");
+  // Git refuses when uncommitted work would be overwritten, and Dockr changes nothing.
+  writeFileSync(join(main, "src/who.txt"), "dirty\n");
+  const refused = await store.prepareSwitch(NAME, { web: target }, false, "Check out main for web", { main, branch: "main" });
+  assert.match(refused.error, /Git kept the branch/);
+  assert.equal(git(main, "branch", "--show-current").trim(), "solo");
+  git(main, "checkout", "--", "src/who.txt");
+  const back = await store.prepareSwitch(NAME, op.undo.targets, false, "Back to feat", op.undo.checkout);
+  assert.equal(run(back).status, 0);
+  assert.equal(git(main, "branch", "--show-current").trim(), "main");
+  await look();
+  assert.equal(who(), "feat");
+});
+
 test("Stop, Start and Restart run to their end, and a stopped Service is only set unless started", opts, async () => {
   assert.equal(await store.quick(row("web"), ["stop"]), null);
   assert.equal(row("web").container.state, "exited");
@@ -293,7 +320,8 @@ test("the wait returns when a container changes, and continues from just after i
 
 test("a failing action exits with its code and labels its terminal", opts, async () => {
   const op = store.op(store.stack(NAME), "Fail", "switch", ["web"], [], ["sh -c 'exit 7'"]);
-  assert.match(op.script, /hc label "\$HC_TERMINAL_ID" dockr\.failed="\$code"/);
+  // hc is looked for in its usual places: a background terminal's PATH may lack it.
+  assert.match(op.script, /for h in hc "\$HOME\/\.local\/bin\/hc" hc\.exe; do "\$h" label "\$HC_TERMINAL_ID" dockr\.failed="\$code"/);
   assert.equal(run(op).status, 7);
 });
 
@@ -323,6 +351,19 @@ test("a container outside every Stack starts, stops and restarts by name, and a 
   assert.equal(r.status, 0, r.stderr);
   await look();
   assert.ok(store.rows(NAME).every((r) => r.container.state === "running"));
+});
+
+test("a booting container's newest log line is read for its row", opts, async () => {
+  const name = `${NAME}-boot`;
+  sh(root, "docker", "run", "-d", "--name", name, "busybox:1.36", "sh", "-c", "echo step one; echo 'Now listening on 80'; echo; sleep 30");
+  try {
+    await look();
+    const c = store.containers().find((x) => x.name === name);
+    assert.equal(model.booting(c), true);
+    const r = await docker.waitLogs(null, name, "", 5);
+    assert.equal(r.error, undefined);
+    assert.equal(model.bootLine(model.parseLogs(r.text).lines), "Now listening on 80");
+  } finally { sh(root, "docker", "rm", "-f", name); }
 });
 
 test("Clean up removes the images a rebuild left behind and keeps the volume", opts, async () => {
@@ -356,4 +397,22 @@ test("Down stops and removes the containers and keeps .dockr.env", opts, async (
   await look();
   assert.equal(row("web").container, null);
   assert.equal(row("web").set.branch, "feat"); // The record survives: the next Up starts from it.
+});
+
+test("a new Store drawn from another's snapshot shows the same containers before it reads Docker", () => {
+  const a = new Store();
+  a.byMachine = { "": [{ id: "1", name: "p-web-1", state: "running", labels: {}, env: ["NAME"] }] };
+  a.stale = { "p/web": true };
+  a.imageHashes = { "img|package.json": "abc" };
+  a.loops = new Set(["p-web-1"]);
+  a.tails = { 1: { key: "k", lines: ["a log line"] } };
+  const snap = JSON.parse(JSON.stringify(a.snapshot()));
+  assert.equal(JSON.stringify(snap).includes("a log line"), false);
+  const b = new Store();
+  b.restore(snap);
+  assert.deepEqual(b.containers().map((c) => c.name), ["p-web-1"]);
+  assert.deepEqual([b.stale, b.imageHashes, [...b.loops], b.prev.length], [{ "p/web": true }, { "img|package.json": "abc" }, ["p-web-1"], 1]);
+  const c = new Store();
+  c.restore(null);
+  assert.deepEqual(c.containers(), []);
 });

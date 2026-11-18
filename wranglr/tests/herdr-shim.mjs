@@ -3,7 +3,9 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 // Stands in for the "herdr" module. A test answers a call itself with `fake.exec(cmd, args, opts)`,
 // `fake.read(path, opts)` or `fake.write(path, text, expected)`; returning undefined falls through
 // to the real call. `on` (another machine) is recorded and runs here.
-export const fake = { exec: null, read: null, write: null };
+export const fake = { exec: null, read: null, write: null, hc: null };
+export const hcCalls = [];
+export const hc = (args = []) => { hcCalls.push(args); return fake.hc ? fake.hc(args) : Promise.resolve({ code: 1, stdout: "", stderr: "" }); };
 export const execCalls = [];
 export const runCalls = [];
 export const notes = [];

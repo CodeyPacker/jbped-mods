@@ -11,6 +11,7 @@ export function emptyState() {
     v: 1, place: {}, started: {}, custom: [], subs: {}, folded: {},
     order: { groups: [], spaces: {} }, dismissed: [], seen: {}, snap: {},
     names: {}, titles: {}, naming: {}, pending: [], active: {},
+    pinned: [], open: {}, closing: [], revive: {},
   };
 }
 
@@ -342,8 +343,13 @@ function buildTree(ctx) {
   const members = {};
   for (const row of ctx.rows) members[row.id] = memberOf(ctx, row);
   const folded = (key) => !!ctx.state.folded[key];
+  // Pinned spaces show above the Groups, in the order pinned. Their Group keeps their place for the unpin.
+  const byId = new Map(ctx.rows.map((r) => [r.id, r]));
+  const pins = (Array.isArray(ctx.state.pinned) ? ctx.state.pinned : []).filter((id, i, all) => byId.has(id) && all.indexOf(id) === i);
+  const isPinned = new Set(pins);
   const groups = candidateGroups(ctx, members).map((g) => {
-    const mine = ctx.rows.filter((r) => members[r.id].group === g.id);
+    const all = ctx.rows.filter((r) => members[r.id].group === g.id);
+    const mine = all.filter((r) => !isPinned.has(r.id));
     const subgroups = (ctx.state.subs[g.id] || []).map((s) => ({
       id: s.id, name: s.name, folded: folded(g.id + "/" + s.id),
       rows: sortRows(ctx, mine.filter((r) => members[r.id].sub === s.id), g.id + "/" + s.id),
@@ -355,14 +361,32 @@ function buildTree(ctx) {
     group.machines = groupMachines(ctx, group);
     group.can = {
       plus: g.kind === "custom" || group.machines.length > 0,
-      dismiss: g.kind === "repo" && mine.length === 0,
+      dismiss: g.kind === "repo" && all.length === 0,
     };
     return group;
   });
   const sorted = sortGroups(ctx, groups);
-  const loose = sortRows(ctx, ctx.rows.filter((r) => members[r.id].group === ""), "");
-  const order = [...sorted.flatMap(allRows), ...loose].filter((r) => !r.dim).map((r) => r.id);
-  return { tree: { groups: sorted, loose, order }, members };
+  const loose = sortRows(ctx, ctx.rows.filter((r) => members[r.id].group === "" && !isPinned.has(r.id)), "");
+  const pinned = pins.map((id) => byId.get(id));
+  const order = [...pinned, ...sorted.flatMap(allRows), ...loose].filter((r) => !r.dim).map((r) => r.id);
+  return { tree: { pinned, groups: sorted, loose, order, repos: repoList(ctx, groups) }, members };
+}
+
+// The Repos other mods can act on: each with a Repo group (dismissed ones are not) or in a Workspace,
+// and a main root on at least one Machine. { identity, name, on: { [mkey]: path } }, sorted by name.
+function repoList(ctx, groups) {
+  const names = new Map();
+  for (const g of groups) if (g.kind === "repo") names.set(g.identity ?? g.id.slice(5), g.name);
+  for (const ws of ctx.workspaces)
+    for (const identity of ws.repos || [])
+      if (!names.has(identity)) names.set(identity, ctx.repoNames.get(identity) || lastSegments(identity, 1));
+  const out = [];
+  for (const [identity, name] of names) {
+    const on = {};
+    for (const [mk, known] of Object.entries(ctx.cloned)) if (known[identity]) on[mk] = known[identity];
+    if (Object.keys(on).length) out.push({ identity, name, on });
+  }
+  return out.sort((a, b) => byName(a, b) || a.identity.localeCompare(b.identity));
 }
 
 export function arrange(world, config, state) {
@@ -437,12 +461,15 @@ function syncPending(c, known) {
 function forget(s, id) {
   for (const map of [s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active]) delete map[id];
   for (const key of Object.keys(s.order.spaces)) s.order.spaces[key] = s.order.spaces[key].filter((x) => x !== id);
+  s.pinned = s.pinned.filter((x) => x !== id);
+  delete s.open[id];
 }
 
 function syncForget(c) {
   const { world, s } = c;
   const live = new Set(world.spaces.map((sp) => sp.id));
-  const ids = new Set([s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active].flatMap(Object.keys));
+  const ids = new Set([s.place, s.started, s.snap, s.names, s.titles, s.naming, s.active, s.open].flatMap(Object.keys));
+  for (const id of s.pinned) ids.add(id);
   for (const list of Object.values(s.order.spaces)) for (const id of list) ids.add(id);
   for (const id of ids) {
     if (live.has(id)) continue;
@@ -491,9 +518,23 @@ function syncNaming(c) {
   }
 }
 
+// A closed Repo group goes once its last space has: until then its spaces keep it shown.
+function syncClosing(c) {
+  const { world, s } = c;
+  const kept = [];
+  for (const entry of s.closing) {
+    if (world.spaces.some((sp) => s.snap[sp.id]?.identity === entry.identity)) {
+      const age = (entry.age || 0) + 1;
+      if (age < PENDING_LIMIT) kept.push({ ...entry, age });
+    } else if (!s.dismissed.includes(entry.identity)) s.dismissed.push(entry.identity);
+  }
+  s.closing = kept;
+}
+
 function doSync(a, c) {
   const known = new Set(Object.keys(c.prev.snap || {}));
   syncSpaces(c);
+  syncClosing(c);
   syncPending(c, known);
   syncForget(c);
   syncPlacements(c);
@@ -517,7 +558,40 @@ function rowKnown(c, id) {
 function doMove(a, c) {
   if (!rowKnown(c, a.space) || !targetValid(c, a.group, a.sub)) return false;
   c.s.place[a.space] = { group: a.group, sub: a.group === "" ? null : a.sub ?? null };
+  // Putting a pinned space somewhere takes its pin off.
+  c.s.pinned = c.s.pinned.filter((x) => x !== a.space);
   return true;
+}
+
+// Pins a space above the Groups, or takes the pin off. `on` left out flips it.
+function doPin(a, c) {
+  if (!rowKnown(c, a.space)) return;
+  const has = c.s.pinned.includes(a.space);
+  const on = typeof a.on === "boolean" ? a.on : !has;
+  if (on && !has) c.s.pinned.push(a.space);
+  else if (!on) c.s.pinned = c.s.pinned.filter((x) => x !== a.space);
+}
+
+// Shows or hides a space's tabs under its row.
+function doExpand(a, c) {
+  if (!rowKnown(c, a.space)) return;
+  if (c.s.open[a.space]) delete c.s.open[a.space];
+  else c.s.open[a.space] = true;
+}
+
+// Closes every space in a Group, its Subgroups included. Pinned spaces and spaces on a Machine
+// that is away are not in it. A Repo group goes with its last space.
+function doCloseGroup(a, c) {
+  const group = c.tree().tree.groups.find((g) => g.id === a.group);
+  if (!group) return;
+  const ids = allRows(group).filter((r) => !r.dim).map((r) => r.id);
+  if (ids.length) c.effects.push({ type: "close", ids });
+  if (group.kind !== "repo") return;
+  const identity = a.group.slice(5);
+  const others = c.ctx().rows.some((r) => !ids.includes(r.id) && c.tree().members[r.id]?.group === a.group);
+  if (others) return;
+  if (!ids.length) { if (!c.s.dismissed.includes(identity)) c.s.dismissed.push(identity); }
+  else if (!c.s.closing.some((e) => e.identity === identity)) c.s.closing.push({ identity });
 }
 
 function containerRows(tree, key) {
@@ -586,7 +660,7 @@ function doSort(a, c) {
 }
 
 // The settings menu's Save: the changed settings, written in one go.
-const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine", "agents"];
+const SETTINGS = ["sort", "plus", "worktrees", "autoname", "ticket", "agent", "machine", "folder", "agents", "revive"];
 function doSettings(a, c) {
   const values = {};
   for (const key of SETTINGS) if (a.values && typeof a.values === "object" && key in a.values) values[key] = a.values[key];
@@ -736,9 +810,17 @@ function plusRepo(a, c, group, mode) {
     folder = cleanPath(isAbsolutePath(filled) ? filled : joinPath(main, filled));
     worktree = { main, branch: a.branch, path: folder, from: c.config.repos?.[identity]?.from || null };
   }
-  c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
   // Always remembered, so the new space shows in this Group at once instead of loose until git answers.
+  // A worktree is remembered once it is made (`made`): git can take longer than a pending entry lasts.
+  if (worktree) return c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree, place: { group: a.group, sub: a.sub ?? null } });
+  c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
   addPending(c, a, { machine, folder });
+}
+
+// The worktree of a `plus` was made (or not): its space is started next.
+function doMade(a, c) {
+  if (!a.ok || typeof a.group !== "string" || typeof a.folder !== "string") return;
+  addPending(c, { group: a.group, sub: a.sub ?? null }, { machine: a.machine ?? null, folder: a.folder });
 }
 
 function isClaude(argv) {
@@ -771,8 +853,19 @@ function plusWorkspace(a, c, group, mode) {
   addPending(c, a, { machine, folder, workspace: ws.name });
 }
 
+// A Repo that is published but shows no Group (dismissed, or only in a Workspace): "+" still works on it,
+// sent by another mod. It has no Subgroups.
+function publishedGroup(c, gid) {
+  if (typeof gid !== "string" || !gid.startsWith("repo:")) return null;
+  const repo = c.tree().tree.repos.find((r) => r.identity === gid.slice(5));
+  if (!repo) return null;
+  const group = { id: gid, kind: "repo", name: repo.name, rows: [], subgroups: [] };
+  group.machines = groupMachines(c.ctx(), group);
+  return group;
+}
+
 function doPlus(a, c) {
-  const group = c.tree().tree.groups.find((g) => g.id === a.group);
+  const group = c.tree().tree.groups.find((g) => g.id === a.group) || publishedGroup(c, a.group);
   if (!group || (a.sub != null && !group.subgroups.some((s) => s.id === a.sub))) return;
   const mode = a.mode ?? c.config.settings.plus;
   if (group.kind === "custom") plusCustom(a, c, group);
@@ -780,13 +873,86 @@ function doPlus(a, c) {
   else plusWorkspace(a, c, group, mode);
 }
 
+// Another mod (Gitr) starts a space in a folder of a published Repo, on a ready Machine. No placement:
+// the space is filed by the usual rules, and the pending entry shows it in the Repo group before git answers.
+function doStart(a, c) {
+  const repo = c.tree().tree.repos.find((r) => r.identity === a.repo);
+  if (!repo) return toast(c.effects, `${String(a.repo ?? "That Repo")} is not a Repo Wranglr knows.`);
+  const mk = mkey(a.machine ?? null);
+  if (!isReady(c.world, mk)) return toast(c.effects, `${mk || "This computer"} is not ready.`);
+  if (typeof a.folder !== "string" || !a.folder) return toast(c.effects, "A space needs a folder to start in.");
+  const machine = machineOfKey(mk);
+  c.effects.push({ type: "start", machine, folder: a.folder, argv: c.config.settings.agent, name: null, worktree: null });
+  addPending(c, { group: "repo:" + repo.identity, sub: null }, { machine, folder: a.folder });
+}
+
+// Revive: each Claude Code agent's session is remembered against its terminal while it runs.
+// After the core restarts, the terminal is back as a new shell (a new process) and the agent is resumed in it.
+
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FLAG_VALUE = /^[A-Za-z0-9._:\[\]-]+$/;
+const VALUE_FLAGS = ["--permission-mode", "--model"];
+const okPid = (pid) => Number.isInteger(pid) && pid > 0;
+const okFolder = (p) => typeof p === "string" && /^(?:[A-Za-z]:)?[\\/]/.test(p) && !/[\r\n\0]/.test(p);
+
+/** The flags of a Claude Code command line that a resume keeps. Everything else, a first message included, is dropped. */
+export function keptFlags(argv) {
+  const out = [], list = Array.isArray(argv) ? argv.filter((x) => typeof x === "string") : [];
+  for (let i = 1; i < list.length; i++) {
+    const arg = list[i];
+    if (arg === "--dangerously-skip-permissions") out.push(arg);
+    else if (VALUE_FLAGS.includes(arg) && FLAG_VALUE.test(list[i + 1] ?? "")) out.push(arg, list[++i]);
+    else {
+      const [flag, value] = arg.split(/=(.*)/s);
+      if (VALUE_FLAGS.includes(flag) && FLAG_VALUE.test(value ?? "")) out.push(arg);
+    }
+  }
+  return out;
+}
+
+const quote = (text) => "'" + text.replace(/'/g, "'\\''") + "'";
+
+/** What is typed into the shell to resume a remembered agent, or null when the record cannot be trusted. */
+export function resumeCommand(entry) {
+  if (!entry || !SESSION_ID.test(entry.session ?? "") || !okFolder(entry.cwd)) return null;
+  return ["cd", quote(entry.cwd), "&&", "claude", ...keptFlags(["claude", ...(entry.flags ?? [])]), "--resume", entry.session].join(" ");
+}
+
+function doAgentSeen(a, c) {
+  if (typeof a.terminal !== "string" || !a.terminal || !okPid(a.pid) || !SESSION_ID.test(a.session ?? "") || !okFolder(a.cwd)) return;
+  c.s.revive[a.terminal] = { pid: a.pid, session: a.session, cwd: a.cwd, flags: keptFlags(["claude", ...(Array.isArray(a.flags) ? a.flags : [])]) };
+}
+
+// The agent left by itself, or its terminal closed: nothing to resume.
+function doAgentGone(a, c) {
+  for (const t of Array.isArray(a.terminals) ? a.terminals : []) delete c.s.revive[t];
+}
+
+// Terminals seen again with nothing running in them: { terminal, pid }. One whose process is not the one
+// remembered was lost and given a new shell, so its agent is resumed there. Each is resumed once.
+function doTerminalsBack(a, c) {
+  let n = 0;
+  for (const t of Array.isArray(a.list) ? a.list : []) {
+    const entry = c.s.revive[t?.terminal];
+    if (!entry || !okPid(t.pid) || t.pid === entry.pid) continue;
+    const command = resumeCommand(entry);
+    if (c.config.settings.revive === false || !command) { delete c.s.revive[t.terminal]; continue; }
+    entry.pid = t.pid;
+    c.effects.push({ type: "revive", terminal: t.terminal, command });
+    n++;
+  }
+  if (n) c.effects.push({ type: "toast", level: "info", title: "Wranglr", body: `Resumed ${n} agent${n > 1 ? "s" : ""} after a restart.` });
+}
+
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
-  select: doSelect, next: doStep, prev: doStep, plus: doPlus,
+  select: doSelect, next: doStep, prev: doStep, plus: doPlus, made: doMade, start: doStart,
   fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings, groupSettings: doGroupSettings,
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,
   dismiss: doDismiss, name: doName, named: doNamed,
+  pin: doPin, expand: doExpand, closeGroup: doCloseGroup,
+  agentSeen: doAgentSeen, agentGone: doAgentGone, terminalsBack: doTerminalsBack,
 };
 
 export function act(action, world, config, state) {
