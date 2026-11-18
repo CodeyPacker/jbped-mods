@@ -500,10 +500,11 @@ export default class Wranglr extends View {
   }
 
   // The keyboard goes back to the pane beside the sidebar.
-  leaveKeys() {
+  // moved: enter went to another space or tab, so the pane the keyboard came from is not the place to go back to.
+  leaveKeys(moved = false) {
     this.popup = undefined;
     run("pane.go", { direction: "right" });
-    if (this.back) run("pane.focus", { pane: this.back });
+    if (this.back && !moved) run("pane.focus", { pane: this.back });
     this.back = null;
   }
 
@@ -562,9 +563,9 @@ export default class Wranglr extends View {
     }
     else if (k === "enter" || k === "space") {
       if (head) fold();
-      else if (it?.kind === "row") { run("space.select", { id: it.space }); this.leaveKeys(); }
-      else if (it?.kind === "tab") { run("space.select", { id: it.space }); run("tab.select", { id: it.tab }); this.leaveKeys(); }
-      else if (it?.kind === "agent") run("pane.focus", { pane: it.pane });
+      else if (it?.kind === "row") { run("space.select", { id: it.space }); this.leaveKeys(true); }
+      else if (it?.kind === "tab") { run("space.select", { id: it.space }); run("tab.select", { id: it.tab }); this.leaveKeys(true); }
+      else if (it?.kind === "agent") { this.popup = undefined; this.back = null; run("pane.focus", { pane: it.pane }); }
     }
     else if (k === "t") {
       // On a tab: its space's tabs close and the cursor goes up to the space.
