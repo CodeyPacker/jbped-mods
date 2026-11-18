@@ -1,0 +1,126 @@
+{
+    "id": "root",
+    "type": "row",
+    "cloned_from": {
+        "name": "main",
+        "version": "0.1.12"
+    },
+    "theme": "catppuccin-mocha",
+    "background": "canvas",
+    "floating": [
+        {
+            "id": "board",
+            "content": {
+                "mod": "board"
+            },
+            "edge": "left"
+        }
+    ],
+    "children": [
+        {
+            "id": "sidebar",
+            "type": "column",
+            "size": {
+                "px": 268
+            },
+            "min": 44,
+            "max": 480,
+            "children": [
+                {
+                    "id": "spaces",
+                    "type": "block",
+                    "content": {
+                        "mod": "spaces"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "work",
+            "type": "column",
+            "children": [
+                {
+                    "id": "tabs",
+                    "type": "block",
+                    "content": {
+                        "mod": "tabs"
+                    },
+                    "size": {
+                        "weight": 1.5
+                    },
+                    "window_drag": true
+                },
+                {
+                    "id": "body",
+                    "type": "row",
+                    "children": [
+                        {
+                            "id": "main",
+                            "type": "block",
+                            "content": {
+                                "tab": "active"
+                            }
+                        },
+                        {
+                            "id": "panel",
+                            "type": "column",
+                            "size": {
+                                "px": 368
+                            },
+                            "min": 280,
+                            "max": 3000,
+                            "hidden": true,
+                            "children": [
+                                {
+                                    "id": "panel-body",
+                                    "type": "stack",
+                                    "active": "files",
+                                    "children": [
+                                        {
+                                            "id": "files",
+                                            "type": "block",
+                                            "content": {
+                                                "mod": "files"
+                                            }
+                                        },
+                                        {
+                                            "id": "changes",
+                                            "type": "block",
+                                            "content": {
+                                                "mod": "changes"
+                                            }
+                                        },
+                                        {
+                                            "id": "wayfinder",
+                                            "type": "block",
+                                            "content": {
+                                                "mod": "wayfinder"
+                                            }
+                                        },
+                                        {
+                                            "id": "mine",
+                                            "type": "block",
+                                            "content": {
+                                                "mod": "my-own",
+                                                "props": {
+                                                    "x": [
+                                                        1,
+                                                        2,
+                                                        {
+                                                            "y": null
+                                                        }
+                                                    ],
+                                                    "note": "café \"q\""
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    ]
+}

@@ -34,12 +34,13 @@ Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/jbped/
 
 Or by hand:
 
-1. Copy `mods/wingman/` to `~/.config/herdr-app/mods/`.
-2. Run the installer from that folder:
-   - Windows: `powershell -ExecutionPolicy Bypass -File install\install.ps1 install`, then restart Herdr.
-   - macOS and Linux: `sh install/install.sh install`.
+1. Clone this repo. The installer also copies the `tabs-plus` mod from `../tabs-plus/`.
+2. Run the installer from the clone:
+   - Windows: `powershell -ExecutionPolicy Bypass -File wingman\install.ps1`, then restart Herdr.
+   - macOS and Linux: `sh wingman/install.sh`.
 3. Run `herdr-app check ~/.config/herdr-app/mods/wingman`.
-4. Open it beside an agent: `pane.split` with `{"direction": "right", "mod": "wingman"}`.
+
+The installer's flags, what it changes and how to undo it: [`INSTALL.md`](INSTALL.md).
 
 ## Use
 

@@ -1,0 +1,11 @@
+C:\work\DnApp\Program.cs(1,9): error CS0029: Cannot implicitly convert type 'string' to 'int' [C:\work\DnApp\DnApp.csproj]
+C:\work\DnApp\Program.cs(3,5): warning CS0168: The variable 'unused' is declared but never used [C:\work\DnApp\DnApp.csproj]
+
+Build FAILED.
+
+C:\work\DnApp\Program.cs(3,5): warning CS0168: The variable 'unused' is declared but never used [C:\work\DnApp\DnApp.csproj]
+C:\work\DnApp\Program.cs(1,9): error CS0029: Cannot implicitly convert type 'string' to 'int' [C:\work\DnApp\DnApp.csproj]
+    1 Warning(s)
+    1 Error(s)
+
+Time Elapsed 00:00:09.11

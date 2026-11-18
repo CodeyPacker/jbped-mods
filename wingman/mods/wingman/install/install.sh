@@ -17,8 +17,10 @@ mkdir -p "$(dirname "$settings")"
 [ -f "$settings" ] && cp "$settings" "$settings.bak-herdr-wingman"
 
 ACTION="$action" HOOK="$hook" SETTINGS="$settings" python3 - <<'PY'
-import json, os
+import json, os, shutil
 action, hook, path = os.environ["ACTION"], os.environ["HOOK"], os.environ["SETTINGS"]
+# A linked settings.json (dotfiles) is written where the link points, so the link stays a link.
+path = os.path.realpath(path)
 MARK = "herdr-wingman-hook"  # every command this script adds contains it
 try:
     with open(path, encoding="utf-8") as f:
@@ -38,7 +40,9 @@ for event in list(hooks):
     else:
         del hooks[event]
 if action == "install":
-    cmd = lambda arg: {"type": "command", "command": f"sh '{hook}' {arg} # {MARK}", "timeout": 10}
+    # The path in single quotes for sh, each ' in it as '\'' (hooksetup.js's quote).
+    quoted = "'" + hook.replace("'", "'\\''") + "'"
+    cmd = lambda arg: {"type": "command", "command": f"sh {quoted} {arg} # {MARK}", "timeout": 10}
     hooks.setdefault("PostToolUse", []).append({"matcher": "Edit|Write|MultiEdit|NotebookEdit", "hooks": [cmd("post")]})
     hooks.setdefault("UserPromptSubmit", []).append({"hooks": [cmd("prompt")]})
 if not hooks:
@@ -46,6 +50,8 @@ if not hooks:
 with open(path + ".tmp", "w", encoding="utf-8") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
+if os.path.exists(path):
+    shutil.copymode(path, path + ".tmp")
 os.replace(path + ".tmp", path)
 print(f"{action}ed Wingman hooks in {path}")
 PY

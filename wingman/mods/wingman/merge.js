@@ -1,19 +1,23 @@
 // Three-way merge of an agent's write into unsaved edits, and the diff of merged texts.
 // Both run git on temporary copies under data/wingman/tmp, removed afterwards.
 import * as fs from "fs/promises";
-import { exec, writeTextFile } from "herdr";
+import { writeTextFile } from "herdr";
+import { git } from "./git.js";
 import { parseHunks, splitLines, wholeHunk, segmentHunks } from "./model.js";
 import { reviewDir } from "./journal.js";
+import { crumb } from "./crumbs.js";
 
 let seq = 0;
 async function withTemps(texts, run) {
   const dir = `${reviewDir()}/tmp`;
+  crumb(`withTemps: before mkdir ${dir}`, "changes");
   await fs.mkdir(dir, { recursive: true }).catch(() => {});
+  crumb("withTemps: after mkdir", "changes");
   const id = `${Date.now()}-${seq++}`, paths = texts.map((_, i) => `${dir}/${id}-${i}`);
   try {
-    for (let i = 0; i < texts.length; i++) await writeTextFile(paths[i], texts[i], null);
+    for (let i = 0; i < texts.length; i++) { crumb(`withTemps: before writeTextFile ${paths[i]} len=${texts[i].length}`, "changes"); await writeTextFile(paths[i], texts[i], null); crumb(`withTemps: after writeTextFile ${paths[i]}`, "changes"); }
     return await run(paths);
-  } finally { for (const p of paths) await fs.unlink(p).catch(() => {}); }
+  } finally { crumb("withTemps: before unlink temps", "changes"); for (const p of paths) await fs.unlink(p).catch(() => {}); crumb("withTemps: after unlink temps", "changes"); }
 }
 
 /**
@@ -25,7 +29,7 @@ export async function merge3(base, mine, theirs, favor = null) {
   if (mine === base || mine === theirs) return { text: theirs, conflicts: 0 };
   if (theirs === base) return { text: mine, conflicts: 0 };
   return withTemps([mine, base, theirs], async ([m, b, t]) => {
-    const r = await exec("git", ["merge-file", "-p", ...(favor ? [`--${favor}`] : []), m, b, t]);
+    const r = await git(["merge-file", "-p", ...(favor ? [`--${favor}`] : []), m, b, t]);
     if (r.code < 0 || r.code > 127) throw new Error(`git merge-file: ${(r.stderr || r.stdout).trim()}`);
     return { text: r.stdout, conflicts: r.code };
   });
@@ -37,7 +41,9 @@ export async function diffHunks(Btext, Ctext) {
   if (!B.length || !C.length) return wholeHunk(B, C);
   if (Btext === Ctext) return [];
   return withTemps([Btext, Ctext], async ([b, c]) => {
-    const d = await exec("git", ["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--diff-algorithm=minimal", "--", b, c]);
+    crumb("diffHunks: before git diff --no-index", "changes");
+    const d = await git(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "--diff-algorithm=minimal", "--", b, c]);
+    crumb(`diffHunks: after git diff --no-index code=${d.code} out=${d.stdout?.length}`, "changes");
     if (d.code > 1) throw new Error(d.stderr.trim());
     return parseHunks(d.stdout);
   });
