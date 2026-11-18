@@ -1,15 +1,18 @@
 // The Response pane, laid out like Bruno's response area: a top line with the Request, status,
 // time and size, then Response, Headers, Timeline and Tests. A folder or Collection Run lists its
-// Requests on the left. Its data lives only in memory (store.js) and goes when the pane closes.
+// Requests on the left, under the folders they belong to (runtree.js). Its data lives only in memory
+// (store.js) and goes when the pane closes.
 import { div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { focused, panes, props, settings, theme } from "herdr";
 import * as store from "./store.js";
 import { formatSize, formatTime } from "./report.js";
 import { methodBadge } from "./panel.js";
+import { runRows, unfoldFor } from "./runtree.js";
 
 const MAX_TEXT = 400000;
 const PARTS = ["response", "headers", "timeline", "tests"];
+const INDENT = 14;
 const mono = () => String(settings()?.font_family ?? settings()?.font ?? "JetBrains Mono");
 
 export function init(self, cx) {
@@ -20,6 +23,8 @@ export function init(self, cx) {
   self.sel = 0;
   self.part = "response";
   self.editor = null;
+  self.runId = null;
+  self.folded = new Set();      // folded folder paths in the Run list, for this Run only
   sync(self);
   cx.spawn(async (cx) => { for (;;) { await store.nextChange(); sync(self); cx.notify(); } });
 }
@@ -30,7 +35,10 @@ export function close(self) {
   store.clearView(self.tab);
 }
 
-/** Takes the tab's latest Run from the store, selecting the first failed Request. */
+/**
+ * Takes the tab's latest Run from the store, selecting the first failed Request. Folds reset when
+ * a new Run starts, and the folders of the selected and first failed Request open when it ends.
+ */
 function sync(self) {
   const v = store.getView(self.tab);
   if (!v) { self.v = null; self.seen = null; setEditor(self, null); return; }
@@ -38,9 +46,12 @@ function sync(self) {
   self.seen = v.n;
   self.v = v;
   if (v.kind === "file") { setEditor(self, { language: v.file.language, value: v.file.text }); return; }
+  if (v.id !== self.runId) { self.runId = v.id; self.folded = new Set(); }
   const list = v.result?.responses ?? [];
   const failed = list.findIndex((r) => !r.ok);
   self.sel = failed >= 0 ? failed : 0;
+  const show = [list[self.sel], list[failed]].filter(Boolean).map((r) => r.path);
+  if (show.length) self.folded = unfoldFor({ target: v.info?.target, folded: self.folded, paths: show });
   self.part = "response";
   showBody(self);
 }
@@ -88,10 +99,9 @@ export function render(self) {
       .child(div().child(`Running ${info.label}${info.environment ? ` against ${info.environment}` : ""}…`));
     const p = v.progress;
     if (info.kind === "request" || !p) return root.child(topLine(t, info.label, info.method, info.url, null)).child(waiting);
-    // Requests are listed as they finish. Rows do nothing until the Run ends and the report is read.
-    const rows = p.finished.map((f, i) => listRow(t, i, { ok: f.ok, method: f.method, name: f.name, status: f.status }, false, null));
-    if (p.running) rows.push(listRow(t, rows.length, { running: true, method: null, name: p.running.name, status: undefined }, false, null));
-    return root.child(progressLine(t, p)).child(withList(self, t, rows, waiting));
+    // Requests are listed as they finish. Request rows do nothing until the Run ends and the report is read.
+    const entries = p.running ? [...p.finished, { ...p.running, running: true, method: null }] : p.finished;
+    return root.child(progressLine(t, p)).child(withList(self, t, listRows(self, t, entries, info.planned ?? null, false), waiting));
   }
   const result = v.result;
   const list = result.responses ?? [];
@@ -104,8 +114,7 @@ export function render(self) {
   const many = info.kind !== "request" || list.length > 1;
   const detail = list[self.sel] ? responseView(self, t, list[self.sel]) : center(t, "No Request was sent.");
   if (!many) return root.child(detail);
-  const rows = list.map((r, i) => listRow(t, i, r, i === self.sel, (cx) => { self.sel = i; showBody(self); cx.notify(); }));
-  return root.child(summaryLine(t, result.summary)).child(withList(self, t, rows, detail));
+  return root.child(summaryLine(t, result.summary)).child(withList(self, t, listRows(self, t, list, null, true), detail));
 }
 
 const spinner = (t, size) => svg("mods/brunr/icons/spinner.svg").size(size).flex_none().text_color(t.working).spin(900);
@@ -120,9 +129,35 @@ function withList(self, t, rows, detail) {
     .child(v_flex().flex_1().min_w(0).min_h(0).child(detail));
 }
 
+/** The Run list's rows: folder rows and Request rows. Request rows select only once the Run ended. */
+function listRows(self, t, entries, planned, done) {
+  const info = self.v.info;
+  return runRows({ collection: info.tree ?? null, target: info.target ?? null, entries, planned, folded: self.folded }).map((row) => {
+    if (row.kind === "folder") return folderRow(t, row, (cx) => {
+      const next = new Set(self.folded);
+      if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
+      self.folded = next;
+      cx.notify();
+    });
+    const i = row.index;
+    return listRow(t, row.key, row.depth, row.entry, done && i === self.sel, done ? (cx) => { self.sel = i; showBody(self); cx.notify(); } : null);
+  });
+}
+
+/** A folder in the Run list: chevron, name, a spinner while a Request in it runs, and passed/total. */
+function folderRow(t, f, click) {
+  return h_flex().id(`resp-${f.key}`).h(28).flex_none().pl(4 + f.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
+    .hover((s) => s.bg(t.hover)).on_click((_e, cx) => click(cx))
+    .child(div().w(12).flex_none().flex().items_center().text_color(t.dim).child(svg(`mods/brunr/icons/${f.folded ? "chevron-right" : "chevron-down"}.svg`).size(12)))
+    .child(svg("mods/brunr/icons/folder.svg").size(13).flex_none().text_color(t.muted))
+    .child(div().flex_1().min_w(0).truncate().child(f.name))
+    .when(f.running, (el) => el.child(spinner(t, 11)))
+    .child(div().flex_none().text_size(10.5).text_color(f.failed ? t.blocked : t.done).child(`${f.passed}/${f.total}`));
+}
+
 /** One Request in the list: its mark (a spinner while it runs), method, name and status. */
-function listRow(t, i, r, selected, click) {
-  return h_flex().id(`resp-${i}`).h(28).flex_none().px(8).gap(6).items_center().rounded(5)
+function listRow(t, key, depth, r, selected, click) {
+  return h_flex().id(`resp-${key}`).h(28).flex_none().pl(8 + depth * INDENT).pr(8).gap(6).items_center().rounded(5)
     .when(Boolean(click), (el) => el.cursor_pointer().hover((s) => s.bg(selected ? t.selected : t.hover)).on_click((_e, cx) => click(cx)))
     .when(selected, (el) => el.bg(t.selected))
     .child(r.running ? div().w(12).flex_none().flex().items_center().child(spinner(t, 11))

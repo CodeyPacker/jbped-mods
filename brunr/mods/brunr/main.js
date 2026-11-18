@@ -319,11 +319,11 @@ export default class Brunr extends View {
     }
     const tab = this.responseTab();
     if (!tab) { notify({ title: "Brunr", body: "No tab to show the Response in.", level: "warning" }); return; }
-    const info = { key, ck: row.ck, kind: target.kind, label: row.name, method: row.method ?? null, url: row.url ?? null, environment, collection: c.name, machine: entry.machine ?? null };
     // The Requests the CLI is expected to send, in its order, so the progress can name the next one.
     // A single Request Run looks as it always did, so it has no progress.
     const many = target.kind !== "request";
     const planned = plannedRequests(c, target);
+    const info = { key, ck: row.ck, kind: target.kind, label: row.name, method: row.method ?? null, url: row.url ?? null, environment, collection: c.name, machine: entry.machine ?? null, tree: c, target, planned };
     if (!store.beginRun(tab, info, many ? progressOf({ planned, finished: [] }) : null)) return;
     const onProgress = many ? (text) => store.setProgress(tab, progressOf({ planned, finished: parseProgress(text).finished })) : null;
     cx.spawn(async (cx) => {

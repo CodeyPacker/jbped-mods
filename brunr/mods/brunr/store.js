@@ -71,13 +71,16 @@ export function running() { return busy; }
 
 /**
  * Starts a Run in a tab. False when another Run is in progress.
- * `info`: `{ key, ck, label, method, url, environment, machine }`, `key` being the tree row that runs
- * and `ck` its Collection. `progress`: progressOf's result before any Request finished, or null.
+ * `info`: `{ key, ck, label, method, url, environment, machine, tree, target, planned }`, `key` being
+ * the tree row that runs, `ck` its Collection, `tree` the parsed Collection and `planned` the
+ * Requests the Run is expected to send. `progress`: progressOf's result before any Request
+ * finished, or null. The view's `id` stays the same for the whole Run.
  */
 export function beginRun(tab, info, progress = null) {
   if (busy) return false;
   busy = { tab, key: info.key, ck: info.ck ?? null, label: info.label, progress };
-  runs.set(tab, { kind: "run", state: "running", info, result: null, progress, n: Date.now() });
+  const n = Date.now();
+  runs.set(tab, { kind: "run", id: n, state: "running", info, result: null, progress, n });
   changed();
   return true;
 }

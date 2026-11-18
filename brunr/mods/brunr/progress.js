@@ -13,7 +13,8 @@ const SKIPPED = /^(.+) Skipped: \(/;
 const FAILED = /^(.+) \(([^()]+)\)$/;
 
 const slash = (p) => String(p ?? "").replace(/\\/g, "/");
-const noExt = (p) => slash(p).replace(/\.[^./]+$/, "");
+/** A path with forward slashes and no extension, for matching paths across formats. */
+export const noExt = (p) => slash(p).replace(/\.[^./]+$/, "");
 const baseName = (p) => p.slice(p.lastIndexOf("/") + 1);
 
 /** One output line as a finished Request, or null when the line is not a result line. */

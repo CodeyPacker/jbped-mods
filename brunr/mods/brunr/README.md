@@ -109,16 +109,25 @@ A Run of one Request shows:
 While a folder or Collection Run is in progress, the pane shows:
 
 - A summary line with a spinner and `4 of 16`.
-- The list of finished Requests as they finish, each with its mark, method, name and status. The running Request is the last row, with a spinner in place of the mark. Rows cannot be selected until the Run ends.
-- When the Run ends, the pane shows the result as below.
+- The list of finished Requests as they finish, each with its mark, method, name and status, grouped under their folders as described below. The running Request is the last row, with a spinner in place of the mark, and each folder that holds it shows a spinner beside its count. Request rows cannot be selected until the Run ends.
+- When the Run ends, the pane shows the result as below, with the same rows and folds, so the list does not jump.
 
 A single Request Run shows a spinner until it ends.
 
 A folder or Collection Run adds:
 
 - A summary line with the number of Requests, passed, failed and skipped, and the total time.
-- A list of Responses, each with a pass or fail mark, method, name and status. A Request with no response shows `ERR`. The first failed Response is selected.
+- A list of Responses, each with a pass or fail mark, method, name and status. A Request with no response shows `ERR`. The first failed Response is selected, else the first.
 - The list sits left of the views when the pane is 720px wide or more, and above them when it is narrower.
+
+The list is a tree, as in the panel:
+
+- Each Request sits under the folders it belongs to, indented by depth. Each folder with a listed Request beneath it has a row before its first Request, with an arrow, its name and `<passed>/<total>` at the right. The count is red when any Request beneath it failed, else green.
+- The Run target gets no row. A `products` Run shows `top sellers` as a folder row and the Requests directly in `products` at the top level. A Collection Run shows its top-level folders as rows. A Run whose Requests all sit directly in the target has no folder rows.
+- During the Run, total is the number of Requests planned beneath the folder and passed counts finished Requests with a 2xx or 3xx status. In the result, both count the listed Responses.
+- Clicking a folder row folds or unfolds it. Folders start unfolded. Folds last for that Run only and reset when a new Run starts. When the Run ends, the folders holding the selected and the first failed Request unfold.
+- Requests keep the order the CLI ran them in. If one folder's Requests are not consecutive, the folder gets a new row each time it starts again, so no Request shows under the wrong folder.
+- A Request missing from the Collection tree is placed by the directories in its path. A folder is named by its folder file, else by its directory name.
 
 When the CLI sends no Request, or fails before it starts, the pane shows its message in a box. Open file shows a Request's file in the pane, read only.
 
@@ -162,6 +171,7 @@ Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`)
 
 - The panel keeps in its localStorage: which Collections and folders are unfolded, the Environment chosen per Collection (keyed by Machine and root) and the Global environment chosen per workspace file. Herdr keeps it in store files under `data/brunr/` in the app home.
 - Collections start unfolded and folders folded until you change them.
+- Folds in the Response pane's list are held in memory for one Run.
 - Runs and Responses are never written to disk. The report and progress files are the only exception, and they live for the length of one Run.
 - Shared state holds `brunr.tick`, a counter that makes the other copies of the mod draw again, and `brunr.request`. `brunr.request` holds the last choice a popup made for the panel: a kind, a row key (Machine, Collection path and the path inside it), an action, or an Environment or Global environment name. It never holds Response data or secrets.
 
@@ -192,6 +202,7 @@ One mod draws every part. Herdr starts a copy of it for the panel, for each Resp
 - `response.js`: draws the Response pane.
 - `popup.js`: draws the Environment pickers and the row menu.
 - `tree.js`: the rows, the key map, the block finder and the confirmation and secret texts. No Herdr calls.
+- `runtree.js`: the Response pane's Run list as rows of folders and Requests, with counts and folds, for the live list and the result alike. No Herdr calls.
 - `store.js`: saved state, the in-memory Run store and the popup-to-panel asks.
 - `sources.js`: reads `brunr.json` and the workspace and finds Collection roots. Loads one Collection.
 - `machine.js`: every `exec`, `readTextFile`, `watchFolder` and `fs` call. Lists and reads files, checks the CLI, runs `bru` with its output going to the progress file, reads that file on a `cx.timer` while the Run is in progress, reads and deletes reports and progress files and starts Bruno desktop.
