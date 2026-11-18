@@ -17,6 +17,10 @@ Works the same on macOS, Linux, Windows, and Windows with agents in WSL, however
 - herdr-core keeps each terminal's in-process subagents in `records` (`{<id>: {app, state, title}}`). The agent reports them through the terminal itself, so they reach Herdr the same way on every platform. The mod reads them from `terminals()` and adds them as child rows of that terminal's agent.
 - A click on a Claude Code subagent focuses the parent pane and moves through Claude Code's footer agent list with `hc keys`, reading the screen with `hc read` after each batch of keys. It presses Enter only once the screen shows the target row selected (`❯`), and checks afterwards that the row is the one shown (`●`). It sends ↑ only while a list row is selected, so it never reaches prompt history. Other agents' subagent rows focus the parent pane.
 
+## Palette
+
+With the `palette` mod installed, `Agents: Show or hide` runs `layout.toggle {"id": "agents"}`. It works while the layout's agents block has the id `agents`, as Herdr's layouts name it.
+
 ## Limits
 
 - `records` isn't in Herdr's docs yet, so a Herdr update could change it.

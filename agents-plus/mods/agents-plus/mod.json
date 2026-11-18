@@ -4,5 +4,8 @@
   "cloned_from": {
     "name": "agents",
     "version": "0.1.13"
-  }
+  },
+  "palette": [
+    { "title": "Agents: Show or hide", "command": "layout.toggle", "args": { "id": "agents" }, "about": "Show or hide the agents list in the sidebar. Needs the layout's agents block to keep the id agents" }
+  ]
 }

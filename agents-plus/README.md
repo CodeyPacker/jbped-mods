@@ -10,6 +10,7 @@ Herdr's Agents list with Claude Code's in-process subagents nested under the ses
 - **Live state.** A spinner while the subagent works. The row goes when it finishes.
 - **Click to open.** Click a subagent to open its view in its Claude Code session. Click the parent to go back to `main`.
 - **Safe clicks.** It presses Enter only when Claude Code's screen shows the right subagent selected. Otherwise it shows a warning.
+- **Palette entry.** With the `palette` mod, `Agents: Show or hide` toggles the list.
 - **Every platform.** The same on macOS, Linux, Windows and Windows with agents in WSL, with no hook to install.
 
 ## Needs
