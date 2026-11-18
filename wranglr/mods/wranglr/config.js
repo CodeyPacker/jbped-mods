@@ -10,6 +10,7 @@ export const DEFAULT_SETTINGS = {
   ticket: "^(?:[a-z]+/)?#?(\\d{2,})",
   agent: null,
   machine: null,
+  folder: null,
   agents: true,
   revive: true,
 };
@@ -40,6 +41,8 @@ function parseSettings(raw, errors) {
   else if (s.agent !== null && !(Array.isArray(s.agent) && s.agent.length && s.agent.every((a) => typeof a === "string"))) fall("agent", "must be null or a list of strings");
   if (!("agents" in s)) s.agents = DEFAULT_SETTINGS.agents; else if (typeof s.agents !== "boolean") fall("agents", "must be true or false");
   if (!("revive" in s)) s.revive = DEFAULT_SETTINGS.revive; else if (typeof s.revive !== "boolean") fall("revive", "must be true or false");
+  if (!("folder" in s)) s.folder = DEFAULT_SETTINGS.folder;
+  else if (s.folder !== null && !(absolute(s.folder) && !/[\r\n]/.test(s.folder))) fall("folder", "must be an absolute path, or null for the home folder");
   if (!("machine" in s)) s.machine = DEFAULT_SETTINGS.machine;
   else if (s.machine !== null && !okMachine(s.machine)) fall("machine", 'must be a Machine name, "" for this computer, or null');
   return s;

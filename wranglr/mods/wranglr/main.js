@@ -152,6 +152,7 @@ export default class Wranglr extends View {
     this.machines = [];
     this.hovered = null; // the agent row under the pointer
     this.tab = "spaces"; // the list shown: "spaces" or "agents"
+    this.homes = {}; // machine -> its home folder, once asked
     this.handle = cx.focus_handle(); // holds the keyboard while the list is driven by keys
     this.scroll = ScrollHandle.new();
     this.nav = []; // the rows the keys can reach, in the order drawn: { key, index, kind, ... }
@@ -570,10 +571,27 @@ export default class Wranglr extends View {
 
   // A space in no Group: on the default Machine when it is set and ready, else as Herdr starts one.
   newSpace() {
-    const m = this.config.settings.machine;
-    if (typeof m !== "string") return run("space.new");
-    const ready = m === "" || machines().some((x) => x.name === m && x.layout === "ready");
-    run("space.new", { machine: ready ? m : "" });
+    // In the `folder` setting, else the Machine's home. Herdr alone would start it in the focused
+    // space's folder, on the focused space's Machine.
+    const set = this.config.settings.machine, folder = this.config.settings.folder;
+    let mk = typeof set === "string" ? set : spaces().find((s) => s.active)?.machine ?? "";
+    const ready = mk === "" || machines().some((x) => x.name === mk && x.layout === "ready");
+    // The folder is a path on the default Machine: not used when that Machine is away.
+    const named = folder && (typeof set !== "string" || ready) ? folder : null;
+    if (!ready) mk = "";
+    (named ? Promise.resolve(named) : this.homeOf(mk)).then((f) => run("space.new", { machine: mk, ...(f ? { folder: f } : {}) }));
+  }
+
+  // A Machine's home folder, or null when it could not be told (then Herdr chooses the folder).
+  async homeOf(mk) {
+    if (!mk) return home();
+    if (this.homes[mk]) return this.homes[mk];
+    try {
+      const r = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: mk, timeout: 5000 });
+      const h = r.code === 0 ? r.stdout.trim() : "";
+      if (/^([\/\\]|[A-Za-z]:[\/\\])/.test(h) && !/[\r\n]/.test(h)) return (this.homes[mk] = h);
+    } catch {}
+    return null;
   }
 
   openSettings() {
@@ -1559,9 +1577,9 @@ export default class Wranglr extends View {
     this.known = Array.isArray(p.known) ? p.known.filter((m) => typeof m === "string") : [""];
     this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname, agents: s.agents !== false, revive: s.revive !== false, machine: typeof s.machine === "string" ? s.machine : null };
     this.pick = { ...this.was };
-    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal" };
+    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal", folder: "The home folder" };
     this.makeInputs(
-      { worktrees: String(s.worktrees ?? ""), ticket: String(s.ticket ?? ""), agent: Array.isArray(s.agent) ? s.agent.join(" ") : "" },
+      { worktrees: String(s.worktrees ?? ""), ticket: String(s.ticket ?? ""), agent: Array.isArray(s.agent) ? s.agent.join(" ") : "", folder: String(s.folder ?? "") },
       (key) => hint[key], () => this.saveSettings());
     this.handle = cx.focus_handle();
     this.handle.focus();
@@ -1591,6 +1609,7 @@ export default class Wranglr extends View {
       this.field(t, "Sort", pick("sort", Object.entries(SORT_LABEL)), "sort"),
       this.field(t, "Default Machine", pick("machine", [[null, "Not set"], ...this.known.map((mk) => [mk, this.machineLabel(mk)])]), "machine",
         "Where + starts a space when the Group has no Machines of its own. Not set: this computer for a Group, Herdr's choice for the header +."),
+      this.field(t, "The header + starts in", this.textInput(t, "folder"), "folder", "An absolute path on the default Machine. Empty: the home folder."),
       this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."),
       this.field(t, "Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"),
       this.field(t, "Agent status on each space", pick("agents", [[true, "On"], [false, "Off"]]), "agents", "Marks on a space's row for agents that need you, are working or are done. Click them to go to the most urgent one."),

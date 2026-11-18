@@ -123,6 +123,7 @@ Herdr moves the keyboard off a terminal one pane at a time, so `wranglr.keys` st
 - `agent`: what new spaces from "+" run. `null` is a plain terminal. With `claude`, a Workspace space also gets `--add-dir` for each of its Repos outside the Workspace home.
 - `machine`: the default Machine. "+" on a Group starts there when the Group has no `machines` of its own, or when none of them is ready. `""` is this computer. Left out, a Group starts on this computer and the header "+" starts where Herdr does. A default Machine that is away or where the Group cannot start is skipped for this computer.
 - `agents`: show agent status marks on each space's row. `false` leaves them out.
+- `folder`: where the header "+" (and `n` outside a Group) starts a space. An absolute path on the default Machine. Left out or `null`: that Machine's home folder. Not used when the default Machine is away.
 - `revive`: resume agents after Herdr's core restarts (see Revive). `false` turns it off.
 - A Workspace's `repos` are Repo ids: the remote URL without scheme, user and `.git` (`github.com/Org/Repo`). `machines` lists Machine names in order of preference, `""` being this computer. `on.<machine>.home` sets the Workspace home there. Without it, the home is the folder that holds all of the Workspace's Repos, when there is one. `on.<machine>.paths` says where a Repo is checked out when Wranglr has not seen it there yet.
 - `repos` gives the same Machines and paths for a Repo on its own.

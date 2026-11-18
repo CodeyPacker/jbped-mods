@@ -132,6 +132,19 @@ test("the default Machine is null, a name or \"\", and anything else falls back"
   assert.ok(settingError("machine", ["wsl"]));
 });
 
+test("the header + folder is null or an absolute path, and anything else falls back", () => {
+  assert.equal(parseConfig(null).config.settings.folder, null);
+  assert.equal(parseConfig(JSON.stringify({ settings: { folder: "/home/me/dev" } })).config.settings.folder, "/home/me/dev");
+  assert.equal(parseConfig(JSON.stringify({ settings: { folder: "C:\\dev" } })).config.settings.folder, "C:\\dev");
+  const { config, errors } = parseConfig(JSON.stringify({ settings: { folder: "dev" } }));
+  assert.equal(config.settings.folder, null);
+  assert.equal(errors.length, 1);
+  assert.equal(settingError("folder", "/srv"), null);
+  assert.equal(settingError("folder", null), null);
+  assert.ok(settingError("folder", "relative/path"));
+  assert.ok(settingError("folder", "/a\nb"));
+});
+
 test("a from that is an option or has a space is dropped", () => {
   const { config, errors } = parseConfig(JSON.stringify({ repos: { a: { from: "--upload-pack=x" }, b: { from: "origin/dev x" }, c: { from: "origin/dev" } } }));
   assert.equal(config.repos.a.from, undefined);
