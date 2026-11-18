@@ -224,8 +224,8 @@ export default class Palette extends View {
   legend(t) {
     const hints = this.binding ? [["enter", "save"], ["esc", "close"]]
       : this.asking ? [["enter", "run"], ["esc", "close"]]
-      : this.searching ? [["tab", "list"], ["ctrl-j/k", "move"], ["ctrl-d/u", "page"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]]
-      : [["j/k", "move"], ["ctrl-d/u", "page"], ["shift-↑/↓", "group"], ["s", "search"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]];
+      : this.searching ? [["tab", "list"], ["↑/↓", "move"], ["ctrl-j/k/↑/↓", "page"], ["shift-↑/↓", "group"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]]
+      : [["j/k/↑/↓", "move"], ["ctrl-j/k/↑/↓", "page"], ["shift-j/k/↑/↓", "group"], ["s", "search"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]];
     return h_flex().flex_none().flex_wrap().gap(12).px(8).pt(8).border_t(1).border_color(t.border).text_size(11)
       .children(hints.map(([key, what]) => h_flex().gap(4).items_center()
         .child(div().text_color(t.accent).font_semibold().child(key))
@@ -285,19 +285,21 @@ export default class Palette extends View {
     return v_flex().id("palette").track_focus(this.handle).w_full().min_h(0).p(12).gap(6).bg(t.popover).text_size(13)
       .on_key_down((e, cx) => {
         // ctrl-j/k, ctrl-n/p and ctrl-d/u move as the arrows and page keys do.
-        // On the list, j and k move, enter runs and s goes to the search box. In the box they are text.
+        // ctrl with j/k or the arrows pages and ctrl-n/p move, wherever the keyboard is. On the list, j and k move,
+        // shift-j/k jump a group, enter runs and s goes to the search box. In the box those are text.
         const onList = !ask && !this.searching;
-        const k = { "ctrl-j": "down", "ctrl-n": "down", "ctrl-k": "up", "ctrl-p": "up", "ctrl-d": "pagedown", "ctrl-u": "pageup", ...(onList ? { j: "down", k: "up" } : {}) }[e.keystroke] ?? e.key;
+        const k = { "ctrl-j": "pagedown", "ctrl-d": "pagedown", "ctrl-k": "pageup", "ctrl-u": "pageup", "ctrl-down": "pagedown", "ctrl-up": "pageup", "ctrl-n": "down", "ctrl-p": "up", ...(onList ? { j: "down", k: "up" } : {}) }[e.keystroke] ?? e.key;
+        const group = onList && e.keystroke === "shift-j" ? 1 : onList && e.keystroke === "shift-k" ? -1 : e.modifiers.shift && k === "down" ? 1 : e.modifiers.shift && k === "up" ? -1 : 0;
         if (k === "escape") { if (ask) this.back(cx); else this.close(); }
         else if (ask) return;
         else if (onList && e.keystroke === "s") this.input.focus();
         else if (!onList && e.keystroke === "tab") this.handle.focus();
         else if (onList && e.keystroke === "enter") this.submit();
         else if (e.keystroke === "ctrl-b" && rows.length) this.bind(rows[this.at]);
-        // Shift+arrows jump between groups, as the sidebar does.
-        else if ((k === "down" || k === "up") && e.modifiers.shift && rows.length) {
+        // Shift with j/k or the arrows jumps between groups, as the sidebar does.
+        else if (group && rows.length) {
           const heads = [...this.headY.keys()], gi = heads.indexOf(groupOf(rows[this.at]));
-          return this.jump(heads[Math.max(0, Math.min(heads.length - 1, gi + (k === "down" ? 1 : -1)))], cx), cx.stop_propagation();
+          return this.jump(heads[Math.max(0, Math.min(heads.length - 1, gi + group))], cx), cx.stop_propagation();
         }
         else if (k === "down") this.at = Math.min(this.at + 1, rows.length - 1);
         else if (k === "up") this.at = Math.max(this.at - 1, 0);

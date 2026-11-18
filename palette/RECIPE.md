@@ -16,8 +16,8 @@ A popup 760px wide on `popover`, with 12px padding and a 6px gap between its par
   - keycaps: one box per part of the key (`ctrl-shift-t` draws `ctrl`, `shift`, `t`), 18px high, at least 18px wide, radius 4, a 1px `border` outline, 10.5px `dim` text, 3px apart.
 - With no match, the index and list give way to "No matching command" in 12px `dim`.
 - **Legend**, always last, under a 1px `border` line with 8px above its text and 8px at its sides. Key hints 12px apart in 11px, wrapping: each key in `accent` semibold, 4px, then its meaning in `dim`. It follows the keyboard:
-  - on the list: `j/k` move, `ctrl-d/u` page, `shift-↑/↓` group, `s` search, `enter` run, `ctrl-b` set key, `esc` close.
-  - in the text field: `tab` list, `ctrl-j/k` move, `ctrl-d/u` page, `enter` run, `ctrl-b` set key, `esc` close.
+  - on the list: `j/k/↑/↓` move, `ctrl-j/k/↑/↓` page, `shift-j/k/↑/↓` group, `s` search, `enter` run, `ctrl-b` set key, `esc` close.
+  - in the text field: `tab` list, `↑/↓` move, `ctrl-j/k/↑/↓` page, `shift-↑/↓` group, `enter` run, `ctrl-b` set key, `esc` close.
   - in the argument prompt: `enter` run, `esc` close. In the key prompt: `enter` save, `esc` close.
 
 Group order: Custom, Mods, then Tab, Pane, Space, Terminal, Agent, App, Layout, Mod, Overlay, Window, then any other command prefix in alphabetical order. Inside a group, commands keep the order Herdr reports them in.
@@ -41,7 +41,7 @@ While it asks for a key, the index and list are replaced by:
 - `ctrl-shift-p` opens it with the keyboard on the list, not in the text field. The same key closes it.
 - On the list, `j` and `k` move one row, `enter` runs the selected row and `s` puts the keyboard in the text field. In the text field, `tab` puts it back on the list, and so does a click outside the field. Leaving a prompt returns the keyboard to where it was.
 - Typing in the text field filters the list and selects the first row. Every typed word must appear in a row's title, command name, mod name or description. Case is ignored.
-- `down` and `up` move one row. `pagedown` and `pageup` move 8 rows. `ctrl-j` and `ctrl-n` act as `down`, `ctrl-k` and `ctrl-p` as `up`, `ctrl-d` as `pagedown` and `ctrl-u` as `pageup`. `shift-down` and `shift-up` select the first row of the next or previous group and put its heading at the top.
+- `down` and `up` move one row. `pagedown` and `pageup` move 8 rows. `ctrl-j`, `ctrl-down` and `ctrl-d` act as `pagedown`, `ctrl-k`, `ctrl-up` and `ctrl-u` as `pageup`, `ctrl-n` as `down` and `ctrl-p` as `up`. On the list, `shift-j` and `shift-k` act as `shift-down` and `shift-up`. `shift-down` and `shift-up` select the first row of the next or previous group and put its heading at the top.
 - The list scrolls only as far as the selected row needs. The mouse wheel scrolls it, and the selection moves to stay in view.
 - Clicking a group in the index selects that group's first row. Clicking a row runs it.
 - `enter` runs the selected row: the palette closes, then the command runs.
@@ -117,7 +117,7 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
 - Typing two words leaves only rows that contain both.
 - `shift-down` moves the selection to the first row of the next group, and the index marks that group.
 - Picking a command with a required argument shows the argument prompt. Typing a value and `enter` runs it.
-- `ctrl-j` three times selects the fourth row, `ctrl-k` the third, and `ctrl-d` moves 8 rows down.
+- `ctrl-j` or `ctrl-down` moves 8 rows down and `ctrl-k` or `ctrl-up` 8 rows up. `shift-j` on the list selects the first row of the next group.
 - `ctrl-b` on a mod's entry, then `ctrl-shift-g` and `enter`, adds that key to `global` in `keys.json`, the row shows its keycaps, and pressing the key runs the entry.
 - Typing `ctrl-shift-t` there shows "ctrl-shift-t runs tab.new. Enter replaces it." and leaves `keys.json` unchanged until the second `enter`.
 - `ctrl-b`, an emptied field and `enter` removes the row's key from `keys.json`.
