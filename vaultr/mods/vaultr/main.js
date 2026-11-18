@@ -181,7 +181,7 @@ export default class Vaultr extends View {
     if (moved && push && this.note) this.history.push(this.note.path);
     if (moved) {
       // A new scroll area and handle, so the note starts at its top.
-      this.nav++; this.headAt = -1;
+      this.nav++; this.headAt = -1; this.anchor = null;
       try { this.noteScroll.release(); } catch {}
       this.noteScroll = ScrollHandle.new();
       for (const dir of ancestors(path)) this.open.add(dir);
@@ -205,13 +205,15 @@ export default class Vaultr extends View {
   }
 
   // scroll_to_item moves as little as it can, which leaves a segment below the view at the bottom
-  // edge. Going to the end first, then back, puts it at the top.
+  // edge. So the target is an anchor: an empty child as tall as the view, in front of the segment,
+  // which is pulled up over it (see body()). Bringing its bottom into view puts its top, and the
+  // heading, at the top of the view, in one step.
   reveal(at, cx) {
-    const scroll = this.noteScroll, forward = at > this.headAt;
     this.headAt = at;
-    if (!forward) { scroll.scroll_to_item(this.child(at)); return; }
-    scroll.scroll_to_item(this.child(this.note.segs.length)); // the backlinks, the last child
-    cx.timer.after(40, (cx) => { if (scroll === this.noteScroll) { scroll.scroll_to_item(this.child(at)); cx.notify(); } });
+    this.anchor = at;
+    // The anchor shifts the children after it by one, and is itself at the segment's old index.
+    this.noteScroll.scroll_to_item(this.child(at));
+    cx.notify();
   }
 
   stepHeading(by, cx) {
@@ -407,9 +409,14 @@ export default class Vaultr extends View {
       out.push(v_flex().p(8).gap(2).rounded(6).bg(t.surface).border(1).border_color(t.border).text_size(12).text_color(t.muted)
         .children(n.front.split(/\r?\n/).map((l) => div().child(l))));
     }
+    // The view's height: the copy's, less the bar, the footer, the notice strip and a margin.
+    const viewH = Math.max(80, (this.size?.height ?? 600) - 32 - 24 - (this.error ?? this.notice ? 32 : 0) - 12);
     n.segs.forEach((seg, i) => {
+      if (i === this.anchor) out.push(div().flex_none().h(viewH));
       if (seg.type === "md") {
-        out.push(div().child(TextView.markdown(`vaultr-md-${n.version}-${i}`, seg.text).selectable(true)
+        // After an anchor the segment moves up over it; the 10 is the scroll area's gap. (The same
+        // negative margin on the anchor's own bottom edge stops the scroll from happening.)
+        out.push(div().when(i === this.anchor, (el) => el.mt(-(viewH + 10))).child(TextView.markdown(`vaultr-md-${n.version}-${i}`, seg.text).selectable(true)
           .on_link_click((url, cx) => {
             const target = parseLink(url);
             if (target != null) this.follow(target, cx); else openExternal(url);

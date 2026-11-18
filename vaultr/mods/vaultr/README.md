@@ -90,7 +90,7 @@ A link finds its note the way Obsidian does: a path from the vault's root, then 
 - Search shows at most 200 notes.
 - Backlinks need every note read once. Measured at about 18 ms a note, so a vault of 280 notes takes about 5 seconds. The note you opened shows first.
 - The list draws every row of every open folder. It was tested with 280 notes.
-- `[` and `]` scroll as little as needed, so near the end of a note a heading may not reach the top.
+- `]`, `[` and heading links put the heading at the top of the view. Near the end of a note there is not enough text below it, so it stops lower.
 - Each image you view is copied to `~/.config/herdr-app/data/vaultr/<vault id>/`, because Herdr only draws images from its own folder. The copies are refreshed when the file changes and are never removed. Delete the folder to clear them.
 - On Linux, Herdr refuses to watch a vault with more than 4096 folders. Vaultr then stops following changes. Press `r` to read the vault again.
 - Only Windows has been tested. The macOS and Linux paths (`cp`, `open`, `xdg-open`) have not been run.

@@ -59,7 +59,7 @@ Narrower than 620px there is one column: the list or the note. The list then has
 - `TextView.markdown` draws nothing for `![alt](path)`. Images must be split out of the text.
 - `fs` reads only inside the home folder. For a path outside it, `fs.exists` throws at the call instead of rejecting, so wrap it in `try`.
 - A clicked link's text view is removed when the note changes, and the keyboard goes with it. Focus the mod's own handle in the link handler.
-- `scroll_to_item` scrolls as little as it can, so a heading below the view lands at the bottom edge. To put it at the top, scroll to the last child first and to the heading 40 ms later.
+- `scroll_to_item` scrolls as little as it can, so a heading below the view lands at the bottom edge. To put it at the top in one step, draw an empty child as tall as the view in front of the heading's segment, give the segment a top margin of minus that height and the gap, and scroll to the empty child. The negative margin on the empty child's own bottom edge does not work: nothing scrolls. Two scrolls a frame apart flicker.
 - A new note needs a new scroll area id and a new `ScrollHandle`, or it opens at the old note's scroll position.
 - Read the vault's links after the first note is drawn. It takes about 18 ms a note.
 - In a dialog, `escape` closes the dialog before the mod sees the key.
