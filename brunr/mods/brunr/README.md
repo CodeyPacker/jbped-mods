@@ -72,6 +72,12 @@ bru run [path] [-r] [--env NAME] [--global-env NAME --workspace-path DIR] --repo
 - A Collection Run passes no path.
 - On Windows, `bru.cmd` is started on this computer.
 
+The CLI's output goes to a progress file next to the report:
+
+- Not on Windows, `sh -c 'out=$1; shift; exec "$@" >"$out" 2>&1' sh FILE bru run ...` starts it. Every value is a separate argument and no shell reads it.
+- On Windows, `node -e` with a fixed script finds `bru.cmd` on the PATH, reads the CLI's script path out of it and starts that script with `node` itself, the way the npm shim does. No `cmd.exe` is involved, so `%`, `&`, quotes and parentheses in a path or Environment name are passed as they are. When the script cannot be found next to `bru.cmd`, Brunr starts `bru.cmd` directly as before, and that Run shows no progress.
+- The CLI's exit code and its whole output still reach the result.
+
 Rules:
 
 - A Request Run times out after 60 seconds, and a folder or Collection Run after 10 minutes. A timed-out Run shows "The Run timed out."
@@ -79,8 +85,14 @@ Rules:
 - A Run cannot be cancelled.
 - A Request Run starts at once. A folder or Collection Run first asks `Run 4 Requests in "Products" against local?` in Herdr's confirm dialog. Enter runs and Esc cancels. A folder with no Requests shows a toast and runs nothing.
 - Runs are off for a Machine where `bru` does not start. At start and on reload Brunr runs `bru --version` and `node --version` on each Machine, with a 20 second timeout. A notice then gives the step: install Node.js first when it is missing, else `npm i -g @usebruno/cli`. It has a Copy button.
-- Each Run writes the CLI's JSON report to a file and deletes it after reading it. On this computer the file is `data/brunr/run-*.json` in the app home. On another Machine it is `/tmp/brunr-*.json`.
-- A report left behind by a timed-out Run is deleted at the next Run. The panel also deletes `run-*.json` files left by an earlier session when it starts.
+- Each Run writes the CLI's JSON report and a progress file, and deletes both after reading them. On this computer they are `data/brunr/run-*.json` and `run-*.log` in the app home. On another Machine they are `/tmp/brunr-*.json` and `/tmp/brunr-*.log`.
+- A report or progress file left behind by a timed-out Run is deleted at the next Run. The panel also deletes `run-*.json` and `run-*.log` files left by an earlier session when it starts.
+
+Progress during a folder or Collection Run:
+
+- While the CLI runs, Brunr reads the progress file every 500 ms and redraws only when it changed. The CLI writes one line as each Request finishes, such as `products/List Products (200 OK) - 23 ms`.
+- Brunr works out the order the CLI sends the Requests in, so it can name the Request that runs next. In each folder the CLI sends the subfolders first, sorted by name and then moved to their `seq` place, then the Requests by `seq`, a missing `seq` counting as 1. When the finished Requests do not match that order, the running Request is not named and only the counts and the finished list show.
+- A finished Request's live mark comes from its HTTP status only: ✓ for 2xx and 3xx, ✗ otherwise. Assertions and tests are not shown live. The final result replaces the live list, so a Request can change from ✗ to ✓ or back.
 
 A Run's output goes to the Response pane of the focused tab. The pane is reused when the tab has one. Otherwise it opens to the right of the focused pane, or in a new tab when no pane has focus.
 
@@ -93,6 +105,14 @@ A Run of one Request shows:
 - Response is a read-only editor with syntax colours for JSON, HTML and XML. A body over 400000 characters is cut.
 - Timeline shows the Request as it was sent: resolved URL, headers and body, then the status and time.
 - Tests lists each assertion and each script test with its error text.
+
+While a folder or Collection Run is in progress, the pane shows:
+
+- A summary line with a spinner and `4 of 16`.
+- The list of finished Requests as they finish, each with its mark, method, name and status. The running Request is the last row, with a spinner in place of the mark. Rows cannot be selected until the Run ends.
+- When the Run ends, the pane shows the result as below.
+
+A single Request Run shows a spinner until it ends.
 
 A folder or Collection Run adds:
 
@@ -142,7 +162,7 @@ Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`)
 
 - The panel keeps in its localStorage: which Collections and folders are unfolded, the Environment chosen per Collection (keyed by Machine and root) and the Global environment chosen per workspace file. Herdr keeps it in store files under `data/brunr/` in the app home.
 - Collections start unfolded and folders folded until you change them.
-- Runs and Responses are never written to disk. The report file is the only exception, and it lives for the length of one Run.
+- Runs and Responses are never written to disk. The report and progress files are the only exception, and they live for the length of one Run.
 - Shared state holds `brunr.tick`, a counter that makes the other copies of the mod draw again, and `brunr.request`. `brunr.request` holds the last choice a popup made for the panel: a kind, a row key (Machine, Collection path and the path inside it), an action, or an Environment or Global environment name. It never holds Response data or secrets.
 
 ## Limits
@@ -152,6 +172,9 @@ Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`)
 - A YAML file the CLI cannot parse aborts the whole Run, for example an unquoted value containing a colon followed by a space. Brunr's own reader is more forgiving, so the tree can show a Request the CLI will not run.
 - A file Brunr cannot read adds to a count on the Collection row, and the footer names the first five.
 - There is no cancel for a Run.
+- Run progress shows HTTP statuses only. Assertion and test results appear when the Run ends.
+- The running Request is named only while the CLI sends Requests in the order Brunr expects. Requests with the same `seq` keep the folder's listing order, which Brunr takes as the file name ignoring case, as Windows lists files. Another Machine may list them in another order.
+- On Windows, a timed-out Run may leave the CLI running until it ends by itself, since Brunr ends the `node` that started it.
 - Secrets stored in Bruno desktop are empty in a CLI Run (see Environments and secrets).
 - On Windows Brunr starts `bru.cmd`, so the npm global folder must be on the PATH Herdr was started with. Without it the panel shows the missing CLI notice.
 - Bruno desktop cannot be told to open a specific Request, so "Open Bruno" only starts the app. Brunr looks for it at `<home>/AppData/Local/Programs/Bruno/Bruno.exe` on Windows, `/Applications/Bruno.app` on macOS and `bruno` on the PATH elsewhere.
@@ -171,8 +194,9 @@ One mod draws every part. Herdr starts a copy of it for the panel, for each Resp
 - `tree.js`: the rows, the key map, the block finder and the confirmation and secret texts. No Herdr calls.
 - `store.js`: saved state, the in-memory Run store and the popup-to-panel asks.
 - `sources.js`: reads `brunr.json` and the workspace and finds Collection roots. Loads one Collection.
-- `machine.js`: every `exec`, `readTextFile`, `watchFolder` and `fs` call. Lists and reads files, checks the CLI, runs `bru`, reads and deletes reports and starts Bruno desktop.
-- `plan.js`: turns a target and the chosen Environments into the `bru run` arguments. No Herdr calls.
+- `machine.js`: every `exec`, `readTextFile`, `watchFolder` and `fs` call. Lists and reads files, checks the CLI, runs `bru` with its output going to the progress file, reads that file on a `cx.timer` while the Run is in progress, reads and deletes reports and progress files and starts Bruno desktop.
+- `plan.js`: turns a target and the chosen Environments into the `bru run` arguments, and lists the Requests a Run sends in the CLI's order. No Herdr calls.
+- `progress.js`: turns the progress file's text into the finished Requests and the running one. No imports.
 - `report.js`: turns the CLI's JSON report, exit code and output into Responses. No Herdr calls.
 - `parser.js` and `yaml.js`: read Collection files in both formats and a small YAML subset.
 - `icons/`: the panel's SVG icons.

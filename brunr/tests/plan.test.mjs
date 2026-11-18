@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { planRun, SINGLE_TIMEOUT, MULTI_TIMEOUT } from "../mods/brunr/plan.js";
+import { planRun, plannedRequests, SINGLE_TIMEOUT, MULTI_TIMEOUT } from "../mods/brunr/plan.js";
 import { parseCollection } from "../mods/brunr/parser.js";
 import { readTree, deepFreeze } from "./helpers.mjs";
 
@@ -93,4 +93,28 @@ test("a POSIX root is the working directory", () => {
   assert.equal(r.cwd, "/home/dev/shop api");
   assert.deepEqual(r.args, ["run", "orders", "-r", "--env", "local", "--reporter-json", "/tmp/r.json"]);
   assert.equal(r.count, 3);
+});
+
+// The order the Bruno CLI 4.3.0 sent a scratch Collection in: folders zeta (seq 1), Alpha, gamma
+// (seq 3), beta (with a subfolder), then root Requests A (seq 2), B (no seq), C (seq 1), a-lower (seq 3).
+test("plannedRequests follows the CLI: folders first by name with seq placing, then Requests by seq", () => {
+  const req = (path, seq = null) => ({ kind: "request", name: path, path: `${path}.yml`, seq });
+  const folder = (path, seq, children) => ({ kind: "folder", name: path.toUpperCase(), path, seq, children });
+  const c = deepFreeze({ children: [
+    req("A", 2), req("B"), req("C", 1), req("a-lower", 3),
+    folder("zeta", 1, [req("zeta/z1", 1)]),
+    folder("beta", null, [req("beta/b1", 1), req("beta/b0"), folder("beta/inner", null, [req("beta/inner/i1", 1)])]),
+    folder("Alpha", null, [req("Alpha/a1", 1)]),
+    folder("gamma", 3, [req("gamma/g1", 1)]),
+  ] });
+  assert.deepEqual(plannedRequests(c, { kind: "collection" }).map((n) => n.name),
+    ["zeta/z1", "Alpha/a1", "gamma/g1", "beta/inner/i1", "beta/b0", "beta/b1", "B", "C", "A", "a-lower"]);
+  assert.deepEqual(plannedRequests(c, { kind: "folder", path: "beta" }).map((n) => n.name), ["beta/inner/i1", "beta/b0", "beta/b1"]);
+});
+
+test("plannedRequests for one Request is that Request, and a missing target still plans", () => {
+  assert.deepEqual(plannedRequests(collection, { kind: "request", path: "Get Health.yml" }).map((n) => n.name), ["Get Health"]);
+  assert.deepEqual(plannedRequests(collection, { kind: "request", path: "gone/Thing.yml" }), [{ kind: "request", name: "Thing.yml", path: "gone/Thing.yml" }]);
+  assert.deepEqual(plannedRequests(collection, { kind: "folder", path: "gone" }), []);
+  assert.equal(plannedRequests(collection, { kind: "collection" }).length, plan({ target: { kind: "collection" } }).count);
 });

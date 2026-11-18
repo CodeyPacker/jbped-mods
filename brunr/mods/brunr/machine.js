@@ -208,7 +208,7 @@ export function cliStep(bru, node) {
 let counter = 0;
 const unique = () => `${Date.now().toString(36)}-${(counter++).toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-/** Report files of earlier Runs that could not be deleted yet: `{ machine, path }`. */
+/** Report and progress files of earlier Runs that could not be deleted yet: `{ machine, path }`. */
 const leftovers = [];
 
 /** Where a Run's report goes: a file under the app's data folder here, `/tmp` on another Machine. */
@@ -217,6 +217,53 @@ async function reportPath(machine) {
   const dir = join(appHome(), "data/brunr");
   await fs.mkdir(dir, { recursive: true });
   return `${dir}/run-${unique()}.json`;
+}
+
+/** The progress file of a Run: the CLI's stdout and stderr, next to the report and named like it. */
+const progressPath = (report) => report.replace(/\.json$/, ".log");
+
+/** How often the progress file is read while a Run is in progress, in ms. */
+export const PROGRESS_EVERY = 500;
+
+// Not Windows: sh points the CLI's output at the progress file and replaces itself with the CLI,
+// so the exit code is the CLI's and a timeout stops the CLI. Every value is a positional argument.
+const REDIRECT = 'out=$1; shift; exec "$@" >"$out" 2>&1';
+
+// Windows: bru.cmd runs through cmd.exe, which would read %, & and quotes in the arguments. Node
+// starts the CLI's script itself instead, the way the npm shim does, with no shell: it finds
+// bru.cmd on PATH, takes the script path out of it and passes every argument as an array item.
+// It exits with NO_SCRIPT when it cannot find the script, and Brunr then starts bru.cmd as before.
+const NO_SCRIPT = 86;
+const WINDOWS_RUN = [
+  'const fs = require("fs"), path = require("path"), cp = require("child_process");',
+  "const [out, ...args] = process.argv.slice(1);",
+  "let script = null, node = process.execPath;",
+  'for (const dir of (process.env.PATH || "").split(path.delimiter)) {',
+  '  let text; try { text = fs.readFileSync(path.join(dir, "bru.cmd"), "utf8"); } catch { continue; }',
+  '  const m = /%~?dp0%?\\\\?([^"%\\r\\n]+?\\.js)"/.exec(text);',
+  "  if (!m) continue;",
+  "  script = path.join(dir, ...m[1].split(/[\\\\/]/));",
+  '  if (fs.existsSync(path.join(dir, "node.exe"))) node = path.join(dir, "node.exe");',
+  "  break;",
+  "}",
+  `if (!script) { process.stderr.write("brunr: no Bruno CLI script next to bru.cmd"); process.exit(${NO_SCRIPT}); }`,
+  'const fd = fs.openSync(out, "w");',
+  'const child = cp.spawn(node, [script, ...args], { stdio: ["ignore", fd, fd], windowsHide: true });',
+  'child.on("error", (e) => { fs.writeSync(fd, "Cannot start the Bruno CLI: " + e.message + "\\n"); process.exit(1); });',
+  'child.on("exit", (code) => process.exit(code == null ? 1 : code));',
+].join("\n");
+
+/**
+ * Starts `bru` with its output going to `out`, and resolves with exec's result when it ends.
+ * `progress` is false when the output could not be redirected (bru.cmd started directly).
+ */
+async function startBru(machine, plan, out) {
+  const [cmd, lead] = bruCommand(machine);
+  const opts = { cwd: plan.cwd, on: machine, timeout: plan.timeout };
+  if (cmd !== "bru.cmd") return { progress: true, r: await exec("sh", ["-c", REDIRECT, "sh", out, cmd, ...lead, ...plan.args], opts) };
+  const r = await exec("node", ["-e", WINDOWS_RUN, "--", out, ...plan.args], opts);
+  if (r.code !== NO_SCRIPT || !/^brunr:/.test(r.stderr)) return { progress: true, r };
+  return { progress: false, r: await exec(cmd, [...lead, ...plan.args], opts) };
 }
 
 async function readReport(machine, path) {
@@ -244,41 +291,74 @@ export async function sweepReports() {
   if (leftovers.length > 20) leftovers.splice(0, leftovers.length - 20);
 }
 
-/** Deletes every report left in this computer's data folder by an earlier session. */
+/** Deletes every report and progress file left in this computer's data folder by an earlier session. */
 export async function clearLocalReports() {
   const dir = join(appHome(), "data/brunr");
-  for (const name of await localNames(dir)) if (/^run-.*\.json$/.test(name)) await removeReport(null, `${dir}/${name}`);
+  for (const name of await localNames(dir)) if (/^run-.*\.(json|log)$/.test(name)) await removeReport(null, `${dir}/${name}`);
 }
 
 const timedOutError = (e) => /time(d)? ?out/i.test(String(e?.message ?? e));
 
 /**
- * One Run on the Collection's Machine. Plans it, runs `bru`, reads the report and deletes it,
- * whatever happened, then returns `readRun`'s result. Never throws.
- * `run`: `{ machine, collection, target, environment, globalEnvironment, workspacePath }`.
+ * One Run on the Collection's Machine. Plans it, runs `bru` with its output going to a progress
+ * file, reads the report and the progress file and deletes both, whatever happened, then returns
+ * `readRun`'s result. Never throws.
+ * `run`: `{ machine, collection, target, environment, globalEnvironment, workspacePath, timer, onProgress }`.
+ * With `timer` (a `cx.timer`) and `onProgress`, the progress file is read every PROGRESS_EVERY ms
+ * while the CLI runs, and `onProgress(text)` gets its text each time it changed.
  */
-export async function runBru({ machine = null, collection, target, environment = null, globalEnvironment = null, workspacePath = null }) {
+export async function runBru({ machine = null, collection, target, environment = null, globalEnvironment = null, workspacePath = null, timer = null, onProgress = null }) {
   await sweepReports();
   let path = null;
   try { path = await reportPath(machine); } catch (e) {
     return readRun({ code: 1, stderr: `Cannot make a place for the report: ${e?.message ?? e}` });
   }
+  const log = progressPath(path);
   const plan = planRun({ collection, target, environment, globalEnvironment, workspacePath, reportPath: path });
-  const [cmd, lead] = bruCommand(machine);
   const input = { reportText: null, code: null, stdout: "", stderr: "", timedOut: false };
+  const watch = watchProgress(machine, log, timer, onProgress);
+  let redirected = true;
   try {
-    const r = await exec(cmd, [...lead, ...plan.args], { cwd: plan.cwd, on: machine, timeout: plan.timeout });
+    const { progress, r } = await startBru(machine, plan, log);
+    redirected = progress;
     Object.assign(input, { code: r.code, stdout: r.stdout, stderr: r.stderr });
   } catch (e) {
     if (timedOutError(e)) input.timedOut = true;
-    else Object.assign(input, { code: 1, stderr: `Cannot start ${cmd}: ${e?.message ?? e}` });
+    else Object.assign(input, { code: 1, stderr: `Cannot start ${bruCommand(machine)[0]}: ${e?.message ?? e}` });
+  } finally {
+    watch.stop();
   }
   try {
+    if (redirected && !input.timedOut) {
+      const out = await readProgress(machine, log);
+      if (out != null) input.stdout = [out, input.stdout].filter(Boolean).join("\n");
+    }
     input.reportText = input.timedOut ? null : await readReport(machine, path);
   } finally {
-    if (!await removeReport(machine, path) || input.timedOut) leftovers.push({ machine, path });
+    for (const p of [path, log]) if (!await removeReport(machine, p) || input.timedOut) leftovers.push({ machine, path: p });
   }
   return readRun(input);
+}
+
+/** A progress file's text, or null when it is not there yet. */
+async function readProgress(machine, path) {
+  try { return machine == null ? await fs.readFile(path, "utf8") : await readTextFile(path, on(machine)); } catch { return null; }
+}
+
+/** Reads the progress file on a timer until stop(). Each changed text goes to `onProgress`. */
+function watchProgress(machine, path, timer, onProgress) {
+  if (!timer || !onProgress) return { stop() {} };
+  let last = null, reading = false, stopped = false;
+  const task = timer.every(PROGRESS_EVERY, () => {
+    if (reading || stopped) return;
+    reading = true;
+    readProgress(machine, path).then((text) => {
+      if (stopped || text == null || text === last) return;
+      last = text;
+      try { onProgress(text); } catch {}
+    }).finally(() => { reading = false; });
+  });
+  return { stop() { stopped = true; try { task?.cancel(); } catch {} } };
 }
 
 // Bruno desktop

@@ -50,7 +50,7 @@ export function chosenEnv(saved, collectionKey, collection) {
 // Runs, in memory
 
 const runs = new Map();       // tab id -> what its Response pane shows
-let busy = null;              // the Run in progress across the mod: { tab, key, label }
+let busy = null;              // the Run in progress across the mod: { tab, key, ck, label, progress }
 let waiters = [];
 
 function changed() {
@@ -71,20 +71,33 @@ export function running() { return busy; }
 
 /**
  * Starts a Run in a tab. False when another Run is in progress.
- * `info`: `{ key, label, method, url, environment, machine }`, `key` being the tree row that runs.
+ * `info`: `{ key, ck, label, method, url, environment, machine }`, `key` being the tree row that runs
+ * and `ck` its Collection. `progress`: progressOf's result before any Request finished, or null.
  */
-export function beginRun(tab, info) {
+export function beginRun(tab, info, progress = null) {
   if (busy) return false;
-  busy = { tab, key: info.key, label: info.label };
-  runs.set(tab, { kind: "run", state: "running", info, result: null, n: Date.now() });
+  busy = { tab, key: info.key, ck: info.ck ?? null, label: info.label, progress };
+  runs.set(tab, { kind: "run", state: "running", info, result: null, progress, n: Date.now() });
   changed();
   return true;
+}
+
+/**
+ * Where the Run in progress stands: progressOf's result. Nothing is redrawn when it equals the
+ * last one.
+ */
+export function setProgress(tab, progress) {
+  const view = runs.get(tab);
+  if (!busy || busy.tab !== tab || JSON.stringify(progress) === JSON.stringify(busy.progress)) return;
+  busy = { ...busy, progress };
+  if (view?.kind === "run" && view.state === "running") runs.set(tab, { ...view, progress, n: Date.now() });
+  changed();
 }
 
 /** Ends the Run in progress with readRun's result. */
 export function finishRun(tab, result) {
   const view = runs.get(tab);
-  if (view?.kind === "run" && view.state === "running") runs.set(tab, { ...view, state: "done", result, n: Date.now() });
+  if (view?.kind === "run" && view.state === "running") runs.set(tab, { ...view, state: "done", result, progress: null, n: Date.now() });
   busy = null;
   changed();
 }

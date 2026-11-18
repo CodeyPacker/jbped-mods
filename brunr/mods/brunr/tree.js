@@ -114,6 +114,18 @@ export function findBlock(root, mod) {
   return found;
 }
 
+/**
+ * What a row shows for the Run in progress (store.running()): `{ spinner, count }`. The row that
+ * runs has a spinner, and `count` ("2/5") when it runs many. The Request running now has a spinner.
+ */
+export function runMark(row, run) {
+  if (!run || !row) return { spinner: false, count: null };
+  const p = run.progress ?? null;
+  if (run.key === row.key) return { spinner: true, count: p && row.kind !== "request" ? `${p.done}/${p.total}` : null };
+  const now = p?.running;
+  return { spinner: Boolean(now) && row.kind === "request" && row.ck === run.ck && row.path === now.path, count: null };
+}
+
 /** The text of a folder or Collection Run's confirmation. */
 export function confirmText(count, name, environment) {
   return `Run ${count} ${count === 1 ? "Request" : "Requests"} in "${name}" against ${environment ?? "No Environment"}?`;

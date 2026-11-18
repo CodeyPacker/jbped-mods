@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readTree } from "./helpers.mjs";
 import { parseCollection } from "../mods/brunr/parser.js";
-import { buildRows, confirmText, findBlock, keyAction, secretWarning } from "../mods/brunr/tree.js";
+import { buildRows, confirmText, findBlock, keyAction, runMark, secretWarning } from "../mods/brunr/tree.js";
 
 const shop = parseCollection({ root: "/c/shop", files: readTree("yaml") });
 const entry = (machine, root, extra = {}) => ({ key: `${machine ?? ""}|${root}`, machine, root, name: "shop", workspace: null, ...extra });
@@ -83,4 +83,17 @@ test("confirmation and secret texts", () => {
   assert.equal(confirmText(1, "Shop", null), 'Run 1 Request in "Shop" against No Environment?');
   assert.equal(secretWarning(["apiKey"]), "Secret variables are empty in CLI Runs: apiKey. Move them to .env.");
   assert.equal(secretWarning([]), null);
+});
+
+test("runMark: the running folder shows a spinner and its count, the running Request a spinner", () => {
+  const folder = { key: "c#products", kind: "folder", ck: "c", path: "products" };
+  const list = { key: "c#products/List Products.yml", kind: "request", ck: "c", path: "products/List Products.yml" };
+  const other = { ...list, ck: "d", key: "d#products/List Products.yml" };
+  const run = { key: "c#products", ck: "c", progress: { done: 1, total: 4, running: { name: "List Products", path: "products/List Products.yml" } } };
+  assert.deepEqual(runMark(folder, run), { spinner: true, count: "1/4" });
+  assert.deepEqual(runMark(list, run), { spinner: true, count: null });
+  assert.deepEqual(runMark(other, run), { spinner: false, count: null }, "the same path in another Collection");
+  assert.deepEqual(runMark(list, { ...run, progress: { ...run.progress, running: null } }), { spinner: false, count: null });
+  assert.deepEqual(runMark(folder, null), { spinner: false, count: null });
+  assert.deepEqual(runMark(list, { key: list.key, ck: "c", progress: null }), { spinner: true, count: null }, "a single Request Run");
 });

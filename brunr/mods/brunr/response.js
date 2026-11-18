@@ -83,10 +83,15 @@ export function render(self) {
   }
   const info = v.info;
   if (v.state === "running") {
-    return root.child(topLine(t, info.label, info.method, info.url, null))
-      .child(v_flex().flex_1().items_center().justify_center().gap(10).text_color(t.muted)
-        .child(svg("mods/brunr/icons/spinner.svg").size(22).text_color(t.working).spin(900))
-        .child(div().child(`Running ${info.label}${info.environment ? ` against ${info.environment}` : ""}…`)));
+    const waiting = v_flex().flex_1().items_center().justify_center().gap(10).text_color(t.muted)
+      .child(spinner(t, 22))
+      .child(div().child(`Running ${info.label}${info.environment ? ` against ${info.environment}` : ""}…`));
+    const p = v.progress;
+    if (info.kind === "request" || !p) return root.child(topLine(t, info.label, info.method, info.url, null)).child(waiting);
+    // Requests are listed as they finish. Rows do nothing until the Run ends and the report is read.
+    const rows = p.finished.map((f, i) => listRow(t, i, { ok: f.ok, method: f.method, name: f.name, status: f.status }, false, null));
+    if (p.running) rows.push(listRow(t, rows.length, { running: true, method: null, name: p.running.name, status: undefined }, false, null));
+    return root.child(progressLine(t, p)).child(withList(self, t, rows, waiting));
   }
   const result = v.result;
   const list = result.responses ?? [];
@@ -99,20 +104,40 @@ export function render(self) {
   const many = info.kind !== "request" || list.length > 1;
   const detail = list[self.sel] ? responseView(self, t, list[self.sel]) : center(t, "No Request was sent.");
   if (!many) return root.child(detail);
-  // Wide: the Requests on the left. Narrow: on top, so the views keep the pane's width.
+  const rows = list.map((r, i) => listRow(t, i, r, i === self.sel, (cx) => { self.sel = i; showBody(self); cx.notify(); }));
+  return root.child(summaryLine(t, result.summary)).child(withList(self, t, rows, detail));
+}
+
+const spinner = (t, size) => svg("mods/brunr/icons/spinner.svg").size(size).flex_none().text_color(t.working).spin(900);
+
+/** The list of Requests beside the views. Wide: on the left. Narrow: on top, so the views keep the pane's width. */
+function withList(self, t, rows, detail) {
   const wide = (self.size?.width ?? 0) >= 720;
   const listBox = v_flex().id("brunr-runlist").flex_none().min_h(0).overflow_y_scrollbar().p(4).border_color(t.border)
-    .when(wide, (el) => el.w(240).border_r(1)).when(!wide, (el) => el.w_full().max_h(Math.min(180, 12 + list.length * 28)).border_b(1));
-  return root.child(summaryLine(t, result.summary)).child((wide ? h_flex() : v_flex()).flex_1().min_h(0).items_stretch()
-    .child(listBox
-      .children(list.map((r, i) => h_flex().id(`resp-${i}`).h(28).flex_none().px(8).gap(6).items_center().rounded(5).cursor_pointer()
-        .when(i === self.sel, (el) => el.bg(t.selected)).hover((s) => s.bg(i === self.sel ? t.selected : t.hover))
-        .on_click((_e, cx) => { self.sel = i; showBody(self); cx.notify(); })
-        .child(div().w(12).flex_none().text_color(r.ok ? t.done : t.blocked).child(r.ok ? "✓" : "✗"))
-        .child(methodBadge(t, r.method))
-        .child(div().flex_1().min_w(0).truncate().child(r.name))
-        .child(div().flex_none().text_size(10.5).text_color(statusColor(t, r.status)).child(r.status == null ? "ERR" : String(r.status))))))
-    .child(v_flex().flex_1().min_w(0).min_h(0).child(detail)));
+    .when(wide, (el) => el.w(240).border_r(1)).when(!wide, (el) => el.w_full().max_h(Math.min(180, 12 + rows.length * 28)).border_b(1));
+  return (wide ? h_flex() : v_flex()).flex_1().min_h(0).items_stretch()
+    .child(listBox.children(rows))
+    .child(v_flex().flex_1().min_w(0).min_h(0).child(detail));
+}
+
+/** One Request in the list: its mark (a spinner while it runs), method, name and status. */
+function listRow(t, i, r, selected, click) {
+  return h_flex().id(`resp-${i}`).h(28).flex_none().px(8).gap(6).items_center().rounded(5)
+    .when(Boolean(click), (el) => el.cursor_pointer().hover((s) => s.bg(selected ? t.selected : t.hover)).on_click((_e, cx) => click(cx)))
+    .when(selected, (el) => el.bg(t.selected))
+    .child(r.running ? div().w(12).flex_none().flex().items_center().child(spinner(t, 11))
+      : div().w(12).flex_none().text_color(r.ok ? t.done : t.blocked).child(r.ok ? "✓" : "✗"))
+    .child(methodBadge(t, r.method))
+    .child(div().flex_1().min_w(0).truncate().text_color(r.running ? t.muted : t.foreground).child(r.name))
+    .when(r.status !== undefined, (el) => el.child(div().flex_none().text_size(10.5).text_color(statusColor(t, r.status)).child(r.status == null ? "ERR" : String(r.status))));
+}
+
+/** The summary line while a folder or Collection Run is in progress: a spinner and the count. */
+function progressLine(t, p) {
+  return h_flex().h(30).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border).text_size(11.5)
+    .child(spinner(t, 12))
+    .child(div().text_color(t.muted).child(`${p.done} of ${p.total}`))
+    .child(div().flex_1());
 }
 
 function center(t, text) {

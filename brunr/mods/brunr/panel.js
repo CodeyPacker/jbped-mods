@@ -5,7 +5,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { settings, theme } from "herdr";
 import * as store from "./store.js";
 import * as sources from "./sources.js";
-import { foldable, runsMany, secretWarning } from "./tree.js";
+import { foldable, runMark, runsMany, secretWarning } from "./tree.js";
 
 const ICON = (name) => `mods/brunr/icons/${name}.svg`;
 const METHOD_COLOR = { GET: "ansi2", POST: "ansi5", PUT: "ansi3", PATCH: "ansi6", DELETE: "ansi1" };
@@ -102,7 +102,7 @@ function rowView(self, t, r, i) {
   const sel = r.key === self.sel;
   const hovered = r.key === self.hover;
   const running = store.running();
-  const busyHere = running?.key === r.key;
+  const mark = runMark(r, running);
   const el = h_flex().id(`row-${i}-${r.key}`).h(ROW).flex_none().w_full().pl(6 + r.depth * INDENT).pr(4).gap(6).items_center().rounded(5).cursor_pointer()
     .when(sel, (e) => e.bg(self.kb ? t.selected : t.hover))
     .hover((s) => s.bg(sel ? t.selected : t.hover))
@@ -134,7 +134,8 @@ function rowView(self, t, r, i) {
   } else {
     el.child(div().w(14).flex_none()).child(methodBadge(t, r.method)).child(div().flex_1().min_w(0).truncate().child(r.name));
   }
-  if (busyHere) return el.child(div().size(18).flex_none().flex().items_center().justify_center().child(svg(ICON("spinner")).size(12).text_color(t.working).spin(900)));
+  if (mark.count) el.child(div().flex_none().text_size(10.5).text_color(t.muted).child(mark.count));
+  if (mark.spinner) return el.child(div().size(18).flex_none().flex().items_center().justify_center().child(svg(ICON("spinner")).size(12).text_color(t.working).spin(900)));
   if (runsMany(r) && (hovered || sel) && !r.error) {
     const can = self.canRun(r);
     el.child(div().id(`run-${r.key}`).size(18).flex_none().rounded(4).flex().items_center().justify_center()
@@ -157,6 +158,10 @@ function chip(self, t, id, name, placeholder, warn, click) {
 function footer(self, t, r) {
   const box = v_flex().id("brunr-footer").flex_none().px(12).py(9).gap(5).border_t(1).border_color(t.border).text_size(11.5);
   const dim = (text) => div().text_color(t.dim).child(text);
+  const now = store.running()?.progress?.running;
+  if (now) box.child(h_flex().gap(6).items_center().text_color(t.muted)
+    .child(svg(ICON("spinner")).size(11).flex_none().text_color(t.working).spin(900))
+    .child(div().flex_1().min_w(0).truncate().child(`Running: ${now.name}`)));
   if (!r || r.kind === "machine") return box.child(dim("Click selects. Double-click or Enter runs a Request."));
   const coll = r.ck ? self.rows.find((x) => x.key === r.ck) : null;
   if (r.kind === "request") {

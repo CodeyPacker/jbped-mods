@@ -33,6 +33,46 @@ export function planRun({ collection, target, environment = null, globalEnvironm
   };
 }
 
+/**
+ * The Request nodes a Run sends, in the order the Bruno CLI sends them. In each folder the CLI
+ * sends its subfolders first, then its Requests. Subfolders sort by folder name, then each one
+ * with a `seq` moves to place `seq`. Requests sort by `seq`, a missing one counting as 1, and keep
+ * the folder's listing order on a tie, taken here as the file name ignoring case.
+ */
+export function plannedRequests(collection, target) {
+  const kind = target?.kind === "folder" || target?.kind === "request" ? target.kind : "collection";
+  if (kind === "collection") return cliOrder(collection?.children);
+  const path = relPath(target.path);
+  const node = findNode(collection, path);
+  if (kind === "request") return [node?.kind === "request" ? node : { kind: "request", name: path.slice(path.lastIndexOf("/") + 1), path }];
+  return node?.kind === "folder" ? cliOrder(node.children) : [];
+}
+
+const fileName = (n) => n.path.slice(n.path.lastIndexOf("/") + 1);
+const validSeq = (s) => Number.isInteger(s) && s > 0;
+
+function cliOrder(nodes) {
+  const folders = placeBySeq((nodes ?? []).filter((n) => n.kind === "folder"));
+  const upper = (n) => fileName(n).toUpperCase();
+  const requests = (nodes ?? []).filter((n) => n.kind === "request")
+    .sort((a, b) => (upper(a) < upper(b) ? -1 : upper(a) > upper(b) ? 1 : 0))
+    .sort((a, b) => (a.seq ?? 1) - (b.seq ?? 1));
+  return [...folders.flatMap((f) => cliOrder(f.children)), ...requests];
+}
+
+/** The CLI's folder order: by name, then each folder with a valid seq inserted at place seq. */
+function placeBySeq(folders) {
+  const byName = [...folders].sort((a, b) => fileName(a).localeCompare(fileName(b)));
+  const out = byName.filter((f) => !validSeq(f.seq));
+  for (const f of byName.filter((x) => validSeq(x.seq)).sort((a, b) => a.seq - b.seq)) {
+    const at = f.seq - 1;
+    const there = out[at];
+    if (Array.isArray(there) ? there[0].seq === f.seq : there?.seq === f.seq) out.splice(at, 1, [].concat(there, f));
+    else out.splice(at, 0, f);
+  }
+  return out.flat();
+}
+
 function runCount(collection, kind, path) {
   if (kind === "collection") return countRequests(collection);
   const node = findNode(collection, path);

@@ -15,7 +15,8 @@ import * as tree from "./tree.js";
 import * as panel from "./panel.js";
 import * as response from "./response.js";
 import * as popup from "./popup.js";
-import { planRun } from "./plan.js";
+import { planRun, plannedRequests } from "./plan.js";
+import { parseProgress, progressOf } from "./progress.js";
 
 const REMOTE_REFRESH = 30000;
 const machineKey = (m) => m ?? "";
@@ -318,10 +319,15 @@ export default class Brunr extends View {
     }
     const tab = this.responseTab();
     if (!tab) { notify({ title: "Brunr", body: "No tab to show the Response in.", level: "warning" }); return; }
-    const info = { key, kind: target.kind, label: row.name, method: row.method ?? null, url: row.url ?? null, environment, collection: c.name, machine: entry.machine ?? null };
-    if (!store.beginRun(tab, info)) return;
+    const info = { key, ck: row.ck, kind: target.kind, label: row.name, method: row.method ?? null, url: row.url ?? null, environment, collection: c.name, machine: entry.machine ?? null };
+    // The Requests the CLI is expected to send, in its order, so the progress can name the next one.
+    // A single Request Run looks as it always did, so it has no progress.
+    const many = target.kind !== "request";
+    const planned = plannedRequests(c, target);
+    if (!store.beginRun(tab, info, many ? progressOf({ planned, finished: [] }) : null)) return;
+    const onProgress = many ? (text) => store.setProgress(tab, progressOf({ planned, finished: parseProgress(text).finished })) : null;
     cx.spawn(async (cx) => {
-      const result = await machine.runBru({ machine: entry.machine ?? null, collection: c, target, environment, globalEnvironment, workspacePath: ws?.dir ?? null });
+      const result = await machine.runBru({ machine: entry.machine ?? null, collection: c, target, environment, globalEnvironment, workspacePath: ws?.dir ?? null, timer: many ? cx.timer : null, onProgress });
       store.finishRun(tab, result);
       cx.notify();
     });
