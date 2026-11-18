@@ -77,3 +77,32 @@ The state where a Service's container runs from a different Source than the one 
 **Main checkout**:
 The original clone of a Repo, which its worktrees hang off. It can have any branch checked out.
 _Avoid_: main, main branch
+
+### Brunr
+
+**Brunr**:
+The mod that lists Bruno Collections in a side panel, runs their Requests, and shows each Response in a pane. It reads and runs. It never edits a Collection.
+
+**Collection**:
+One Bruno collection: a folder of Requests with its own Environments, on one Machine. Its Runs execute on that Machine. It is not tied to a Repo or a space, and a copy on another Machine is a different Collection.
+_Avoid_: project, workspace, suite
+
+**Request**:
+One saved API call in a Collection.
+_Avoid_: endpoint, call, query
+
+**Environment**:
+A named set of variables in a Collection that a Run resolves its Requests against.
+_Avoid_: env, profile, config
+
+**Global environment**:
+A named set of variables shared by every Collection of one Bruno workspace, chosen once for that workspace and applied on top of each Collection's Environment.
+_Avoid_: workspace environment, shared env
+
+**Run**:
+One execution of a Request, a folder of Requests, or a whole Collection against one Environment, on the Collection's Machine.
+_Avoid_: execution, send, test run
+
+**Response**:
+What one Request returned in a Run: status, headers, body, timing, and its test results.
+_Avoid_: result, output
