@@ -1,6 +1,6 @@
 # Palette
 
-A command palette that opens as a popup at the top of the window. It lists your own entries under Custom, then the entries other mods declare under Mods, then every Herdr command in groups (Tab, Pane, Space and so on), each with the key bound to it. You type to filter, pick a row and it runs. A command that needs arguments asks for them in the same box first.
+A command palette that opens as a popup at the top of the window. It lists your own entries under Custom, then the entries other mods declare under Mods, then every Herdr command in groups (Tab, Pane, Space and so on), each with the key bound to it. You type to filter, pick a row and it runs. A command that needs arguments asks for them in the same box first. `ctrl-k` sets the selected row's key.
 
 ![Palette](preview.png)
 
@@ -8,7 +8,7 @@ A command palette that opens as a popup at the top of the window. It lists your 
 
 A popup 760px wide on `popover`, with 12px padding and a 6px gap between its parts. Top to bottom:
 
-- **Search box**, 36px high, radius 8, a 1px `accent` border on `background`. Left to right: a 14px search icon in `dim`, the text field (12.8px, `foreground`, placeholder "Type a command…"), and "Esc" in 11px `dim`.
+- **Search box**, 36px high, radius 8, a 1px `accent` border on `background`. Left to right: a 14px search icon in `dim`, the text field (12.8px, `foreground`, placeholder "Type a command…"), and "ctrl-k sets a key · Esc" in 11px `dim` ("Esc" alone in the two prompts below).
 - **Group index**, a 120px column on the left with a 1px `border` line on its right. One 24px label per group that has rows, 12px text, radius 5. The selected row's group is `foreground` on `hover`. The others are `dim`.
 - **List**, right of the index, at most 360px high. It holds:
   - group headings, 26px high, 11px `dim`.
@@ -26,6 +26,12 @@ While it asks for arguments, the index and list are replaced by:
 - a 12px `muted` line: the command name, then its argument names, each optional one marked "(optional)".
 - a 12px `dim` line with the command's description, or an error in `ansi1`.
 
+While it asks for a key, the index and list are replaced by:
+
+- the search box, showing the row's title and "›" in 12.8px `muted` before a field holding the row's current key, with the placeholder "Key, such as ctrl-shift-g. Empty removes it".
+- a 12px `muted` line: "Key for", the command name and, when it has any, its arguments as JSON.
+- a 12px `dim` line, "Type the key and press Enter. It is saved in keys.json and works at once.", or a message in `ansi1`.
+
 ## How it behaves
 
 - `ctrl-shift-p` opens it with the text field focused. The same key closes it.
@@ -35,7 +41,11 @@ While it asks for arguments, the index and list are replaced by:
 - Clicking a group in the index selects that group's first row. Clicking a row runs it.
 - `enter` runs the selected row: the palette closes, then the command runs.
 - A Herdr command with a required argument opens the argument prompt instead. A plain value fills the command's first argument. A whole number or decimal becomes a number, and `true` and `false` become booleans. Text starting with `{` is read as a JSON object of arguments. `enter` runs it. Bad JSON shows "Not JSON: …" and keeps the prompt open.
-- `escape` closes the palette. In the argument prompt it goes back to the list.
+- `escape` closes the palette, from the list and from either prompt.
+- `ctrl-k` opens the key prompt for the selected row. `enter` saves the typed key to the `global` section of `keys.json` and returns to the list, where the row shows it. The row's old key is removed. An empty field only removes it.
+- The typed key is trimmed and lower-cased. Each space-separated chord must be modifiers from `ctrl`, `alt`, `shift`, `cmd`, `fn` and then one character or a key name. The first chord needs `ctrl`, `alt` or `cmd`, or is `f1` to `f24`. Anything else shows a message and saves nothing.
+- A key that `global` binds to another action shows "<key> runs <action>. Enter replaces it." A key present in another section shows "<key> is also set in <sections>, which wins there." A second `enter` with the same text saves. Editing the field clears the message.
+- A Herdr command with a required argument shows "A key can't fill in arguments…" and saves nothing.
 - A key shows on a row when the `global` section of `keys.json` binds that exact command and arguments. Herdr commands with a required argument show no key.
 - Your entries and mods' entries always run with their own fixed arguments and never ask.
 - Rows have a `hover` background under the pointer. Nothing shows agent status.
@@ -57,7 +67,7 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
 - `mods/palette/main.js`: one `View`, no `props` roles. It reads `props().overlay` only to close itself.
 - `mods/palette/README.md`: install steps and the entry format.
 - `keys.json` in the share: `{ "global": { "ctrl-shift-p": { "command": "mod.open", "args": { "name": "palette" } } } }`.
-- Herdr functions: `appHome`, `commands`, `readTextFile`, `run`, `props`, `closeOverlay`, `theme`.
+- Herdr functions: `appHome`, `commands`, `readTextFile`, `writeTextFile`, `run`, `props`, `closeOverlay`, `theme`.
 - Other built-ins: `readdir` from `fs/promises`, `InputState` and `Input` from `gpui-base`, `cx.spawn`, `cx.timer.after`, `cx.focus_handle`, `console.log`.
 - Commands: `mod.open` (from the key), plus whatever command the picked row names, through `run(name, args)`.
 - Programs: none. Network: none.
@@ -65,7 +75,7 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
   - `palette.json`: your entries, group "Custom".
   - `mods/` (listed with `readdir`, sorted by name) and each `mods/<name>/mod.json`: the `palette` list, group "Mods", each row tagged with `<name>`.
   - `keys.json`: the `global` section only.
-- Files written: none.
+- Files written: `keys.json` under `appHome()`, only from the key prompt. It is read again at save time, changed as parsed JSON and written with `writeTextFile(path, text, expected)` so a file changed in between is refused. Output is `JSON.stringify` with two spaces, keeping the file's final newline and CRLF line ends. An entry with arguments is written as `{ "command", "args" }`, one without as the command name.
 - Art: `mods/workspace-chrome/search.svg`, from Herdr's shipped `workspace-chrome` mod. Theme tokens only: `popover`, `background`, `accent`, `border`, `hover`, `foreground`, `muted`, `dim`, `ansi1`.
 - Rows come from `commands()`: `name`, `about` and `args` (each with `name` and `required`). The group is the part of `name` before the first `.`, capitalised.
 - Key lookup: each `global` binding becomes a signature of command name plus JSON arguments with sorted keys. A string action `name:value` fills the command's first argument. An object action `{ "command", "args" }` is used as is. The first key found for a signature wins.
@@ -80,7 +90,9 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
 - After a wheel scroll the selection must be moved into view. Otherwise the next render scrolls back to it.
 - `mod.json` gives `height` as 0.7 and the list caps itself at 360px, so the popup's real height comes from its content.
 - A `palette.json` that is not valid JSON is left out and the reason goes to `console.log`. A mod with a broken `mod.json` is left out silently. An entry without `title` or `command` is dropped.
-- Keys bound in `layout:<name>`, `terminal` or `mod:<name>` sections are not shown.
+- Keys bound in `layout:<name>`, `terminal` or `mod:<name>` sections are not shown, and the key prompt never changes them.
+- Herdr runs its global keys before a mod gets them, so the key prompt takes typed text and cannot record a pressed key. `ctrl-k` reaches the mod only while nothing in `keys.json` binds it.
+- Herdr closes a popup on `escape` itself, so `escape` in a prompt closes the palette.
 - A key name ending in `--` (a binding on the minus key) draws `-` as its last keycap.
 - `ctrl-shift-p` is Herdr's own palette key. Merging `keys.json` replaces it, so ask first. Herdr's palette stays in the list as `app.palette`.
 - A failed `run` is logged to `console.log`. The palette has already closed and shows no error.
@@ -95,4 +107,7 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
 - The row for `tab.new` shows the keycaps of the key that `keys.json` binds to it.
 - Typing two words leaves only rows that contain both.
 - `shift-down` moves the selection to the first row of the next group, and the index marks that group.
-- Picking a command with a required argument shows the argument prompt. Typing a value and `enter` runs it, and `escape` returns to the list.
+- Picking a command with a required argument shows the argument prompt. Typing a value and `enter` runs it.
+- `ctrl-k` on a mod's entry, then `ctrl-shift-g` and `enter`, adds that key to `global` in `keys.json`, the row shows its keycaps, and pressing the key runs the entry.
+- Typing `ctrl-shift-t` there shows "ctrl-shift-t runs tab.new. Enter replaces it." and leaves `keys.json` unchanged until the second `enter`.
+- `ctrl-k`, an emptied field and `enter` removes the row's key from `keys.json`.

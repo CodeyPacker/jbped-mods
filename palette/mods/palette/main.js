@@ -3,11 +3,12 @@
 // [{ "title", "command", "args" }]), then every app command from commands(), each with its
 // key from keys.json. Type to filter, ↑/↓ and Enter to run, Esc to leave. A command with
 // required arguments asks for them first: one value fills the first argument, or a JSON object.
+// ctrl-k asks for a key for the selected row and writes it to keys.json's global section.
 // Open it with mod.open {"name": "palette"}, e.g. bound to ctrl-shift-p in keys.json.
 import * as fs from "fs/promises";
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { appHome, commands, readTextFile, run, props, closeOverlay, theme } from "herdr";
+import { appHome, commands, readTextFile, writeTextFile, run, props, closeOverlay, theme } from "herdr";
 
 const ROW_H = 32, HEAD_H = 26, LIST_H = 360;
 // Groups in the order Herdr's own palette shows them; mod entries come first.
@@ -23,20 +24,46 @@ const labelOf = (c) => {
 /** The value a key action stands for, comparable with an entry's: "name" + JSON args. */
 const sig = (name, args) => `${name} ${JSON.stringify(args ?? {}, Object.keys(args ?? {}).sort())}`;
 
-/** keys.json's global section as signature -> key. "name:value" fills the first argument. */
+/** Each command's first argument name: what "name:value" in keys.json fills. */
+const firstArgs = () => new Map(commands().map((c) => [c.name, c.args[0]?.name]));
+
+/** A keys.json action's signature, or null when it runs no command with known arguments. */
+function actSig(act, firstArg) {
+  if (typeof act === "object" && act?.command) return sig(act.command, act.args);
+  if (typeof act !== "string") return null;
+  const i = act.indexOf(":"), name = i < 0 ? act : act.slice(0, i);
+  if (i < 0) return sig(name);
+  return firstArg.get(name) ? sig(name, { [firstArg.get(name)]: act.slice(i + 1) }) : null;
+}
+
+/** keys.json's global section as signature -> key. The first key of a signature wins. */
 function keysBySig(keys) {
-  const out = new Map(), firstArg = new Map(commands().map((c) => [c.name, c.args[0]?.name]));
+  const out = new Map(), firstArg = firstArgs();
   for (const [key, act] of Object.entries(keys?.global ?? {})) {
-    let s = null;
-    if (typeof act === "object" && act?.command) s = sig(act.command, act.args);
-    else if (typeof act === "string") {
-      const i = act.indexOf(":"), name = i < 0 ? act : act.slice(0, i);
-      s = i < 0 ? sig(name) : firstArg.get(name) ? sig(name, { [firstArg.get(name)]: act.slice(i + 1) }) : null;
-    }
+    const s = actSig(act, firstArg);
     if (s && !out.has(s)) out.set(s, key);
   }
   return out;
 }
+
+const MODS = ["ctrl", "alt", "shift", "cmd", "fn"];
+/** "ctrl-shift-t" -> ["ctrl", "shift", "t"]. A trailing "-" is the minus key. */
+const chordParts = (c) => (c === "-" ? ["-"] : c.endsWith("--") ? [...c.slice(0, -2).split("-"), "-"] : c.split("-"));
+
+/** Why `key` can't be a global key, or null. Chords in a sequence are space-separated. */
+function keyProblem(key) {
+  const chords = key.split(" ");
+  for (const c of chords) {
+    const parts = chordParts(c), k = parts.pop();
+    if (!/^(\S|[a-z][a-z0-9]+)$/.test(k ?? "") || parts.some((m) => !MODS.includes(m))) return `"${c}" is not a key. Write it like ctrl-shift-g, alt-f5 or f8.`;
+  }
+  const first = chordParts(chords[0]), k = first.pop();
+  if (!first.some((m) => m === "ctrl" || m === "alt" || m === "cmd") && !/^f\d{1,2}$/.test(k)) return "A global key needs ctrl, alt or cmd, or is a function key. Anything else takes the key from typing.";
+  return null;
+}
+
+/** A keys.json action in words, for the message about a key already in use. */
+const actText = (act) => (typeof act === "string" ? act : `${act?.command} ${JSON.stringify(act?.args ?? {})}`);
 
 /** Valid entries of a palette list, as rows of group `group`. */
 const entriesOf = (list, group, mod) =>
@@ -70,12 +97,16 @@ const parseValue = (v) => (/^-?\d+(\.\d+)?$/.test(v) ? Number(v) : v === "true" 
 export default class Palette extends View {
   init(_props, cx) {
     this.filter = ""; this.at = 0; this.top = 0; this.asking = null; this.error = null;
+    this.binding = null; this.confirmed = null;
     this.mods = []; this.keys = new Map();
     this.input = InputState.new({ placeholder: "Type a command…" });
     this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = 0; this.top = 0; this.error = null; cx.notify(); });
     this.input.on("submit", (_e, cx) => { this.submit(); cx.notify(); });
     this.argInput = InputState.new({ placeholder: "Value, or {\"name\": value, …}" });
     this.argInput.on("submit", (_e, cx) => { this.runAsked(); cx.notify(); });
+    this.bindInput = InputState.new({ placeholder: "Key, such as ctrl-shift-g. Empty removes it" });
+    this.bindInput.on("change", (_e, cx) => { this.error = null; this.confirmed = null; cx.notify(); });
+    this.bindInput.on("submit", (_e, cx) => this.saveKey(cx));
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
     this.handle = cx.focus_handle();
@@ -124,8 +155,49 @@ export default class Palette extends View {
   }
 
   back(cx) {
-    this.asking = null; this.error = null; this.input.focus();
+    this.asking = null; this.binding = null; this.confirmed = null; this.error = null; this.input.focus();
     cx.notify();
+  }
+
+  /** Whether a row is one exact command and arguments, which is what a key runs. */
+  bindable(r) { return r.kind === "mod" || !r.spec.some((a) => a.required); }
+
+  /** Asks for the selected row's key in the same box. */
+  bind(r) {
+    this.binding = r; this.confirmed = null;
+    this.error = this.bindable(r) ? null : "A key can't fill in arguments. Add this command with its arguments to palette.json, then set that entry's key.";
+    this.bindInput.set_value(this.keys.get(sig(r.name, r.args ?? {})) ?? ""); this.bindInput.focus();
+  }
+
+  /** Writes the typed key as the row's key in keys.json's global section. No key removes it. */
+  saveKey(cx) {
+    const r = this.binding, key = this.bindInput.value().trim().toLowerCase().replace(/\s+/g, " ");
+    if (!r || !this.bindable(r)) return;
+    this.error = key ? keyProblem(key) : null;
+    if (this.error) return cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const path = `${appHome()}/keys.json`, text = await readTextFile(path);
+        if (text === null) throw new Error("There is no keys.json");
+        const doc = JSON.parse(text), firstArg = firstArgs(), mine = sig(r.name, r.args ?? {});
+        const g = (doc.global ??= {});
+        // A key in use: say what it runs and where, and take a second Enter as the answer.
+        if (key && this.confirmed !== key) {
+          const taken = g[key] !== undefined && actSig(g[key], firstArg) !== mine ? `${key} runs ${actText(g[key])}. ` : "";
+          const wins = Object.keys(doc).filter((s) => s !== "global" && doc[s]?.[key] !== undefined);
+          const over = wins.length ? `${key} is also set in ${wins.join(", ")}, which wins there. ` : "";
+          if (taken || over) { this.confirmed = key; this.error = `${taken}${over}Enter ${taken ? "replaces it" : "sets it anyway"}.`; return cx.notify(); }
+        }
+        const old = Object.keys(g).find((k) => actSig(g[k], firstArg) === mine);
+        if (old !== undefined) delete g[old];
+        if (key) g[key] = Object.keys(r.args ?? {}).length ? { command: r.name, args: r.args } : r.name;
+        // Written as Herdr writes it: two spaces, the file's own line ends.
+        const out = JSON.stringify(doc, null, 2) + (text.endsWith("\n") ? "\n" : "");
+        await writeTextFile(path, text.includes("\r\n") ? out.replace(/\n/g, "\r\n") : out, text);
+        this.keys = keysBySig(doc);
+        this.back(cx);
+      } catch (e) { this.error = `keys.json: ${e.message ?? e}`; cx.notify(); }
+    });
   }
 
   /** Keycaps, as Herdr draws them: "ctrl-shift-t" -> ctrl | shift | t. */
@@ -152,7 +224,7 @@ export default class Palette extends View {
   }
 
   render() {
-    const t = theme(), rows = this.asking ? [] : this.rows();
+    const t = theme(), ask = this.asking ?? this.binding, rows = ask ? [] : this.rows();
     this.at = Math.max(0, Math.min(this.at, rows.length - 1));
     // One strip of group headings and rows at fixed y; it scrolls only as far as the selection needs.
     const items = [], tops = [];
@@ -189,8 +261,9 @@ export default class Palette extends View {
     return v_flex().id("palette").track_focus(this.handle).w_full().min_h(0).p(12).gap(6).bg(t.popover).text_size(13)
       .on_key_down((e, cx) => {
         const k = e.key;
-        if (k === "escape") { if (this.asking) this.back(cx); else this.close(); }
-        else if (this.asking) return;
+        if (k === "escape") { if (ask) this.back(cx); else this.close(); }
+        else if (ask) return;
+        else if (e.keystroke === "ctrl-k" && rows.length) this.bind(rows[this.at]);
         // Shift+arrows jump between groups, as the sidebar does.
         else if ((k === "down" || k === "up") && e.modifiers.shift && rows.length) {
           const heads = [...this.headY.keys()], gi = heads.indexOf(groupOf(rows[this.at]));
@@ -205,13 +278,16 @@ export default class Palette extends View {
       })
       .child(h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(8).border_1().border_color(t.accent).bg(t.background)
         .child(svg("mods/workspace-chrome/search.svg").size(14).flex_none().text_color(t.dim))
-        .when(!!this.asking, (e) => e.child(div().flex_none().text_size(12.8).text_color(t.muted).child(`${this.asking.title} ›`)))
-        .child(Input.new(this.asking ? this.argInput : this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
+        .when(!!ask, (e) => e.child(div().flex_none().text_size(12.8).text_color(t.muted).child(`${ask.title} ›`)))
+        .child(Input.new(this.binding ? this.bindInput : this.asking ? this.argInput : this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(ask ? "Esc" : "ctrl-k sets a key · Esc")))
+      .when(!!this.binding, (e) => e
+        .child(div().px(12).pt(4).text_size(12).text_color(t.muted).child(`Key for ${this.binding?.name}${Object.keys(this.binding?.args ?? {}).length ? ` ${JSON.stringify(this.binding?.args)}` : ""}`))
+        .child(div().px(12).pb(6).text_size(12).text_color(this.error ? t.ansi1 : t.dim).child(this.error ?? "Type the key and press Enter. It is saved in keys.json and works at once.")))
       .when(!!this.asking, (e) => e
         .child(div().px(12).pt(4).text_size(12).text_color(t.muted).child(`${this.asking?.name}: ${this.asking?.spec.map((a) => a.name + (a.required ? "" : " (optional)")).join(", ")}`))
         .child(div().px(12).pb(6).text_size(12).text_color(this.error ? t.ansi1 : t.dim).child(this.error ?? this.asking?.about ?? "")))
-      .when(!this.asking, (e) => e.child(rows.length
+      .when(!ask, (e) => e.child(rows.length
         ? h_flex().items_start().gap(8)
           .child(this.sidebar([...this.headY.keys()], groupOf(rows[this.at]), t))
           .child(div().id("pl-list").flex_1().min_w(0).relative().overflow_hidden().h(height)

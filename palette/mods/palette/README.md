@@ -17,6 +17,18 @@ A command palette that mods can add entries to, styled after Herdr's own. It lis
 
 Type to filter (every word must match), `up` / `down`, `pageup` / `pagedown` or the wheel to move, `shift-up` / `shift-down` to jump to the previous or next group, `enter` to run, `escape` to close. A command with required arguments asks for them first: type a value for its first argument, or a JSON object such as `{"direction": "right", "mod": "wingman"}`. `escape` goes back to the list.
 
+## Setting a key
+
+Select an entry and press `ctrl-k`. Type the key, such as `ctrl-shift-g`, `alt-f5` or `f8`, and press `enter`. The palette writes it to the `global` section of `~/.config/herdr-app/keys.json`, in place of the key the entry showed, and Herdr applies it at once. An empty box removes the entry's key. `escape` closes the palette without saving.
+
+- Keys are typed, not pressed, because Herdr runs its own keys before a mod sees them.
+- A key needs `ctrl`, `alt` or `cmd`, or is a function key. A sequence is written with spaces: `ctrl-space shift-n`.
+- A key that already runs something else shows what it runs. A second `enter` replaces it.
+- A key also set in a `terminal`, `layout:<name>` or `mod:<name>` section is named, because that section wins there. The palette never changes those sections.
+- A Herdr command with required arguments can't take a key. Add it to `palette.json` with its arguments and set that entry's key.
+- Keys a mod handles itself while it is open, such as a list's `j` and `k`, are not in `keys.json` and can't be set here.
+- Herdr stops adding new default shortcuts to a `keys.json` that has been edited, by the palette or by hand.
+
 ## Adding your own entries
 
 Put a list of entries in `~/.config/herdr-app/palette.json`. No mod needs to change, and reinstalling mods leaves the file alone:
