@@ -183,10 +183,12 @@ export default class Wranglr extends View {
     // Actions sent before this copy started are not ours to run.
     this.handled = shared("wranglr.action")?.n ?? 0;
 
+    this.keysKey = null; // the key bound to wranglr.keys, as "Alt+S"
     this.gitr = false; // the gitr mod is installed: Repo group menus offer "Open in Gitr"
     cx.spawn(async (cx) => {
       await this.reloadConfig();
       await this.checkGitr();
+      await this.checkKey();
       this.state = await loadState(emptyState()).catch(() => emptyState());
       this.loaded = true;
       this.tick(cx);
@@ -198,6 +200,7 @@ export default class Wranglr extends View {
     cx.timer.every(250, (cx) => this.checkNew(cx));
     cx.timer.every(CONFIG_EVERY, (cx) => cx.spawn(async (cx) => {
       await this.checkGitr();
+      if (await this.checkKey()) cx.notify();
       if (await this.reloadConfig()) { this.filesKey = null; this.tick(cx); cx.notify(); }
     }));
     // "wranglr.<command>" in keys.json and the palette.
@@ -212,6 +215,23 @@ export default class Wranglr extends View {
 
   async close() {
     if (!this.dialog && this.saver) await this.saver.flush();
+  }
+
+  // The key bound to wranglr.keys in keys.json, as "Alt+S", or null. Shown under the list.
+  async checkKey() {
+    let found = null;
+    try {
+      const keys = JSON.parse(await readTextFile(appHome() + "/keys.json"));
+      for (const section of ["global", "mod:wranglr"]) {
+        for (const [key, action] of Object.entries(keys?.[section] ?? {})) {
+          if (action === "wranglr.keys" || action?.command === "wranglr.keys") found = key;
+        }
+      }
+    } catch {}
+    const label = found ? found.split("-").map((w) => (w ? w[0].toUpperCase() + w.slice(1) : "-")).join("+") : null;
+    const changed = label !== this.keysKey;
+    this.keysKey = label;
+    return changed;
   }
 
   async checkGitr() {
@@ -1425,6 +1445,8 @@ export default class Wranglr extends View {
       .child(v_flex().id("wranglr-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(6).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
         .children(body))
       .when(this.kb && !collapsed, (el) => el.child(this.keyHelp(t)))
+      .when(!this.kb && !collapsed && Boolean(this.keysKey), (el) => el.child(div().flex_none().px(12).py(4).text_size(10.5).text_color(t.dim).truncate()
+        .child(`${this.keysKey} · keys for this list`)))
       .child(v_flex().flex_none().pb(8).children(this.machineLines(t, collapsed)));
   }
 
