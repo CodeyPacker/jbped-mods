@@ -1,0 +1,11 @@
+{
+  "place": "none",
+  "title": "Tabs",
+  "cloned_from": {
+    "name": "tabs",
+    "version": "0.1.14"
+  },
+  "palette": [
+    { "title": "Tabs: Show or hide the side panel", "command": "layout.toggle", "args": { "id": "panel" }, "about": "Show or hide the side panel on the tab it last showed (Wingman, Vaultr)" }
+  ]
+}
