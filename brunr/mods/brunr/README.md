@@ -131,20 +131,22 @@ The list is a tree, as in the panel:
 
 A finished Run with more than one Request has a toolbar above the list. Left to right:
 
-- A `Filter` field. It keeps the Requests whose name, path or URL holds every word typed, ignoring case.
+- A `Search` field. It keeps the Requests whose name, path or URL holds every word typed, ignoring case.
+- Each control below shows a fixed label before its value: `Result`, `Status`, `Method` and `Sort`. The defaults read `Result All`, `Status Any`, `Method Any` and `Sort Run order`. The label stays in the muted colour.
 - A result control that cycles on click through `All`, `Failed` and `Passed`. Failed means the same as the mark: a failed assertion or test, a network error or a CLI error. The HTTP status alone never fails a Request.
-- A status control that cycles through `Any status`, `2xx`, `3xx`, `4xx`, `5xx` and `Error`, which keeps the Requests that got no response.
+- A status control that cycles through `Any`, `2xx`, `3xx`, `4xx`, `5xx` and `Error`, which keeps the Requests that got no response.
+- A method control that cycles through `Any` and the methods that occur in this Run. The common methods come first in the order GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, then any others alphabetically. A Request that is not HTTP counts under its type, for example `GRPC`.
 - A sort control that cycles through `Run order`, `Slowest`, `Fastest`, `Status` and `Name`.
 
 How the toolbar works:
 
-- The three filters combine. A control away from its first value is drawn in the accent colour. When the pane is narrow, the text field shrinks first.
+- The four filters combine. A control away from its first value has its value drawn in the accent colour. When the pane is narrow, the text field shrinks first.
 - Sorting keeps the folder tree. Requests are sorted inside their own folder and folders keep their Run order. `Slowest` and `Fastest` use the response time and `Status` the status number, with Requests that got no response last. `Name` ignores case. Ties keep the Run order.
 - A folder with no Request left is hidden, nested folders too. Folder counts always describe the whole Run, so a filter never changes them.
 - The summary line adds `showing <n> of <total>` while a filter is on.
-- When nothing matches, the list says `No Requests match.` with a `Clear filters` button that resets the three filters and keeps the sort.
+- When nothing matches, the list says `No Requests match.` with a `Clear filters` button that resets the four filters and keeps the sort.
 - When the selected Request is filtered out, the first one shown is selected.
-- The filters and sort stay as they are for later Runs in the same pane, so `Failed` stays on while a folder runs again.
+- The filters and sort stay as they are for later Runs in the same pane, so `Failed` stays on while a folder runs again. The one exception is the method: when a new Run ends and the chosen method does not occur in it, the method goes back to `Any`.
 - While a Run is in progress the toolbar is disabled and the live list shows every Request in Run order, since pass and fail are not known yet.
 
 When the CLI sends no Request, or fails before it starts, the pane shows its message in a box. Open file shows a Request's file in the pane, read only.

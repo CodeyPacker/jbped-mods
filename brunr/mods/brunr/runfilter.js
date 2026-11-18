@@ -8,10 +8,29 @@ export const STATUSES = Object.freeze(["any", "2xx", "3xx", "4xx", "5xx", "error
 export const SORTS = Object.freeze(["run", "slowest", "fastest", "status", "name"]);
 export const LABELS = Object.freeze({
   all: "All", failed: "Failed", passed: "Passed",
-  any: "Any status", "2xx": "2xx", "3xx": "3xx", "4xx": "4xx", "5xx": "5xx", error: "Error",
+  any: "Any", "2xx": "2xx", "3xx": "3xx", "4xx": "4xx", "5xx": "5xx", error: "Error",
   run: "Run order", slowest: "Slowest", fastest: "Fastest", status: "Status", name: "Name",
+  anyMethod: "Any",
 });
-export const NO_FILTER = Object.freeze({ text: "", result: "all", status: "any", sort: "run" });
+export const NO_FILTER = Object.freeze({ text: "", result: "all", status: "any", method: null, sort: "run" });
+
+const COMMON_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/**
+ * The method control's values for a Run's Responses: null (any method), then the methods that occur,
+ * the common ones in their usual order and any others alphabetically.
+ */
+export function methodValues(entries) {
+  const seen = new Set((entries ?? []).map((e) => String(e.method ?? "").toUpperCase()).filter(Boolean));
+  const common = COMMON_METHODS.filter((m) => seen.has(m));
+  const others = [...seen].filter((m) => !COMMON_METHODS.includes(m)).sort();
+  return [null, ...common, ...others];
+}
+
+/** The method filter for a new Run: kept when the method occurs in it, else back to any (null). */
+export function keepMethod(method, entries) {
+  return methodValues(entries).includes(method ?? null) ? method ?? null : null;
+}
 
 /**
  * The filter that applies to a Run of `total` Responses: the toolbar exists only for a Run with
@@ -28,9 +47,9 @@ export function nextValue(values, value) {
 
 const words = (text) => String(text ?? "").toLowerCase().split(/\s+/).filter(Boolean);
 
-/** Whether the text, result or status filter narrows the list. Sorting is not a filter. */
-export function isFiltering({ text = "", result = "all", status = "any" } = {}) {
-  return words(text).length > 0 || result !== "all" || status !== "any";
+/** Whether the text, result, status or method filter narrows the list. Sorting is not a filter. */
+export function isFiltering({ text = "", result = "all", status = "any", method = null } = {}) {
+  return words(text).length > 0 || result !== "all" || status !== "any" || method != null;
 }
 
 function statusMatches(status, want) {
@@ -40,10 +59,11 @@ function statusMatches(status, want) {
   return typeof status === "number" && status >= base && status < base + 100;
 }
 
-function matches(e, find, result, status) {
+function matches(e, find, result, status, method) {
   if (result === "failed" && e.ok) return false;
   if (result === "passed" && !e.ok) return false;
   if (!statusMatches(e.status ?? null, status)) return false;
+  if (method != null && String(e.method ?? "").toUpperCase() !== method) return false;
   if (!find.length) return true;
   const hay = [e.name, e.path, e.url].map((x) => String(x ?? "").toLowerCase()).join("\n");
   return find.every((w) => hay.includes(w));
@@ -110,24 +130,24 @@ function countsOf(entries, target) {
 /**
  * A finished Run's list after the filters and the sort.
  * `entries`: the Run's Responses in Run order. `text`: words that must all appear in the name,
- * path or URL, ignoring case. `result`: one of RESULTS. `status`: one of STATUSES. `sort`: one of
- * SORTS. The three filters combine.
+ * path or URL, ignoring case. `result`: one of RESULTS. `status`: one of STATUSES. `method`: an upper
+ * case method, or null for any. `sort`: one of SORTS. The four filters combine.
  * Returns `{ entries, indexes, visible, total, filtering, counts }`: the entries to hand to
  * runRows in display order, each one's index in the Run, how many are shown, how many the Run has,
  * whether a filter is on, and the folder counts of the whole Run to hand to runRows as `counts`.
  */
-export function filterRun({ target = null, entries = [], text = "", result = "all", status = "any", sort = "run" } = {}) {
+export function filterRun({ target = null, entries = [], text = "", result = "all", status = "any", method = null, sort = "run" } = {}) {
   const all = entries ?? [];
   const find = words(text);
   const ids = [];
-  all.forEach((e, i) => { if (matches(e, find, result, status)) ids.push(i); });
+  all.forEach((e, i) => { if (matches(e, find, result, status, method)) ids.push(i); });
   const indexes = flatten(group(all, ids, target), all, SORTS.includes(sort) ? sort : "run", []);
   return {
     entries: indexes.map((i) => all[i]),
     indexes,
     visible: indexes.length,
     total: all.length,
-    filtering: isFiltering({ text, result, status }),
+    filtering: isFiltering({ text, result, status, method }),
     counts: countsOf(all, target),
   };
 }

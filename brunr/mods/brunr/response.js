@@ -10,7 +10,7 @@ import * as store from "./store.js";
 import { formatSize, formatTime } from "./report.js";
 import { methodBadge } from "./panel.js";
 import { runRows, unfoldFor } from "./runtree.js";
-import { activeFilter, filterRun, keepSelection, nextValue, LABELS, NO_FILTER, RESULTS, SORTS, STATUSES } from "./runfilter.js";
+import { activeFilter, filterRun, keepMethod, keepSelection, methodValues, nextValue, LABELS, NO_FILTER, RESULTS, SORTS, STATUSES } from "./runfilter.js";
 
 const MAX_TEXT = 400000;
 const PARTS = ["response", "headers", "timeline", "tests"];
@@ -28,7 +28,7 @@ export function init(self, cx) {
   self.runId = null;
   self.folded = new Set();      // folded folder paths in the Run list, for this Run only
   self.filter = { ...NO_FILTER };  // the toolbar's filters and sort, kept across Runs
-  self.filterInput = InputState.new({ placeholder: "Filter" });
+  self.filterInput = InputState.new({ placeholder: "Search" });
   self.filterInput.on("change", (_e, cx) => { setFilter(self, { text: self.filterInput.value() }); cx.notify(); });
   sync(self);
   cx.spawn(async (cx) => { for (;;) { await store.nextChange(); sync(self); cx.notify(); } });
@@ -55,6 +55,7 @@ function sync(self) {
   if (v.kind === "file") { setEditor(self, { language: v.file.language, value: v.file.text }); return; }
   if (v.id !== self.runId) { self.runId = v.id; self.folded = new Set(); }
   const list = v.result?.responses ?? [];
+  if (v.state === "done") self.filter = { ...self.filter, method: keepMethod(self.filter.method, list) };
   const failed = list.findIndex((r) => !r.ok);
   self.sel = keepSelection(failed >= 0 ? failed : 0, shown(self).indexes);
   const show = [list[self.sel], list[failed]].filter(Boolean).map((r) => r.path);
@@ -83,7 +84,7 @@ function setFilter(self, change) {
 
 function clearFilters(self) {
   self.filterInput?.set_value("");
-  setFilter(self, { text: "", result: NO_FILTER.result, status: NO_FILTER.status });
+  setFilter(self, { text: "", result: NO_FILTER.result, status: NO_FILTER.status, method: NO_FILTER.method });
 }
 
 function showBody(self) {
@@ -153,26 +154,28 @@ export function render(self) {
 }
 
 /**
- * The row above the Run list: the text filter, then the result, status and sort controls, each
+ * The row above the Run list: the text filter, then the result, status, method and sort controls, each
  * cycling on click. A control off its first value is drawn in `accent`. The text field gives way
  * first when the pane is narrow. While a Run is in progress it is drawn disabled.
  */
 function toolbar(self, t, on) {
-  const control = (key, values) => {
+  const control = (key, name, values) => {
     const value = self.filter[key];
     const active = on && value !== values[0];
     return div().id(`brunr-filter-${key}`).h(24).flex_none().px(8).flex().items_center().rounded(5).border_1().whitespace_nowrap().text_size(11.5)
-      .border_color(active ? t.accent : t.border).text_color(!on ? t.dim : active ? t.accent : t.muted)
+      .border_color(active ? t.accent : t.border).text_color(!on ? t.dim : active ? t.accent : t.muted).gap(4)
       .when(on, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { setFilter(self, { [key]: nextValue(values, value) }); cx.notify(); }))
-      .child(LABELS[value]);
+      .child(div().text_color(on ? t.muted : t.dim).child(name))
+      .child(key === "method" ? value ?? LABELS.anyMethod : LABELS[value]);
   };
+  const methods = methodValues(self.v?.state === "done" ? self.v.result?.responses : []);
   const text = self.filter.text;
   const field = on && self.filterInput
     ? Input.new(self.filterInput).w_full().h(24).px(8).items_center().rounded(5).border(1).border_color(text.trim() ? t.accent : t.border).bg(t.background).text_color(t.foreground).text_size(11.5)
-    : div().w_full().h(24).px(8).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(text || "Filter");
+    : div().w_full().h(24).px(8).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(text || "Search");
   return h_flex().id("brunr-filters").h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
     .child(div().flex_1().min_w(0).child(field))
-    .child(control("result", RESULTS)).child(control("status", STATUSES)).child(control("sort", SORTS));
+    .child(control("result", "Result", RESULTS)).child(control("status", "Status", STATUSES)).child(control("method", "Method", methods)).child(control("sort", "Sort", SORTS));
 }
 
 /** The list area when the filters leave no Request. Clear filters keeps the sort. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { activeFilter, filterRun, isFiltering, keepSelection, nextValue, NO_FILTER, RESULTS, STATUSES, SORTS, LABELS } from "../mods/brunr/runfilter.js";
+import { activeFilter, filterRun, isFiltering, keepMethod, keepSelection, methodValues, nextValue, NO_FILTER, RESULTS, STATUSES, SORTS, LABELS } from "../mods/brunr/runfilter.js";
 import { runRows } from "../mods/brunr/runtree.js";
 import { parseCollection } from "../mods/brunr/parser.js";
 import { readRun } from "../mods/brunr/report.js";
@@ -12,14 +12,14 @@ const URL = "http://127.0.0.1:47911";
 
 /** A Collection Run in Run order, with invented times. slow-order passes with a 500: status alone never fails. */
 const RUN = deepFreeze([
-  { path: "products/top sellers/Best Sellers.yml", name: "Best Sellers", ok: true, status: 200, time: 40, url: `${URL}/products/top` },
-  { path: "products/List Products.yml", name: "List Products", ok: true, status: 200, time: 25, url: `${URL}/products?shop=1` },
-  { path: "products/Product Page.yml", name: "Product Page", ok: true, status: 301, time: 25, url: `${URL}/products/page` },
-  { path: "products/Missing Product.yml", name: "Missing Product", ok: false, status: 404, time: 8, url: `${URL}/products/999` },
-  { path: "orders/Create Order.yml", name: "Create Order", ok: true, status: 201, time: 90, url: `${URL}/orders` },
-  { path: "orders/slow-order.yml", name: "slow-order", ok: true, status: 500, time: 1500, url: `${URL}/orders/slow` },
-  { path: "orders/Closed Port.yml", name: "Closed Port", ok: false, status: null, time: null, url: "http://127.0.0.1:47912/x" },
-  { path: "Get Health.yml", name: "Get Health", ok: true, status: 200, time: 3, url: `${URL}/health` },
+  { path: "products/top sellers/Best Sellers.yml", name: "Best Sellers", method: "GET", ok: true, status: 200, time: 40, url: `${URL}/products/top` },
+  { path: "products/List Products.yml", name: "List Products", method: "GET", ok: true, status: 200, time: 25, url: `${URL}/products?shop=1` },
+  { path: "products/Product Page.yml", name: "Product Page", method: "GET", ok: true, status: 301, time: 25, url: `${URL}/products/page` },
+  { path: "products/Missing Product.yml", name: "Missing Product", method: "GET", ok: false, status: 404, time: 8, url: `${URL}/products/999` },
+  { path: "orders/Create Order.yml", name: "Create Order", method: "POST", ok: true, status: 201, time: 90, url: `${URL}/orders` },
+  { path: "orders/slow-order.yml", name: "slow-order", method: "POST", ok: true, status: 500, time: 1500, url: `${URL}/orders/slow` },
+  { path: "orders/Closed Port.yml", name: "Closed Port", method: "DELETE", ok: false, status: null, time: null, url: "http://127.0.0.1:47912/x" },
+  { path: "Get Health.yml", name: "Get Health", method: "GET", ok: true, status: 200, time: 3, url: `${URL}/health` },
 ]);
 
 const run = (f = {}) => filterRun({ target: COLLECTION, entries: RUN, ...f });
@@ -181,7 +181,7 @@ test("controls cycle through their values and only the first is the default", ()
 });
 
 test("filters apply only to a Run with more than one Response", () => {
-  const f = deepFreeze({ text: "x", result: "failed", status: "4xx", sort: "name" });
+  const f = deepFreeze({ text: "x", result: "failed", status: "4xx", method: "GET", sort: "name" });
   assert.deepEqual(activeFilter(f, 2), f);
   assert.equal(activeFilter(f, 1), NO_FILTER);
   assert.equal(activeFilter(f, 0), NO_FILTER);
@@ -194,4 +194,57 @@ test("frozen inputs are not changed, and no input gives an empty list", () => {
   assert.deepEqual(filterRun({}).entries, []);
   assert.deepEqual(filterRun().visible, 0);
   assert.deepEqual(filterRun({ entries: null }).total, 0);
+});
+
+test("the method filter keeps one method, alone and with each other filter", () => {
+  assert.deepEqual(names({ method: "POST" }), ["Create Order", "slow-order"]);
+  assert.deepEqual(names({ method: "DELETE" }), ["Closed Port"]);
+  assert.deepEqual(names({ method: null }).length, 8);
+  assert.deepEqual(names({ method: "GET", result: "failed" }), ["Missing Product"]);
+  assert.deepEqual(names({ method: "POST", status: "5xx" }), ["slow-order"]);
+  assert.deepEqual(names({ method: "GET", text: "products" }), ["Best Sellers", "List Products", "Product Page", "Missing Product"]);
+  assert.deepEqual(names({ method: "POST", result: "failed" }), []);
+  const out = run({ method: "POST" });
+  assert.deepEqual([out.visible, out.total, out.filtering], [2, 8, true]);
+});
+
+test("the method values are Any, then common methods in order, then others alphabetically", () => {
+  const e = (...ms) => ms.map((method) => ({ method }));
+  assert.deepEqual(methodValues(RUN), [null, "GET", "POST", "DELETE"]);
+  assert.deepEqual(methodValues(e("OPTIONS", "GRPC", "PATCH", "GET", "GET", "QUERY", "HEAD", "PUT", "DELETE", "POST")),
+    [null, "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "GRPC", "QUERY"]);
+  assert.deepEqual(methodValues(e("get")), [null, "GET"]);
+  assert.deepEqual(methodValues([]), [null]);
+  assert.deepEqual(methodValues(undefined), [null]);
+  assert.equal(nextValue(methodValues(RUN), "DELETE"), null);
+  assert.equal(nextValue(methodValues(RUN), null), "GET");
+});
+
+test("a method absent from a new Run goes back to any, one that occurs stays", () => {
+  assert.equal(keepMethod("POST", RUN), "POST");
+  assert.equal(keepMethod("PUT", RUN), null);
+  assert.equal(keepMethod(null, RUN), null);
+  assert.equal(keepMethod("GET", []), null);
+});
+
+test("the method filter counts as a filter, clears with the others and needs more than one Response", () => {
+  assert.equal(isFiltering({ ...NO_FILTER, method: "GET" }), true);
+  assert.equal(NO_FILTER.method, null);
+  assert.equal(activeFilter({ method: "GET" }, 2).method, "GET");
+  assert.equal(activeFilter({ method: "GET" }, 1), NO_FILTER);
+  assert.deepEqual(activeFilter({ method: "GET", ...NO_FILTER, method: null }, 3), NO_FILTER);
+});
+
+test("the default control values read Any, with the control's own label in the view", () => {
+  assert.equal(LABELS[STATUSES[0]], "Any");
+  assert.equal(LABELS.anyMethod, "Any");
+  assert.equal(LABELS[RESULTS[0]], "All");
+  assert.equal(LABELS[SORTS[0]], "Run order");
+});
+
+test("the method filter does not change frozen inputs", () => {
+  const f = deepFreeze({ target: COLLECTION, entries: RUN, method: "GET", sort: "name" });
+  assert.doesNotThrow(() => filterRun(f));
+  assert.doesNotThrow(() => methodValues(RUN));
+  assert.doesNotThrow(() => keepMethod("GET", RUN));
 });
