@@ -38,7 +38,7 @@ Or by hand:
 
 1. Copy `mods/brunr/` to `~/.config/herdr-app/mods/`.
 2. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-u`.
-3. The panel is shown and hidden by its block id, so add this block to your own layout. It goes in the row that holds the tab block, on the right:
+3. Give the panel this block in your own layout, in the row that holds the tab block, on the right. Herdr may already have docked the panel at the window's right edge with a generated id. If so, replace that block with this one. `ctrl-shift-u` works with any id, and the "Brunr: Toggle" palette entry needs the id `brunr`:
    `{ "id": "brunr", "type": "block", "content": { "mod": "brunr" }, "size": { "px": 320 } }`
 4. Run `herdr-app check ~/.config/herdr-app/mods/brunr`.
 

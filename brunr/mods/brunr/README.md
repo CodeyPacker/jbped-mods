@@ -209,7 +209,7 @@ Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`)
 - Secrets stored in Bruno desktop are empty in a CLI Run (see Environments and secrets).
 - On Windows Brunr starts `bru.cmd`, so the npm global folder must be on the PATH Herdr was started with. Without it the panel shows the missing CLI notice.
 - Bruno desktop cannot be told to open a specific Request, so "Open Bruno" only starts the app. Brunr looks for it at `<home>/AppData/Local/Programs/Bruno/Bruno.exe` on Windows, `/Applications/Bruno.app` on macOS and `bruno` on the PATH elsewhere.
-- `"place": "right"` did not dock the panel by itself on the Herdr version tested, which is why the page's Install adds a layout block.
+- `"place": "right"` is not enough to place the panel. On the Herdr version tested, the shipped `main` layout did not dock it, and a personal layout docked it at the window root, full height, with a generated id. The page's Install therefore adds a block with the id `brunr`. `ctrl-shift-u` finds the block by its mod, so it works with any id. The "Brunr: Toggle" palette entry uses the id `brunr`.
 - Collections on another Machine are listed and read with `sh` and `cat`, so that Machine needs both.
 - A Global environment applies only to Collections listed in the workspace file.
 - Paths are used as the Machine gives them. A Collection on WSL is not the same Collection as the same folder seen from Windows.

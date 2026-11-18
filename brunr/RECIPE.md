@@ -141,7 +141,7 @@ Facts of Herdr that a fresh build gets wrong:
 - `fs` reads are refused outside the granted roots (the home folder). `readTextFile` reads anywhere. List a Collection with `fs` first and fall back to one `exec` listing.
 - Work a popup starts in the turn that closes it never runs, and its `cx.timer.after` never fires. A popup passes its choice through shared state (`brunr.request`) and the panel takes it the next time it draws.
 - Only Herdr moves the keyboard off a terminal, one `pane.go` at a time. The key's pass-through copy asks the panel to step right every 150ms, at most 8 times, until the panel's `focus` command arrives.
-- `"place": "right"` did not dock the panel on the Herdr version tested, so the layout block above is what places it. The palette toggle and the hide key find the block by its id `brunr` and by its mod.
+- `"place": "right"` is not enough to place the panel. On the Herdr version tested, the shipped `main` layout did not dock it, and a personal layout docked it at the window root, full height, with a generated id. The layout block above is what places it, and it replaces a block Herdr added. The open and hide key finds the block by its mod, so it works with any id. The palette toggle uses the id `brunr`.
 - A hidden panel hears no commands, which is why the key opens through `mod.open`.
 - localStorage is kept by Herdr in store files under `data/brunr/`. The cleanup of `run-*.json` and `run-*.log` leaves that file alone.
 
