@@ -106,3 +106,20 @@ _Avoid_: execution, send, test run
 **Response**:
 What one Request returned in a Run: status, headers, body, timing, and its test results.
 _Avoid_: result, output
+
+### Gitr
+
+**Gitr**:
+The mod that shows one Repo's Branches and Worktrees on one Machine, with the spaces working on them, and acts on them.
+
+**Worktree**:
+A linked worktree of a Repo on one Machine, in its own directory apart from the Main checkout. The Main checkout is not a Worktree.
+_Avoid_: checkout, working copy
+
+**Branch**:
+A local branch of a Repo on one Machine, or a remote branch that no local branch tracks. It is checked out in the Main checkout, in one Worktree, or nowhere.
+_Avoid_: ref, head
+
+**Occupied**:
+A Main checkout or Worktree is Occupied by each space whose first terminal is in its directory. A space occupies one of them at most.
+_Avoid_: active, in use, open
