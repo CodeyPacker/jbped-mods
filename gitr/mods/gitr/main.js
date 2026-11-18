@@ -6,7 +6,7 @@ import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { checking, props, closeOverlay, notify, theme, spaces, panes, focused } from "herdr";
 import { arrange, act, KEYS, LABELS, mkey } from "./model.js";
 import { resolveRepo } from "./repos.js";
-import { readRepo } from "./gitread.js";
+import { readRefs, readStatuses } from "./gitread.js";
 import { runEffects } from "./effects.js";
 import { makeSource } from "./source.js";
 import { loadSettings, loadState, makeSaver, emptyState } from "./store.js";
@@ -57,6 +57,13 @@ function bindHomeEnd(cx) {
   } catch (e) { console.log(`gitr: home and end not bound: ${e?.message ?? e}`); }
 }
 
+const flatPath = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+// `dir` is `root` or inside it. Drive paths compare without case.
+const under = (dir, root) => {
+  let d = flatPath(dir), r = flatPath(root);
+  if (/^[A-Za-z]:/.test(r)) { d = d.toLowerCase(); r = r.toLowerCase(); }
+  return d === r || d.startsWith(r + "/");
+};
 const errText = (e) => String(e?.message ?? e ?? "").trim() || "git failed";
 
 export default class Gitr extends View {
@@ -79,6 +86,8 @@ export default class Gitr extends View {
     this.busy = {};
     this.sel = null;
     this.selIndex = 0;
+    this.workspaces = [];  // Wranglr's Workspaces
+    this.workspace = null; // the Workspace of the space Gitr opened in, when that space is in no Repo
     this.ask = null;       // an Ask from act, or { kind: "picker", which, items }
     this.askAt = 0;
     this.ticks = {};
@@ -111,6 +120,7 @@ export default class Gitr extends View {
       this.sort = this.state.sort;
       this.remotesOpen = this.state.remotesOpen;
       this.repos = await this.source.repos().catch(() => []);
+      this.workspaces = await this.source.workspaces().catch(() => []);
       const p = props() ?? {};
       let repo = null, machine = null;
       if (p.repo) {
@@ -120,7 +130,15 @@ export default class Gitr extends View {
         const f = focused(), ps = panes();
         const s = spaces().find((x) => x.id === f?.space);
         const dir = s ? place(s, ps) : null;
-        const r = dir ? await resolveRepo(dir, s.machine ?? null) : null;
+        // A directory inside a known Main checkout needs no git call. The deepest one wins.
+        const mk0 = mkey(s?.machine ?? null), d0 = dir ? flatPath(dir) : null;
+        const known = d0 ? this.repos.filter((x) => x.on?.[mk0] && under(d0, x.on[mk0])).sort((a, b) => b.on[mk0].length - a.on[mk0].length)[0] : null;
+        const r = known ? { identity: known.identity, name: known.name, main: known.on[mk0] } : dir ? await resolveRepo(dir, s.machine ?? null) : null;
+        // In no Repo: a space in a Workspace home picks among that Workspace's Repos.
+        if (!r && d0) {
+          const ws = this.workspaces.filter((w) => w.homes[mk0] && under(d0, w.homes[mk0])).sort((a, b) => b.homes[mk0].length - a.homes[mk0].length)[0];
+          if (ws) { this.workspace = ws; this.machine = s.machine ?? null; }
+        }
         if (r) {
           machine = s.machine ?? null;
           repo = this.repos.find((x) => x.identity === r.identity) ?? { identity: r.identity, name: r.name, on: {} };
@@ -174,10 +192,11 @@ export default class Gitr extends View {
   async show(repo, machine, cx) {
     this.repo = repo;
     this.machine = machine;
-    this.git = null;
+    // The last known list shows at once. The read replaces it.
+    this.git = this.state.last?.[`${mkey(machine)}\u0000${repo.identity}`] ?? null;
     this.readError = null;
     this.reachable = true;
-    this.loading = true;
+    this.loading = !this.git;
     this.sel = null; this.selIndex = 0;
     this.redraw(cx);
     await this.read(cx);
@@ -188,12 +207,31 @@ export default class Gitr extends View {
     const main = this.repo.on?.[mkey(this.machine)];
     try {
       if (!main) throw new Error(`${this.repo.name} has no Main checkout on ${machineName(mkey(this.machine))}`);
-      const git = await readRepo(main, this.machine);
+      const n = this.reads = (this.reads ?? 0) + 1;
+      const key = this.lastKey(), machine = this.machine;
+      // Refs first: the list is right in a few seconds. Change counts follow, one checkout at a time,
+      // because a status takes seconds per checkout on a slow disk. Until then the last counts stay.
+      const old = new Map((this.git?.checkouts ?? []).map((c) => [c.path, c]));
+      let git = await readRefs(main, machine);
+      if (n !== this.reads) return;
+      git = { ...git, checkouts: git.checkouts.map((c) => {
+        const o = old.get(c.path);
+        return o && !c.prunable ? { ...c, changes: o.changes, tracked: o.tracked } : c;
+      }) };
       this.git = git;
       this.reachable = true;
       this.readError = null;
-      this.state.last = { ...this.state.last, [this.lastKey()]: git };
+      this.loading = false;
+      this.redraw(cx);
+      await readStatuses(git, machine, (path, st) => {
+        if (n !== this.reads) return;
+        this.git = { ...this.git, checkouts: this.git.checkouts.map((c) => (c.path === path ? { ...c, ...st } : c)) };
+        this.redraw(cx);
+      });
+      if (n !== this.reads) return;
+      this.state.last = { ...this.state.last, [key]: this.git };
       this.save();
+      return;
     } catch (e) {
       this.readError = errText(e);
       const last = this.state.last[this.lastKey()] ?? null;
@@ -330,7 +368,11 @@ export default class Gitr extends View {
     }
     const fill = () => {
       if (this.ask?.kind !== "picker") return;
-      this.ask.items = this.repos.map((r) => ({ id: r.identity, label: r.name, detail: r.identity }));
+      // The Workspace's Repos first when Gitr opened in a Workspace space. Each Repo names its Workspaces, so typing one filters to it.
+      const inWs = new Set(this.workspace?.repos ?? []);
+      const names = (id) => (this.workspaces ?? []).filter((w) => w.repos.includes(id)).map((w) => w.name);
+      const all = this.repos.map((r) => ({ id: r.identity, label: r.name, detail: [...names(r.identity), r.identity].join(" · "), first: inWs.has(r.identity) }));
+      this.ask.items = [...all.filter((x) => x.first), ...all.filter((x) => !x.first)];
       this.askAt = Math.max(0, this.ask.items.findIndex((it) => it.id === this.repo?.identity));
     };
     fill();
@@ -432,6 +474,7 @@ export default class Gitr extends View {
     const machines = Object.keys(this.repo?.on ?? {});
     return h_flex().h(26).flex_none().px(4).gap(8).items_center()
       .child(div().flex_none().text_size(14).font_semibold().child("Gitr"))
+      .when(!!this.workspace, (e) => e.child(div().flex_none().text_color(t.muted).child(this.workspace?.name ?? "")))
       .when(!!this.repo, (e) => e.child(h_flex().id("gitr-repo").flex_none().gap(4).px(6).py(2).rounded(5).items_center().cursor_pointer()
         .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.perform({ type: "repo" }, cx))
         .child(div().text_color(t.foreground).child(this.repo?.name ?? ""))
@@ -563,7 +606,7 @@ export default class Gitr extends View {
     if (ask.kind === "picker") {
       const items = this.pickItems();
       this.askAt = Math.max(0, Math.min(this.askAt, items.length - 1));
-      return panel.child(head.child(ask.which === "repo" ? "Switch Repo" : "Switch Machine"))
+      return panel.child(head.child(ask.which === "machine" ? "Switch Machine" : this.workspace ? `${this.workspace.name}: pick a Repo` : "Switch Repo"))
         .child(h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(8).border_1().border_color(t.accent).bg(t.background)
           .child(svg(ICON("search")).size(14).flex_none().text_color(t.dim))
           .child(Input.new(this.pickInput).flex_1().h_full().text_size(12.8).text_color(t.foreground)))

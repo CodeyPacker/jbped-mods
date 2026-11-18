@@ -65,6 +65,10 @@ In a question: `up` and `down` move, `space` ticks, `a` ticks all or none in the
 
 Gitr uses Wranglr when a `wranglr` block is in the shown layout and Wranglr publishes its Repos.
 
+Workspaces: Gitr reads Wranglr's Workspaces from `wranglr.json`. Opened from a space in a Workspace home, which is in no Repo, it shows the Workspace's name and a Repo picker with that Workspace's Repos first. In every Repo picker a Repo names its Workspaces, so typing a Workspace's name filters to its Repos. Gitr still shows one Repo at a time.
+
+Reading: the last known list shows at once. Branches and Worktrees are read again in a few seconds, then each checkout's change count arrives on its own, because `git status` can take seconds per checkout on a slow disk.
+
 | | With Wranglr | Standalone |
 |---|---|---|
 | Repos | Wranglr's Repo groups and Workspaces | the Repos of the open spaces |

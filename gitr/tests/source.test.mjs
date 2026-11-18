@@ -3,7 +3,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { reset, world, runCalls, overlays, sharedCalls } from "herdr";
 import { join } from "node:path";
-import { makeSource } from "../mods/gitr/source.js";
+import { makeSource, parseWorkspaces } from "../mods/gitr/source.js";
 import { g, commit, tmpDir, repo } from "./gitutil.mjs";
 
 beforeEach(() => reset());
@@ -156,4 +156,15 @@ test("standalone: the same Repo on two Machines is one entry with two paths", as
 
 test("standalone: no spaces gives no Repos", async () => {
   assert.deepEqual(await makeSource().repos(), []);
+});
+
+test("parseWorkspaces: a set home wins, else the Repos' shared parent, and bad text gives none", () => {
+  const repos = [
+    { identity: "h/o/api", name: "api", on: { "": "C:/dev/farm/api", wsl: "/mnt/c/dev/farm/api" } },
+    { identity: "h/o/web", name: "web", on: { "": "C:/dev/farm/web", wsl: "/mnt/c/dev/farm/web" } },
+  ];
+  const text = JSON.stringify({ workspaces: [{ name: "Farm", repos: ["h/o/api", "h/o/web"], on: { wsl: { home: "/srv/farm/" } } }] });
+  assert.deepEqual(parseWorkspaces(text, repos), [{ name: "Farm", repos: ["h/o/api", "h/o/web"], homes: { wsl: "/srv/farm", "": "C:/dev/farm" } }]);
+  assert.deepEqual(parseWorkspaces("{ nope", repos), []);
+  assert.deepEqual(parseWorkspaces(JSON.stringify({}), repos), []);
 });

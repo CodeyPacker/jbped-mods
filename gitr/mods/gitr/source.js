@@ -1,6 +1,6 @@
 // Where Gitr's Repos come from and how it starts a space or a Worktree: through Wranglr when it is in the
 // shown layout, else by itself and the shipped worktree mod.
-import { layout, shared, setShared, spaces, panes, run, openOverlay } from "herdr";
+import { layout, shared, setShared, spaces, panes, run, openOverlay, readTextFile, appHome } from "herdr";
 import { makeResolver } from "./repos.js";
 
 const mkey = (machine) => machine ?? "";
@@ -20,6 +20,37 @@ function dirOf(space, paneList) {
     if (p) return p.cwd;
   }
   return space.folder || null;
+}
+
+const flat = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+
+// The deepest directory that holds every path, or null when they share none below the root.
+function commonParent(paths) {
+  const parts = paths.map((p) => flat(p).split("/"));
+  if (!parts.length) return null;
+  const out = [];
+  for (let i = 0; i < parts[0].length - 1 && parts.every((x) => x.length - 1 > i && x[i] === parts[0][i]); i++) out.push(parts[0][i]);
+  const dir = out.join("/");
+  return dir && !/^[A-Za-z]:$/.test(dir) ? dir : null;
+}
+
+/** Wranglr's Workspaces from the text of `wranglr.json`: { name, repos: [identity], homes: { [mkey]: dir } }.
+ *  A home not set in the file is the Repos' shared parent on that Machine. Pure. */
+export function parseWorkspaces(text, repos) {
+  let cfg;
+  try { cfg = JSON.parse(text ?? ""); } catch { return []; }
+  const byId = new Map((repos ?? []).map((r) => [r.identity, r]));
+  return (Array.isArray(cfg?.workspaces) ? cfg.workspaces : []).filter((w) => w && typeof w.name === "string" && Array.isArray(w.repos)).map((w) => {
+    const homes = {};
+    const mks = new Set(Object.keys(w.on ?? {}));
+    for (const id of w.repos) for (const mk of Object.keys(byId.get(id)?.on ?? {})) mks.add(mk);
+    for (const mk of mks) {
+      const set = w.on?.[mk]?.home;
+      const home = typeof set === "string" && set ? flat(set) : commonParent(w.repos.map((id) => byId.get(id)?.on?.[mk]).filter(Boolean));
+      if (home) homes[mk] = home;
+    }
+    return { name: w.name, repos: w.repos.filter((id) => typeof id === "string"), homes };
+  });
 }
 
 /** `settings`: the current Gitr settings, or a function returning them. Only the standalone source reads `run` from it. */
@@ -54,6 +85,12 @@ export function makeSource({ settings } = {}) {
         out.set(r.identity, e);
       });
       return [...out.values()];
+    },
+    /** Wranglr's Workspaces. None without Wranglr. */
+    async workspaces() {
+      if (source.kind() !== "wranglr") return [];
+      const text = await readTextFile(`${appHome()}/wranglr.json`).catch(() => null);
+      return text ? parseWorkspaces(text, view().repos) : [];
     },
     async startSpace({ repo, machine = null, dir }) {
       if (source.kind() === "wranglr") { send({ type: "start", repo: identityOf(repo), machine, folder: dir }); return; }

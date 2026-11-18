@@ -97,8 +97,8 @@ async function statusOf(path, machine) {
   }
 }
 
-/** The Repo whose Main checkout is `main`, on `machine`. Throws with git's message when it cannot be read. */
-export async function readRepo(main, machine = null) {
+/** The Repo without its change counts (`changes` and `tracked` are null): two fast git calls. Throws with git's message. */
+export async function readRefs(main, machine = null) {
   const [wt, refs, def] = await Promise.all([
     git(["worktree", "list", "--porcelain"], { cwd: main, machine }),
     git(["for-each-ref", `--format=${REF_FORMAT}`, "refs/heads", "refs/remotes"], { cwd: main, machine }),
@@ -106,18 +106,34 @@ export async function readRepo(main, machine = null) {
   ]);
   if (wt.code !== 0) throw new Error(said(wt));
   if (refs.code !== 0) throw new Error(said(refs));
-  const list = parseWorktrees(wt.stdout);
   const { branches, remotes } = parseRefs(refs.stdout);
-  const checkouts = list.filter((c) => !c.bare);
-  const states = await pool(checkouts, LIMIT, (c) => (c.prunable ? { changes: null, tracked: null } : statusOf(c.path, machine)));
+  const checkouts = parseWorktrees(wt.stdout).filter((c) => !c.bare);
   return {
     main: slashes(main),
     defaultBranch: def,
     checkouts: checkouts.map((c, i) => ({
       path: c.path, main: i === 0, branch: c.branch, head: c.head, detached: c.detached,
-      prunable: c.prunable, locked: c.locked, ...states[i],
+      prunable: c.prunable, locked: c.locked, changes: null, tracked: null,
     })),
     branches, remotes,
     at: Date.now(),
   };
+}
+
+/** The change counts of each checkout, the Main checkout first. `onEach(path, { changes, tracked })` as each answers.
+ *  A status takes seconds on a slow disk, so the caller shows the list first. */
+export async function readStatuses(state, machine = null, onEach = () => {}) {
+  await pool(state.checkouts.filter((c) => !c.prunable), LIMIT, async (c) => {
+    const st = await statusOf(c.path, machine);
+    onEach(c.path, st);
+    return st;
+  });
+}
+
+/** The Repo whose Main checkout is `main`, on `machine`, with change counts. Throws with git's message when it cannot be read. */
+export async function readRepo(main, machine = null) {
+  const state = await readRefs(main, machine);
+  const got = new Map();
+  await readStatuses(state, machine, (path, st) => got.set(path, st));
+  return { ...state, checkouts: state.checkouts.map((c) => ({ ...c, ...(got.get(c.path) ?? {}) })), at: Date.now() };
 }
