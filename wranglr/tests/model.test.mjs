@@ -476,6 +476,7 @@ test("plus in worktree mode starts in a new worktree under the Repo, and needs a
   assert.deepEqual(r.effects, [{
     type: "start", machine: null, folder: "/home/me/front/.worktrees/feature/46382-x", argv: null, name: null,
     worktree: { main: "/home/me/front", branch: "feature/46382-x", path: "/home/me/front/.worktrees/feature/46382-x", from: null },
+    place: { group: "repo:" + FRONT, sub: null },
   }]);
   const abs = config({ repos: MULTI, settings: { worktrees: "/wt/{branch}" } });
   assert.equal(run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: null, branch: "b" }, w, abs, s).effects[0].folder, "/wt/b");
@@ -591,8 +592,12 @@ test("worktree plus works for a Workspace-only Repo and a dismissed Repo group, 
   assert.deepEqual(r.effects, [{
     type: "start", machine: null, folder: "/home/me/dev/arden/backend/.worktrees/fix", argv: null, name: null,
     worktree: { main: "/home/me/dev/arden/backend", branch: "fix", path: "/home/me/dev/arden/backend/.worktrees/fix", from: null },
+    place: { group: "repo:" + BACK, sub: null },
   }]);
-  assert.deepEqual(r.state.pending.map((p) => [p.group, p.machine, p.folder]), [["repo:" + BACK, null, "/home/me/dev/arden/backend/.worktrees/fix"]]);
+  assert.deepEqual(r.state.pending, [], "nothing is pending while git makes the worktree");
+  const made = { type: "made", group: "repo:" + BACK, sub: null, machine: null, folder: "/home/me/dev/arden/backend/.worktrees/fix" };
+  assert.deepEqual(run({ ...made, ok: false }, w, c, r.state).state.pending, [], "a worktree that failed leaves nothing pending");
+  assert.deepEqual(run({ ...made, ok: true }, w, c, r.state).state.pending.map((p) => [p.group, p.machine, p.folder]), [["repo:" + BACK, null, "/home/me/dev/arden/backend/.worktrees/fix"]]);
   const dismissed = { ...emptyState(), seen: { [FRONT]: { name: "frontend", on: {} } }, dismissed: [FRONT] };
   const listed = config({ repos: MULTI, workspaces: [{ name: "W", repos: [FRONT], machines: [], on: {} }] });
   const wsl = run({ type: "plus", group: "repo:" + FRONT, sub: null, mode: "worktree", machine: "wsl", branch: "b" }, w, listed, dismissed);

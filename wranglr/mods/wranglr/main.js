@@ -174,6 +174,7 @@ export default class Wranglr extends View {
     this.resolver = makeResolver();
     this.saver = makeSaver();
     this.resolving = new Set();
+    this.making = []; // worktrees being made for a "+": { group, sub, branch, machine, folder, done }
     this.tree = null;
     this.loaded = false;
     this.syncedKey = null;
@@ -235,6 +236,15 @@ export default class Wranglr extends View {
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
     this.tick(cx);
+    if (this.pruneMaking()) cx.notify();
+  }
+
+  // A "making" row goes when its worktree failed, when its space is in the list, or a while after space.new.
+  pruneMaking() {
+    const before = this.making.length;
+    const waiting = (m) => (this.state.pending ?? []).some((p) => p.group === m.group && p.folder === m.folder && mkey(p.machine) === mkey(m.machine));
+    this.making = this.making.filter((m) => m.done === null || (waiting(m) && Date.now() - m.done < 8000));
+    return this.making.length !== before;
   }
 
   // Runs an action an overlay sent, then a sync when the World's inputs changed.
@@ -336,6 +346,16 @@ export default class Wranglr extends View {
       this.state = state;
       this.saver.save(state);
     }
+    // A worktree takes git a few seconds (a fetch, a checkout): its Group shows a row for it meanwhile.
+    for (const e of effects)
+      if (e.type === "start" && e.worktree && e.place)
+        this.making.push({ group: e.place.group, sub: e.place.sub, branch: e.worktree.branch, machine: e.machine ?? null, folder: e.folder, done: null });
+    if (action.type === "made") {
+      const m = this.making.find((x) => x.done === null && x.folder === action.folder && mkey(x.machine) === mkey(action.machine));
+      if (m && action.ok) m.done = Date.now();
+      else if (m) this.making = this.making.filter((x) => x !== m);
+    }
+    this.pruneMaking();
     // The file is read again only every few seconds: the new setting applies now.
     for (const e of effects)
       if (e.type === "setting" || e.type === "settings")
@@ -1053,6 +1073,17 @@ export default class Wranglr extends View {
     });
   }
 
+  // A row for each worktree being made in this Group: the space is not there until git is done.
+  makingRows(group, sub, indent, d) {
+    const { t } = d;
+    return this.making.filter((m) => m.group === group && (m.sub ?? null) === sub).map((m, i) =>
+      h_flex().id(`making-${group}-${sub ?? ""}-${i}`).h(30).px(8).pl(indent + 8).gap(9).flex_none().items_center().rounded(8).text_color(t.muted)
+        .tooltip(m.folder)
+        .child(h_flex().w(18).flex_none().justify_center().child(svg(icon("spinner")).size(12).flex_none().text_color(t.working).spin(900)))
+        .child(div().flex_1().min_w(0).truncate().child(`Making worktree ${m.branch}…`))
+        .when(Boolean(m.machine), (el) => el.child(this.chip(m.machine, t))));
+  }
+
   // A space's tabs under its row. A click shows the space at that tab.
   tabRows(r, indent, d) {
     const { t, live } = d;
@@ -1230,11 +1261,13 @@ export default class Wranglr extends View {
       out.push(this.groupHead(g, groups[i + 1]?.id ?? null, d));
       if (g.folded) return;
       this.rows(out, g.rows, { group: g.id, sub: null }, 0, d, `g:${g.id}`);
+      out.push(...this.makingRows(g.id, null, 0, d));
       for (const s of g.subgroups) {
         const key = `s:${g.id}/${s.id}`;
         this.nav.push({ key, index: out.length, kind: "sub", group: g.id, sub: s.id, folded: s.folded, parent: `g:${g.id}` });
         out.push(this.subHead(g, s, d));
         if (!s.folded) this.rows(out, s.rows, { group: g.id, sub: s.id }, 16, d, key);
+        if (!s.folded) out.push(...this.makingRows(g.id, s.id, 16, d));
       }
     });
     // A line between the Groups and the spaces in no Group.
@@ -1573,8 +1606,8 @@ export default class Wranglr extends View {
       .child(h_flex().items_center().child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(title))
         .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
       // A scroll area has no height of its own in a dialog, which is as tall as its content: it is given one.
-      .when(!need, (el) => el.children(fields))
-      .when(Boolean(need), (el) => el.child(v_flex().id(`${id}-fields`).h(Math.min(most, need)).flex_none().gap(14).pr(14).overflow_y_scrollbar()
+      .when(!need || need <= most, (el) => el.children(fields))
+      .when(Boolean(need) && need > most, (el) => el.child(v_flex().id(`${id}-fields`).h(Math.min(most, need)).flex_none().gap(14).pr(14).overflow_y_scrollbar()
         .children(fields.map((f) => div().flex_none().child(f)))))
       .child(h_flex().flex_none().pt(4).gap(8).justify_end()
         .child(button(`${id}-cancel`, "Cancel", false, () => closeOverlay(p.overlay)))
@@ -1695,7 +1728,9 @@ export default class Wranglr extends View {
       for (const mk of this.known) fields.push(this.field(t, `Workspace home on ${mk === "" ? "this computer" : mk}`, this.textInput(t, `home:${mk}`), `home:${mk}`));
     const kind = { workspace: "Workspace", repo: "Repo", custom: "Group" }[this.kind] ?? "Group";
     const bad = this.bad.settings ? [div().text_size(11).text_color(t.blocked).child(`These ${this.bad.settings}.`)] : [];
-    return this.dialogFrame(t, "wranglr-group", `${kind} settings: ${p.group?.name ?? ""}`, [...fields, ...bad], () => this.saveGroup());
+    // About what the fields take: a Workspace has a home for each Machine, which can be more than the window holds.
+    const need = fields.length * 82 + 22 * (Object.keys(this.bad).length + 1);
+    return this.dialogFrame(t, "wranglr-group", `${kind} settings: ${p.group?.name ?? ""}`, [...fields, ...bad], () => this.saveGroup(), need);
   }
 
   // Asks before closing a Group's spaces. Enter confirms, Esc cancels.

@@ -810,9 +810,17 @@ function plusRepo(a, c, group, mode) {
     folder = cleanPath(isAbsolutePath(filled) ? filled : joinPath(main, filled));
     worktree = { main, branch: a.branch, path: folder, from: c.config.repos?.[identity]?.from || null };
   }
-  c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
   // Always remembered, so the new space shows in this Group at once instead of loose until git answers.
+  // A worktree is remembered once it is made (`made`): git can take longer than a pending entry lasts.
+  if (worktree) return c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree, place: { group: a.group, sub: a.sub ?? null } });
+  c.effects.push({ type: "start", machine, folder, argv: c.config.settings.agent, name: null, worktree });
   addPending(c, a, { machine, folder });
+}
+
+// The worktree of a `plus` was made (or not): its space is started next.
+function doMade(a, c) {
+  if (!a.ok || typeof a.group !== "string" || typeof a.folder !== "string") return;
+  addPending(c, { group: a.group, sub: a.sub ?? null }, { machine: a.machine ?? null, folder: a.folder });
 }
 
 function isClaude(argv) {
@@ -938,7 +946,7 @@ function doTerminalsBack(a, c) {
 
 const HANDLERS = {
   sync: doSync, move: doMove, drop: doDrop, dropGroup: doDropGroup,
-  select: doSelect, next: doStep, prev: doStep, plus: doPlus, start: doStart,
+  select: doSelect, next: doStep, prev: doStep, plus: doPlus, made: doMade, start: doStart,
   fold: doFold, foldFocused: doFoldFocused, sort: doSort, settings: doSettings, groupSettings: doGroupSettings,
   addCustom: doAddCustom, renameGroup: doRenameGroup, removeCustom: doRemoveCustom,
   addSub: doAddSub, renameSub: doRenameSub, removeSub: doRemoveSub,

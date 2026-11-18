@@ -28,15 +28,20 @@ test("start without a worktree opens a space, always naming the Machine and leav
   assert.equal(execCalls.length, 0);
 });
 
-test("a worktree start makes the worktree before space.new", async () => {
-  await runEffects([{ type: "start", machine: "wsl", folder: "/m/.worktrees/b", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/.worktrees/b", from: null } }], noDeps);
+test("a worktree start makes the worktree, says so, then runs space.new", async () => {
+  const sent = [];
+  await runEffects([{ type: "start", machine: "wsl", folder: "/m/.worktrees/b", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/.worktrees/b", from: null }, place: { group: "repo:x", sub: "s" } }],
+    { ...noDeps, dispatch: (a) => sent.push({ ...a, spaces: runCalls.length }) });
   assert.ok(order.some((c) => c.startsWith("git worktree add")), "git made the worktree");
+  assert.deepEqual(sent, [{ type: "made", ok: true, group: "repo:x", sub: "s", machine: "wsl", folder: "/m/.worktrees/b", spaces: 0 }]);
   assert.deepEqual(runCalls, [{ name: "space.new", args: { folder: "/m/.worktrees/b", machine: "wsl" } }]);
 });
 
 test("a failed worktree add reports git's error and opens no space", async () => {
   fake.exec = (_cmd, args) => Promise.resolve(args[0] === "worktree" ? { code: 128, stdout: "", stderr: "fatal: '/m/w' already exists\n" } : { code: 1, stdout: "", stderr: "" });
-  await runEffects([{ type: "start", machine: null, folder: "/m/w", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/w", from: null } }, { type: "select", id: "s1" }], noDeps);
+  const sent = [];
+  await runEffects([{ type: "start", machine: null, folder: "/m/w", argv: null, name: null, worktree: { main: "/m", branch: "b", path: "/m/w", from: null }, place: { group: "repo:x", sub: null } }, { type: "select", id: "s1" }], { ...noDeps, dispatch: (a) => sent.push(a) });
+  assert.deepEqual(sent, [{ type: "made", ok: false, group: "repo:x", sub: null, machine: null, folder: "/m/w" }]);
   assert.deepEqual(runCalls, [{ name: "space.select", args: { id: "s1" } }]);
   assert.equal(notes.length, 1);
   assert.equal(notes[0].level, "error");

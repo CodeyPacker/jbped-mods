@@ -24,7 +24,12 @@ async function runOne(e, { dispatch, askName, saveSetting, saveSettings, saveGro
     }
     case "rename": run("space.rename", { id: e.id, name: e.name }); return;
     case "start": {
-      if (e.worktree && !(await makeWorktree(e.worktree, e.machine ?? null))) return;
+      if (e.worktree) {
+        const made = await makeWorktree(e.worktree, e.machine ?? null);
+        // Said either way: the model files the space that comes next, and the list drops its "making" row.
+        dispatch({ type: "made", ok: made, group: e.place?.group ?? null, sub: e.place?.sub ?? null, machine: e.machine ?? null, folder: e.folder });
+        if (!made) return;
+      }
       const args = {};
       if (e.folder) args.folder = e.folder;
       // Always say which Machine: without it Herdr starts the space on the focused space's Machine. "" is this computer.
