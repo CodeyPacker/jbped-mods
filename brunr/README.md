@@ -37,14 +37,14 @@ Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/jbped/
 Or by hand:
 
 1. Copy `mods/brunr/` to `~/.config/herdr-app/mods/`.
-2. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-u`.
-3. Give the panel this block in your own layout, in the row that holds the tab block, on the right. Herdr may already have docked the panel at the window's right edge with a generated id. If so, replace that block with this one. `ctrl-shift-u` works with any id, and the "Brunr: Toggle" palette entry needs the id `brunr`:
+2. Merge `keys.json` into `~/.config/herdr-app/keys.json`. It binds `ctrl-shift-u` to show and hide the panel.
+3. Give the panel this block in your own layout, in the row that holds the tab block, on the right. Herdr may already have docked the panel at the window's right edge with a generated id. If so, replace that block with this one. `ctrl-shift-u` and the "Brunr: Toggle" palette entry need the id `brunr`:
    `{ "id": "brunr", "type": "block", "content": { "mod": "brunr" }, "size": { "px": 320 } }`
 4. Run `herdr-app check ~/.config/herdr-app/mods/brunr`.
 
 ## Use
 
-`ctrl-shift-u` shows the panel and gives it the keyboard. Click selects a row and double-click runs a Request or folds a folder. Right-click opens a row's menu, the play button runs a folder or Collection, and the chip on a Collection picks its Environment.
+`ctrl-shift-u` shows or hides the panel. To use the keys below, click the panel, move to it with your pane keys, or run "Brunr: Keys" from the palette. Click selects a row and double-click runs a Request or folds a folder. Right-click opens a row's menu, the play button runs a folder or Collection, and the chip on a Collection picks its Environment.
 
 | Key | Action |
 |---|---|
