@@ -44,6 +44,7 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 | `ctrl-shift-pagedown` | `wranglr.next` | Next space in the list's order |
 | `ctrl-shift-pageup` | `wranglr.prev` | Previous space in the list's order |
 | `ctrl-shift-m` | `wranglr.move` | Move the focused space to a Group or Subgroup |
+| `alt-s` | `wranglr.keys` | Give the list the keyboard (see below) |
 | | `wranglr.new` | New space in the focused space's Group |
 | | `wranglr.name` | Name the focused space again |
 | | `wranglr.fold` | Fold the focused space's Group |
@@ -55,6 +56,26 @@ New spaces are named `<ticket id> <one to four words>` from their branch. When t
 | | `wranglr.group` | Open the settings of the focused space's Group |
 
 Every command is also in the palette (the `palette` mod).
+
+### Keys while the list has the keyboard
+
+`wranglr.keys` gives the list the keyboard and puts a cursor on the shown space. `pane.go` alone never stops on the list.
+
+| Key | What it does |
+|---|---|
+| `j` / `k`, or the arrows | Cursor down, up |
+| `g` / `G` | Cursor to the top, the bottom |
+| `enter` | Open the space, tab or agent and give the keyboard back. On a Group or Subgroup: fold or open it |
+| `t` | Show or hide the space's tabs |
+| `n` | New space in the cursor's Group, as its "+" starts one |
+| `f` | Herdr's picker, to find a space |
+| `c` | Fold or open the cursor's Group or Subgroup |
+| `C` | Fold every Group while one is open, else open them all |
+| `s` / `a` | The Spaces list, the Agents list |
+| `esc` or `q` | Give the keyboard back to the pane it came from |
+| `?` | Show or hide this list at the bottom of the sidebar |
+
+Herdr moves the keyboard off a terminal one pane at a time, so `wranglr.keys` steps left through the panes to reach the list. `tab` is not used: the window takes it.
 
 ## The config file
 

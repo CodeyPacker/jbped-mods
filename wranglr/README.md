@@ -17,7 +17,7 @@ A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace,
 - **Machines.** A space on another Machine shows its name. An unreachable one is dimmed, with Connect below the list.
 - **Revive.** After Herdr's core restarts, each Claude Code agent that was running is resumed in its terminal with its session.
 - **Sorts, folding and an editor file.** Recent, Kind, A-Z or Manual. Click a group's header to fold it. Each Workspace home gets a `<name>.code-workspace` file.
-- **Palette.** Every command is in the `palette` mod.
+- **Keyboard and palette.** `alt-s` gives the list the keyboard: `j`/`k` move, `enter` opens, `?` lists the rest. Every command is in the `palette` mod.
 
 ## Needs
 
@@ -49,5 +49,6 @@ Click a row to go to the space. Right-click a row, a group or "+" for its menu. 
 | `alt-1` to `alt-9` | go to the space at that position in the list |
 | `ctrl-shift-pagedown` / `ctrl-shift-pageup` | next / previous space in the list's order |
 | `ctrl-shift-m` | move the focused space to a Group or Subgroup |
+| `alt-s` | give the list the keyboard: `j`/`k` move, `enter` opens, `?` lists the keys, `esc` leaves |
 
 It works with no config file. Workspaces, the config file, every command and limits: [`mods/wranglr/README.md`](mods/wranglr/README.md).
