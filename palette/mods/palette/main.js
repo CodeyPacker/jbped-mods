@@ -220,6 +220,18 @@ export default class Palette extends View {
         .text_size(10.5).text_color(t.dim).child(p)));
   }
 
+  /** The line of key hints along the bottom: each key in the accent color, its meaning dim. */
+  legend(t) {
+    const hints = this.binding ? [["enter", "save"], ["esc", "close"]]
+      : this.asking ? [["enter", "run"], ["esc", "close"]]
+      : this.searching ? [["tab", "list"], ["ctrl-j/k", "move"], ["ctrl-d/u", "page"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]]
+      : [["j/k", "move"], ["ctrl-d/u", "page"], ["shift-↑/↓", "group"], ["s", "search"], ["enter", "run"], ["ctrl-b", "set key"], ["esc", "close"]];
+    return h_flex().flex_none().flex_wrap().gap(12).px(8).pt(8).border_t(1).border_color(t.border).text_size(11)
+      .children(hints.map(([key, what]) => h_flex().gap(4).items_center()
+        .child(div().text_color(t.accent).font_semibold().child(key))
+        .child(div().text_color(t.dim).child(what))));
+  }
+
   /** Jumps to a group: its first row selected, its heading at the top. */
   jump(head, cx) {
     const rows = this.rows(), i = rows.findIndex((r) => groupOf(r) === head);
@@ -298,7 +310,7 @@ export default class Palette extends View {
         .child(svg("mods/workspace-chrome/search.svg").size(14).flex_none().text_color(t.dim))
         .when(!!ask, (e) => e.child(div().flex_none().text_size(12.8).text_color(t.muted).child(`${ask.title} ›`)))
         .child(Input.new(this.binding ? this.bindInput : this.asking ? this.argInput : this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(ask ? "Esc" : "ctrl-b sets a key · Esc")))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
       .when(!!this.binding, (e) => e
         .child(div().px(12).pt(4).text_size(12).text_color(t.muted).child(`Key for ${this.binding?.name}${Object.keys(this.binding?.args ?? {}).length ? ` ${JSON.stringify(this.binding?.args)}` : ""}`))
         .child(div().px(12).pb(6).text_size(12).text_color(this.error ? t.ansi1 : t.dim).child(this.error ?? "Type the key and press Enter. It is saved in keys.json and works at once.")))
@@ -318,6 +330,7 @@ export default class Palette extends View {
             cx.notify(); cx.stop_propagation();
           })
           .children(visible.map(draw)))
-        : div().px(12).py(8).text_size(12).text_color(t.dim).child("No matching command")));
+        : div().px(12).py(8).text_size(12).text_color(t.dim).child("No matching command")))
+      .child(this.legend(t));
   }
 }

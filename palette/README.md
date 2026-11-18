@@ -12,6 +12,7 @@ A command palette that mods can add entries to: your entries, each mod's entries
 - **Set keys.** `ctrl-b` asks for a key for the selected entry and saves it to `keys.json`. It warns before it takes a key that is in use.
 - **Filter.** Press `s` and type to filter. Every word must match. `tab` returns to the list.
 - **Vim keys.** The palette opens on the list, where `j` and `k` move. `ctrl-j` / `ctrl-k` and `ctrl-d` / `ctrl-u` move from the search box too.
+- **Legend.** A line along the bottom lists the keys that work where the keyboard is now.
 - **Group index.** A sidebar lists the groups. Click one to jump to it.
 - **Arguments.** A command with required arguments asks for them first: a value, or a JSON object.
 

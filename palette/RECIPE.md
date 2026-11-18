@@ -8,13 +8,17 @@ A command palette that opens as a popup at the top of the window. It lists your 
 
 A popup 760px wide on `popover`, with 12px padding and a 6px gap between its parts. Top to bottom:
 
-- **Search box**, 36px high, radius 8, on `background`, with a 1px border: `accent` while the text field or a prompt has the keyboard, `border` otherwise. Left to right: a 14px search icon in `dim`, the text field (12.8px, `foreground`, placeholder "Press s to search…"), and "ctrl-b sets a key · Esc" in 11px `dim` ("Esc" alone in the two prompts below).
+- **Search box**, 36px high, radius 8, on `background`, with a 1px border: `accent` while the text field or a prompt has the keyboard, `border` otherwise. Left to right: a 14px search icon in `dim`, the text field (12.8px, `foreground`, placeholder "Press s to search…"), and "Esc" in 11px `dim`.
 - **Group index**, a 120px column on the left with a 1px `border` line on its right. One 24px label per group that has rows, 12px text, radius 5. The selected row's group is `foreground` on `hover`. The others are `dim`.
 - **List**, right of the index, at most 360px high. It holds:
   - group headings, 26px high, 11px `dim`.
   - rows, 32px high. Each row is a 28px pill with radius 6, and the selected one is on `hover`. Left to right: the title in 13px (`foreground` when selected, `muted` otherwise, cut off with an ellipsis), the mod's folder name in 11px `dim` on a mod's entry, and the key as keycaps.
   - keycaps: one box per part of the key (`ctrl-shift-t` draws `ctrl`, `shift`, `t`), 18px high, at least 18px wide, radius 4, a 1px `border` outline, 10.5px `dim` text, 3px apart.
 - With no match, the index and list give way to "No matching command" in 12px `dim`.
+- **Legend**, always last, under a 1px `border` line with 8px above its text and 8px at its sides. Key hints 12px apart in 11px, wrapping: each key in `accent` semibold, 4px, then its meaning in `dim`. It follows the keyboard:
+  - on the list: `j/k` move, `ctrl-d/u` page, `shift-↑/↓` group, `s` search, `enter` run, `ctrl-b` set key, `esc` close.
+  - in the text field: `tab` list, `ctrl-j/k` move, `ctrl-d/u` page, `enter` run, `ctrl-b` set key, `esc` close.
+  - in the argument prompt: `enter` run, `esc` close. In the key prompt: `enter` save, `esc` close.
 
 Group order: Custom, Mods, then Tab, Pane, Space, Terminal, Agent, App, Layout, Mod, Overlay, Window, then any other command prefix in alphabetical order. Inside a group, commands keep the order Herdr reports them in.
 
@@ -105,6 +109,7 @@ Entry format, for `~/.config/herdr-app/palette.json` (a JSON list) and for a `pa
 
 - `herdr-app check ~/.config/herdr-app/mods/palette` passes.
 - `mod.open {"name": "palette"}` shows the popup with the search box border in `border`, and running it again closes it.
+- The legend starts with `j/k` on open, with `tab` after `s`, and reads `enter` save, `esc` close in the key prompt.
 - `j`, `j`, `k` selects the second row. `s`, some text, `tab`, then `j` moves the selection and leaves the text unchanged.
 - With the `palette.json` above in place, the list starts with a Custom group holding "Split down" and "Open Notes".
 - A mod whose `mod.json` has a `palette` list shows its entries under Mods with the mod's folder name on each row.
