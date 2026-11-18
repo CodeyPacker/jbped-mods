@@ -57,13 +57,15 @@ export function unfoldFor({ target = null, folded = new Set(), paths = [] }) {
  * `collection`: the parsed Collection. `target`: `{ kind: "collection" }` or `{ kind, path }`.
  * `entries`: the Requests to show, in Run order: `{ path, name, method, status, ok, running? }`.
  * `planned`: the Request nodes the Run is expected to send, or null once it ended. `folded`: a Set
- * of folded folder paths.
+ * of folded folder paths. `counts`: optional folder counts by path, `{ passed, total, failed }`,
+ * that replace the counts of the listed entries (filterRun gives the whole Run's, so a filter never
+ * changes a count).
  * A folder row: `{ kind: "folder", key, path, name, depth, passed, total, failed, running, folded }`.
  * A Request row: `{ kind: "request", key, index, depth, entry }`, `index` being the entry's place.
  * A folder row stands before its first Request. When one folder's Requests are not consecutive,
  * the folder gets a new row each time it starts again, so no Request shows under the wrong folder.
  */
-export function runRows({ collection = null, target = null, entries = [], planned = null, folded = new Set() }) {
+export function runRows({ collection = null, target = null, entries = [], planned = null, folded = new Set(), counts = null }) {
   const names = index(collection);
   const base = baseOf(target);
   const plannedUnder = new Map();
@@ -103,7 +105,9 @@ export function runRows({ collection = null, target = null, entries = [], planne
     const isFolded = folded?.has?.(r.path) ?? false;
     if (isFolded) hideBelow = r.depth;
     const { listed, ...rest } = r;
-    rows.push({ ...rest, total: Math.max(listed, planned ? plannedUnder.get(r.path) ?? 0 : 0), folded: isFolded });
+    const given = counts?.get?.(r.path);
+    if (given) rows.push({ ...rest, passed: given.passed, total: given.total, failed: given.failed, folded: isFolded });
+    else rows.push({ ...rest, total: Math.max(listed, planned ? plannedUnder.get(r.path) ?? 0 : 0), folded: isFolded });
   }
   return rows;
 }

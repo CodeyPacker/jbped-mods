@@ -8,7 +8,7 @@ A side panel that lists your Bruno Collections as a tree, runs their Requests wi
 
 - **Collection tree.** Collections, folders and Requests in Bruno's sidebar order, with method badges in the Herdr theme's colours. A selected Request shows its method and URL, and a change to a Collection on this computer shows at once.
 - **Run a Request.** Double-click or press `enter`. The Response opens in a pane beside your terminal with its Response, Headers, Timeline and Tests views.
-- **Folder and Collection Runs.** After a confirmation, with a summary line, a pass or fail mark per Request and the first failure selected. Assertion and test results are listed under Tests. While the Run is in progress, the pane and the panel show how many Requests have finished and which one runs now.
+- **Folder and Collection Runs.** After a confirmation, with a summary line, a pass or fail mark per Request, the first failure selected and a list you can filter and sort. Assertion and test results are listed under Tests. While the Run is in progress, the pane and the panel show how many Requests have finished and which one runs now.
 - **Environments.** Pick one per Collection from a chip on its row. The choice is remembered, and an Environment with secret variables carries a warning.
 - **Global environments.** Pick one per Bruno workspace for all of its Collections.
 - **Other Machines.** A Collection on WSL or an ssh Machine is listed and run there. Machines get their own headings.

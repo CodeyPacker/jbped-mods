@@ -1,14 +1,16 @@
 // The Response pane, laid out like Bruno's response area: a top line with the Request, status,
 // time and size, then Response, Headers, Timeline and Tests. A folder or Collection Run lists its
-// Requests on the left, under the folders they belong to (runtree.js). Its data lives only in memory
-// (store.js) and goes when the pane closes.
+// Requests on the left, under the folders they belong to (runtree.js), with a toolbar that filters
+// and sorts them (runfilter.js). Its data lives only in memory (store.js) and goes when the pane
+// closes. The filters and sort stay in this pane copy across Runs.
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, Input, InputState } from "gpui-base";
 import { focused, panes, props, settings, theme } from "herdr";
 import * as store from "./store.js";
 import { formatSize, formatTime } from "./report.js";
 import { methodBadge } from "./panel.js";
 import { runRows, unfoldFor } from "./runtree.js";
+import { activeFilter, filterRun, keepSelection, nextValue, LABELS, NO_FILTER, RESULTS, SORTS, STATUSES } from "./runfilter.js";
 
 const MAX_TEXT = 400000;
 const PARTS = ["response", "headers", "timeline", "tests"];
@@ -25,6 +27,9 @@ export function init(self, cx) {
   self.editor = null;
   self.runId = null;
   self.folded = new Set();      // folded folder paths in the Run list, for this Run only
+  self.filter = { ...NO_FILTER };  // the toolbar's filters and sort, kept across Runs
+  self.filterInput = InputState.new({ placeholder: "Filter" });
+  self.filterInput.on("change", (_e, cx) => { setFilter(self, { text: self.filterInput.value() }); cx.notify(); });
   sync(self);
   cx.spawn(async (cx) => { for (;;) { await store.nextChange(); sync(self); cx.notify(); } });
 }
@@ -32,6 +37,8 @@ export function init(self, cx) {
 export function close(self) {
   self.editor?.release();
   self.editor = null;
+  self.filterInput?.release();
+  self.filterInput = null;
   store.clearView(self.tab);
 }
 
@@ -49,11 +56,34 @@ function sync(self) {
   if (v.id !== self.runId) { self.runId = v.id; self.folded = new Set(); }
   const list = v.result?.responses ?? [];
   const failed = list.findIndex((r) => !r.ok);
-  self.sel = failed >= 0 ? failed : 0;
+  self.sel = keepSelection(failed >= 0 ? failed : 0, shown(self).indexes);
   const show = [list[self.sel], list[failed]].filter(Boolean).map((r) => r.path);
   if (show.length) self.folded = unfoldFor({ target: v.info?.target, folded: self.folded, paths: show });
   self.part = "response";
   showBody(self);
+}
+
+/** The finished Run's list after the toolbar's filters and sort (runfilter.js). */
+function shown(self) {
+  const list = self.v?.result?.responses ?? [];
+  return filterRun({ target: self.v?.info?.target ?? null, entries: list, ...activeFilter(self.filter, list.length) });
+}
+
+/** Changes the filters or sort. A selected Request the filters hide gives way to the first shown one. */
+function setFilter(self, change) {
+  self.filter = { ...self.filter, ...change };
+  if (self.v?.kind !== "run" || self.v.state !== "done") return;
+  const sel = keepSelection(self.sel, shown(self).indexes);
+  if (sel === self.sel) return;
+  self.sel = sel;
+  const r = self.v.result?.responses?.[sel];
+  if (r) self.folded = unfoldFor({ target: self.v.info?.target, folded: self.folded, paths: [r.path] });
+  showBody(self);
+}
+
+function clearFilters(self) {
+  self.filterInput?.set_value("");
+  setFilter(self, { text: "", result: NO_FILTER.result, status: NO_FILTER.status });
 }
 
 function showBody(self) {
@@ -101,7 +131,9 @@ export function render(self) {
     if (info.kind === "request" || !p) return root.child(topLine(t, info.label, info.method, info.url, null)).child(waiting);
     // Requests are listed as they finish. Request rows do nothing until the Run ends and the report is read.
     const entries = p.running ? [...p.finished, { ...p.running, running: true, method: null }] : p.finished;
-    return root.child(progressLine(t, p)).child(withList(self, t, listRows(self, t, entries, info.planned ?? null, false), waiting));
+    // The live list is unfiltered in Run order: pass and fail are not known until the Run ends.
+    return root.child(progressLine(t, p)).when(p.total > 1, (el) => el.child(toolbar(self, t, false)))
+      .child(withList(self, t, listRows(self, t, entries, info.planned ?? null, false), waiting));
   }
   const result = v.result;
   const list = result.responses ?? [];
@@ -112,9 +144,44 @@ export function render(self) {
         .font_family(mono()).text_size(11.5).text_color(t.foreground).children(lines(result.message).map((l) => div().min_h(16).child(l))));
   }
   const many = info.kind !== "request" || list.length > 1;
-  const detail = list[self.sel] ? responseView(self, t, list[self.sel]) : center(t, "No Request was sent.");
+  const f = shown(self);
+  const none = list.length > 0 && f.visible === 0;
+  const detail = list[self.sel] ? responseView(self, t, list[self.sel]) : center(t, none ? "No Requests match." : "No Request was sent.");
   if (!many) return root.child(detail);
-  return root.child(summaryLine(t, result.summary)).child(withList(self, t, listRows(self, t, list, null, true), detail));
+  const rows = none ? [noMatch(self, t)] : listRows(self, t, f.entries, null, true, f);
+  return root.child(summaryLine(t, result.summary, f)).when(list.length > 1, (el) => el.child(toolbar(self, t, true))).child(withList(self, t, rows, detail));
+}
+
+/**
+ * The row above the Run list: the text filter, then the result, status and sort controls, each
+ * cycling on click. A control off its first value is drawn in `accent`. The text field gives way
+ * first when the pane is narrow. While a Run is in progress it is drawn disabled.
+ */
+function toolbar(self, t, on) {
+  const control = (key, values) => {
+    const value = self.filter[key];
+    const active = on && value !== values[0];
+    return div().id(`brunr-filter-${key}`).h(24).flex_none().px(8).flex().items_center().rounded(5).border_1().whitespace_nowrap().text_size(11.5)
+      .border_color(active ? t.accent : t.border).text_color(!on ? t.dim : active ? t.accent : t.muted)
+      .when(on, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { setFilter(self, { [key]: nextValue(values, value) }); cx.notify(); }))
+      .child(LABELS[value]);
+  };
+  const text = self.filter.text;
+  const field = on && self.filterInput
+    ? Input.new(self.filterInput).w_full().h(24).px(8).items_center().rounded(5).border(1).border_color(text.trim() ? t.accent : t.border).bg(t.background).text_color(t.foreground).text_size(11.5)
+    : div().w_full().h(24).px(8).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11.5).text_color(t.dim).truncate().child(text || "Filter");
+  return h_flex().id("brunr-filters").h(36).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border)
+    .child(div().flex_1().min_w(0).child(field))
+    .child(control("result", RESULTS)).child(control("status", STATUSES)).child(control("sort", SORTS));
+}
+
+/** The list area when the filters leave no Request. Clear filters keeps the sort. */
+function noMatch(self, t) {
+  return v_flex().id("brunr-no-match").flex_none().p(8).gap(6).items_start()
+    .child(div().text_color(t.dim).child("No Requests match."))
+    .child(div().id("brunr-clear-filters").px(8).h(24).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11.5).text_color(t.accent)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => { clearFilters(self); cx.notify(); })
+      .child("Clear filters"));
 }
 
 const spinner = (t, size) => svg("mods/brunr/icons/spinner.svg").size(size).flex_none().text_color(t.working).spin(900);
@@ -129,17 +196,20 @@ function withList(self, t, rows, detail) {
     .child(v_flex().flex_1().min_w(0).min_h(0).child(detail));
 }
 
-/** The Run list's rows: folder rows and Request rows. Request rows select only once the Run ended. */
-function listRows(self, t, entries, planned, done) {
+/**
+ * The Run list's rows: folder rows and Request rows. Request rows select only once the Run ended.
+ * `f`: filterRun's result for a finished Run, which maps each row to its Request in the Run.
+ */
+function listRows(self, t, entries, planned, done, f = null) {
   const info = self.v.info;
-  return runRows({ collection: info.tree ?? null, target: info.target ?? null, entries, planned, folded: self.folded }).map((row) => {
+  return runRows({ collection: info.tree ?? null, target: info.target ?? null, entries, planned, folded: self.folded, counts: f?.counts ?? null }).map((row) => {
     if (row.kind === "folder") return folderRow(t, row, (cx) => {
       const next = new Set(self.folded);
       if (next.has(row.path)) next.delete(row.path); else next.add(row.path);
       self.folded = next;
       cx.notify();
     });
-    const i = row.index;
+    const i = f ? f.indexes[row.index] : row.index;
     return listRow(t, row.key, row.depth, row.entry, done && i === self.sel, done ? (cx) => { self.sel = i; showBody(self); cx.notify(); } : null);
   });
 }
@@ -179,11 +249,12 @@ function center(t, text) {
   return v_flex().flex_1().items_center().justify_center().p(20).text_color(t.dim).child(div().child(text));
 }
 
-function summaryLine(t, s) {
+function summaryLine(t, s, f = null) {
   const part = (n, label, color) => div().text_color(n ? color : t.dim).child(`${n} ${label}`);
   return h_flex().h(30).flex_none().px(12).gap(12).items_center().border_b(1).border_color(t.border).text_size(11.5)
     .child(div().text_color(t.muted).child(`${s.requests} ${s.requests === 1 ? "Request" : "Requests"}`))
     .child(part(s.passed, "passed", t.done)).child(part(s.failed, "failed", t.blocked)).child(part(s.skipped, "skipped", t.ansi3))
+    .when(Boolean(f?.filtering), (el) => el.child(div().text_color(t.accent).child(`showing ${f.visible} of ${f.total}`)))
     .child(div().flex_1()).child(div().text_color(t.dim).child(formatTime(s.duration)));
 }
 

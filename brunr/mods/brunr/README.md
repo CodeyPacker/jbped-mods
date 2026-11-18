@@ -129,6 +129,24 @@ The list is a tree, as in the panel:
 - Requests keep the order the CLI ran them in. If one folder's Requests are not consecutive, the folder gets a new row each time it starts again, so no Request shows under the wrong folder.
 - A Request missing from the Collection tree is placed by the directories in its path. A folder is named by its folder file, else by its directory name.
 
+A finished Run with more than one Request has a toolbar above the list. Left to right:
+
+- A `Filter` field. It keeps the Requests whose name, path or URL holds every word typed, ignoring case.
+- A result control that cycles on click through `All`, `Failed` and `Passed`. Failed means the same as the mark: a failed assertion or test, a network error or a CLI error. The HTTP status alone never fails a Request.
+- A status control that cycles through `Any status`, `2xx`, `3xx`, `4xx`, `5xx` and `Error`, which keeps the Requests that got no response.
+- A sort control that cycles through `Run order`, `Slowest`, `Fastest`, `Status` and `Name`.
+
+How the toolbar works:
+
+- The three filters combine. A control away from its first value is drawn in the accent colour. When the pane is narrow, the text field shrinks first.
+- Sorting keeps the folder tree. Requests are sorted inside their own folder and folders keep their Run order. `Slowest` and `Fastest` use the response time and `Status` the status number, with Requests that got no response last. `Name` ignores case. Ties keep the Run order.
+- A folder with no Request left is hidden, nested folders too. Folder counts always describe the whole Run, so a filter never changes them.
+- The summary line adds `showing <n> of <total>` while a filter is on.
+- When nothing matches, the list says `No Requests match.` with a `Clear filters` button that resets the three filters and keeps the sort.
+- When the selected Request is filtered out, the first one shown is selected.
+- The filters and sort stay as they are for later Runs in the same pane, so `Failed` stays on while a folder runs again.
+- While a Run is in progress the toolbar is disabled and the live list shows every Request in Run order, since pass and fail are not known yet.
+
 When the CLI sends no Request, or fails before it starts, the pane shows its message in a box. Open file shows a Request's file in the pane, read only.
 
 Everything in the pane is held in memory and goes when the pane closes.
@@ -172,6 +190,7 @@ Command palette entries: "Brunr: Toggle" (`layout.toggle` for the block `brunr`)
 - The panel keeps in its localStorage: which Collections and folders are unfolded, the Environment chosen per Collection (keyed by Machine and root) and the Global environment chosen per workspace file. Herdr keeps it in store files under `data/brunr/` in the app home.
 - Collections start unfolded and folders folded until you change them.
 - Folds in the Response pane's list are held in memory for one Run.
+- The Response pane's filters and sort are held in memory by that pane until it closes. They are never written to disk or shared state.
 - Runs and Responses are never written to disk. The report and progress files are the only exception, and they live for the length of one Run.
 - Shared state holds `brunr.tick`, a counter that makes the other copies of the mod draw again, and `brunr.request`. `brunr.request` holds the last choice a popup made for the panel: a kind, a row key (Machine, Collection path and the path inside it), an action, or an Environment or Global environment name. It never holds Response data or secrets.
 
@@ -203,6 +222,7 @@ One mod draws every part. Herdr starts a copy of it for the panel, for each Resp
 - `popup.js`: draws the Environment pickers and the row menu.
 - `tree.js`: the rows, the key map, the block finder and the confirmation and secret texts. No Herdr calls.
 - `runtree.js`: the Response pane's Run list as rows of folders and Requests, with counts and folds, for the live list and the result alike. No Herdr calls.
+- `runfilter.js`: the Response pane's filters and sort. Takes a finished Run's Responses and gives the Requests to list, in order, with the whole Run's folder counts. No Herdr calls.
 - `store.js`: saved state, the in-memory Run store and the popup-to-panel asks.
 - `sources.js`: reads `brunr.json` and the workspace and finds Collection roots. Loads one Collection.
 - `machine.js`: every `exec`, `readTextFile`, `watchFolder` and `fs` call. Lists and reads files, checks the CLI, runs `bru` with its output going to the progress file, reads that file on a `cx.timer` while the Run is in progress, reads and deletes reports and progress files and starts Bruno desktop.
