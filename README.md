@@ -13,6 +13,7 @@ Mods for the [Herdr](https://herdr.dev) desktop app. Each folder is one mod, and
 | [<img src="palette/preview.png" width="360" alt="Palette">](palette/) | **[Palette](palette/)**<br>A command palette that mods can add entries to: your entries, each mod's entries, then every Herdr command with its key. |
 | [<img src="tabs-plus/preview.png" width="360" alt="tabs-plus">](tabs-plus/) | **[tabs-plus](tabs-plus/)**<br>Herdr's tab bar with side-panel buttons for Wingman, Vaultr and Wayfindr, and a side panel that is remembered for each space. |
 | [<img src="vaultr/preview.png" width="360" alt="Vaultr">](vaultr/) | **[Vaultr](vaultr/)**<br>Read your Obsidian vault inside Herdr: the folder tree, name search, links that open in place, images and backlinks. |
+| [<img src="wayfindr/preview.png" width="360" alt="Wayfindr">](wayfindr/) | **[Wayfindr](wayfindr/)**<br>Your Boards and Pull Requests from GitHub, Azure DevOps and ClickUp inside Herdr, with a space started from a Ticket or a Pull Request. |
 | [<img src="wingman/preview.png" width="360" alt="Wingman">](wingman/) | **[Wingman](wingman/)**<br>A review pane for what coding agents change: whole-file diffs with Accept and Reject per change, per file or for everything. |
 | [<img src="wranglr/preview.png" width="360" alt="Wranglr">](wranglr/) | **[Wranglr](wranglr/)**<br>A spaces sidebar that sorts spaces into Groups: one per Repo, one per Workspace, and Custom groups you fill by hand. |
 <!-- shares:end -->
