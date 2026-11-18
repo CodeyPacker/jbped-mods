@@ -1536,6 +1536,14 @@ export default class Wranglr extends View {
       .when(Boolean(why || about), (el) => el.child(div().text_size(11).text_color(why ? t.blocked : t.dim).child(why ? `This ${why}.` : about)));
   }
 
+  // A field on one line: its label, then a short control.
+  inline(t, label, control, key) {
+    const why = this.bad[key];
+    return v_flex().gap(6)
+      .child(h_flex().gap(10).items_center().child(div().flex_1().min_w(0).text_size(12).text_color(t.foreground).child(label)).child(control))
+      .when(Boolean(why), (el) => el.child(div().text_size(11).text_color(t.blocked).child(`This ${why}.`)));
+  }
+
   choice(t, id, label, on, click, badge) {
     return h_flex().id(id).h(28).px(11).gap(6).items_center().rounded(7).border_1().cursor_pointer()
       .border_color(on ? t.accent : t.input).bg(on ? t.selected : t.raised).text_size(12).text_color(on ? t.foreground : t.muted)
@@ -1549,19 +1557,26 @@ export default class Wranglr extends View {
     return Input.new(this.inputs[key]).h(32).px(10).rounded(8).border_1().border_color(this.bad[key] ? t.blocked : t.input).bg(t.background).text_size(12.5).text_color(t.foreground);
   }
 
-  dialogFrame(t, id, title, fields, save) {
+  // need: the fields' height when it may pass the window's. They then scroll, and Save stays in view.
+  dialogFrame(t, id, title, fields, save, need) {
     const p = props() ?? {};
     const button = (bid, label, primary, action) => h_flex().id(bid).h(32).px(14).items_center().rounded(8)
       .border_1().border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
       .text_color(primary ? t.solid_foreground : t.foreground).text_size(12.5).font_medium().cursor_pointer()
       .hover((s) => s.opacity(0.88)).on_click(action).child(label);
+    // A dialog gets most of the window's height. `window` here is Herdr's: the GPUI one is the global.
+    let most = 480;
+    try { most = Math.max(200, globalThis.window.viewport_size().height * 0.85 - 230); } catch {}
     return v_flex().id(id).track_focus(this.handle)
       .on_key_down((e, cx) => { if (e.key === "escape") { closeOverlay(p.overlay); cx.stop_propagation(); } })
       .w_full().min_h(0).p(18).gap(14).bg(t.popover).text_color(t.foreground)
       .child(h_flex().items_center().child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(title))
         .child(div().flex_none().text_size(11).text_color(t.dim).child("Esc")))
-      .children(fields)
-      .child(h_flex().pt(4).gap(8).justify_end()
+      // A scroll area has no height of its own in a dialog, which is as tall as its content: it is given one.
+      .when(!need, (el) => el.children(fields))
+      .when(Boolean(need), (el) => el.child(v_flex().id(`${id}-fields`).h(Math.min(most, need)).flex_none().gap(14).pr(14).overflow_y_scrollbar()
+        .children(fields.map((f) => div().flex_none().child(f)))))
+      .child(h_flex().flex_none().pt(4).gap(8).justify_end()
         .child(button(`${id}-cancel`, "Cancel", false, () => closeOverlay(p.overlay)))
         .child(button(`${id}-save`, "Save", true, (_e, cx) => { save(); cx.notify(); })));
   }
@@ -1577,7 +1592,7 @@ export default class Wranglr extends View {
     this.known = Array.isArray(p.known) ? p.known.filter((m) => typeof m === "string") : [""];
     this.was = { sort: s.sort, plus: s.plus, autoname: s.autoname, agents: s.agents !== false, revive: s.revive !== false, machine: typeof s.machine === "string" ? s.machine : null };
     this.pick = { ...this.was };
-    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "A plain terminal", folder: "The home folder" };
+    const hint = { worktrees: DEFAULT_SETTINGS.worktrees, ticket: DEFAULT_SETTINGS.ticket, agent: "Empty: a plain terminal", folder: "Empty: the home folder" };
     this.makeInputs(
       { worktrees: String(s.worktrees ?? ""), ticket: String(s.ticket ?? ""), agent: Array.isArray(s.agent) ? s.agent.join(" ") : "", folder: String(s.folder ?? "") },
       (key) => hint[key], () => this.saveSettings());
@@ -1605,19 +1620,25 @@ export default class Wranglr extends View {
     const t = theme();
     const pick = (key, options) => h_flex().flex_wrap().gap(5).children(options.map(([value, label]) =>
       this.choice(t, `ws-${key}-${value}`, label, this.pick[key] === value, (_e, cx) => { this.pick[key] = value; delete this.bad[key]; cx.notify(); })));
+    const onOff = (key) => pick(key, [[true, "On"], [false, "Off"]]);
+    const head = (title, first) => div().when(!first, (el) => el.mt(4).pt(12).border_t(1).border_color(t.border))
+      .text_size(11).font_semibold().text_color(t.muted).child(title);
     return this.dialogFrame(t, "wranglr-settings", "Wranglr settings", [
+      head("The list", true),
       this.field(t, "Sort", pick("sort", Object.entries(SORT_LABEL)), "sort"),
-      this.field(t, "Default Machine", pick("machine", [[null, "Not set"], ...this.known.map((mk) => [mk, this.machineLabel(mk)])]), "machine",
-        "Where + starts a space when the Group has no Machines of its own. Not set: this computer for a Group, Herdr's choice for the header +."),
-      this.field(t, "The header + starts in", this.textInput(t, "folder"), "folder", "An absolute path on the default Machine. Empty: the home folder."),
-      this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other one."),
-      this.field(t, "Name new spaces from their branch", pick("autoname", [[true, "On"], [false, "Off"]]), "autoname"),
-      this.field(t, "Agent status on each space", pick("agents", [[true, "On"], [false, "Off"]]), "agents", "Marks on a space's row for agents that need you, are working or are done. Click them to go to the most urgent one."),
-      this.field(t, "Resume agents after a restart", pick("revive", [[true, "On"], [false, "Off"]]), "revive", "When Herdr's core restarts, each Claude Code agent that was running is resumed in its terminal with its session."),
-      this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "{clone} is the Repo's main checkout, {branch} the branch, {repo} the Repo's name. A Repo's own pattern wins."),
-      this.field(t, "Ticket pattern", this.textInput(t, "ticket"), "ticket", "A regular expression matched against the branch. Its first group is the ticket id."),
-      this.field(t, "New spaces run", this.textInput(t, "agent"), "agent", "A command and its arguments, split at spaces. Empty is a plain terminal."),
-    ], () => this.saveSettings());
+      this.inline(t, "Agent status on rows", onOff("agents"), "agents"),
+      head("New spaces"),
+      this.field(t, "Machine", pick("machine", [[null, "Not set"], ...this.known.map((mk) => [mk, this.machineLabel(mk)])]), "machine", "Used when a Group names none."),
+      this.field(t, "Folder for the header +", this.textInput(t, "folder"), "folder"),
+      this.field(t, "Command to run", this.textInput(t, "agent"), "agent"),
+      this.field(t, "+ on a Repo group", pick("plus", [["open", "Open the main checkout"], ["worktree", "New worktree"]]), "plus", "Right-click + for the other."),
+      head("Worktrees and names"),
+      this.field(t, "Worktree location", this.textInput(t, "worktrees"), "worktrees", "{clone}, {branch} and {repo} are filled in."),
+      this.inline(t, "Name spaces from their branch", onOff("autoname"), "autoname"),
+      this.field(t, "Ticket pattern", this.textInput(t, "ticket"), "ticket", "A regular expression. Its first group is the ticket id."),
+      head("Restart"),
+      this.inline(t, "Resume Claude Code agents", onOff("revive"), "revive"),
+    ], () => this.saveSettings(), 870 + 22 * Object.keys(this.bad).length);
   }
 
   // A Group's settings: Machines for every kind, worktree rules for a Repo, homes for a Workspace.
