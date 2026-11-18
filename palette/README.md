@@ -9,7 +9,7 @@ A command palette that mods can add entries to: your entries, each mod's entries
 - **Your entries.** Listed first, from `~/.config/herdr-app/palette.json`. No mod needs to change.
 - **Mod entries.** A mod adds entries with a `palette` list in its `mod.json`. The other mods in this repo do.
 - **Every Herdr command.** Grouped as Herdr groups them, each with its key from `keys.json`.
-- **Set keys.** `ctrl-k` asks for a key for the selected entry and saves it to `keys.json`. It warns before it takes a key that is in use.
+- **Set keys.** `ctrl-b` asks for a key for the selected entry and saves it to `keys.json`. It warns before it takes a key that is in use.
 - **Filter.** Type to filter. Every word must match.
 - **Group index.** A sidebar lists the groups. Click one to jump to it.
 - **Arguments.** A command with required arguments asks for them first: a value, or a JSON object.
@@ -40,8 +40,9 @@ Or by hand:
 | `ctrl-shift-p` | open |
 | `up` / `down`, `pageup` / `pagedown` | move |
 | `shift-up` / `shift-down` | previous / next group |
+| `ctrl-j` / `ctrl-k`, `ctrl-d` / `ctrl-u` | move, as in vim |
 | `enter` | run |
-| `ctrl-k` | set the selected entry's key |
+| `ctrl-b` | set the selected entry's key |
 | `escape` | close, or go back from the argument prompt |
 
 The entry format, for your own entries and a mod's, and the rules for setting keys: [`mods/palette/README.md`](mods/palette/README.md).

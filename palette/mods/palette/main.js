@@ -1,9 +1,9 @@
 // Command palette with user and mod entries. Lists the user's entries from
 // ~/.config/herdr-app/palette.json, then what mods declare in their mod.json ("palette":
 // [{ "title", "command", "args" }]), then every app command from commands(), each with its
-// key from keys.json. Type to filter, ↑/↓ and Enter to run, Esc to leave. A command with
+// key from keys.json. Type to filter, ↑/↓ (or ctrl-j/k) and Enter to run, Esc to leave. A command with
 // required arguments asks for them first: one value fills the first argument, or a JSON object.
-// ctrl-k asks for a key for the selected row and writes it to keys.json's global section.
+// ctrl-b asks for a key for the selected row and writes it to keys.json's global section.
 // Open it with mod.open {"name": "palette"}, e.g. bound to ctrl-shift-p in keys.json.
 import * as fs from "fs/promises";
 import { View, div, svg } from "gpui-kit";
@@ -260,10 +260,11 @@ export default class Palette extends View {
     const visible = items.filter((it) => it.y + (it.head ? HEAD_H : ROW_H) > this.top && it.y < this.top + height);
     return v_flex().id("palette").track_focus(this.handle).w_full().min_h(0).p(12).gap(6).bg(t.popover).text_size(13)
       .on_key_down((e, cx) => {
-        const k = e.key;
+        // ctrl-j/k, ctrl-n/p and ctrl-d/u move as the arrows and page keys do.
+        const k = { "ctrl-j": "down", "ctrl-n": "down", "ctrl-k": "up", "ctrl-p": "up", "ctrl-d": "pagedown", "ctrl-u": "pageup" }[e.keystroke] ?? e.key;
         if (k === "escape") { if (ask) this.back(cx); else this.close(); }
         else if (ask) return;
-        else if (e.keystroke === "ctrl-k" && rows.length) this.bind(rows[this.at]);
+        else if (e.keystroke === "ctrl-b" && rows.length) this.bind(rows[this.at]);
         // Shift+arrows jump between groups, as the sidebar does.
         else if ((k === "down" || k === "up") && e.modifiers.shift && rows.length) {
           const heads = [...this.headY.keys()], gi = heads.indexOf(groupOf(rows[this.at]));
@@ -280,7 +281,7 @@ export default class Palette extends View {
         .child(svg("mods/workspace-chrome/search.svg").size(14).flex_none().text_color(t.dim))
         .when(!!ask, (e) => e.child(div().flex_none().text_size(12.8).text_color(t.muted).child(`${ask.title} ›`)))
         .child(Input.new(this.binding ? this.bindInput : this.asking ? this.argInput : this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(ask ? "Esc" : "ctrl-k sets a key · Esc")))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(ask ? "Esc" : "ctrl-b sets a key · Esc")))
       .when(!!this.binding, (e) => e
         .child(div().px(12).pt(4).text_size(12).text_color(t.muted).child(`Key for ${this.binding?.name}${Object.keys(this.binding?.args ?? {}).length ? ` ${JSON.stringify(this.binding?.args)}` : ""}`))
         .child(div().px(12).pb(6).text_size(12).text_color(this.error ? t.ansi1 : t.dim).child(this.error ?? "Type the key and press Enter. It is saved in keys.json and works at once.")))

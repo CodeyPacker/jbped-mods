@@ -15,11 +15,11 @@ A command palette that mods can add entries to, styled after Herdr's own. It lis
 
 ## Use
 
-Type to filter (every word must match), `up` / `down`, `pageup` / `pagedown` or the wheel to move, `shift-up` / `shift-down` to jump to the previous or next group, `enter` to run, `escape` to close. A command with required arguments asks for them first: type a value for its first argument, or a JSON object such as `{"direction": "right", "mod": "wingman"}`. `escape` goes back to the list.
+Type to filter (every word must match), `up` / `down`, `pageup` / `pagedown` or the wheel to move (`ctrl-j` / `ctrl-k` and `ctrl-n` / `ctrl-p` move a row, `ctrl-d` / `ctrl-u` a page), `shift-up` / `shift-down` to jump to the previous or next group, `enter` to run, `escape` to close. A command with required arguments asks for them first: type a value for its first argument, or a JSON object such as `{"direction": "right", "mod": "wingman"}`. `escape` goes back to the list.
 
 ## Setting a key
 
-Select an entry and press `ctrl-k`. Type the key, such as `ctrl-shift-g`, `alt-f5` or `f8`, and press `enter`. The palette writes it to the `global` section of `~/.config/herdr-app/keys.json`, in place of the key the entry showed, and Herdr applies it at once. An empty box removes the entry's key. `escape` closes the palette without saving.
+Select an entry and press `ctrl-b`. Type the key, such as `ctrl-shift-g`, `alt-f5` or `f8`, and press `enter`. The palette writes it to the `global` section of `~/.config/herdr-app/keys.json`, in place of the key the entry showed, and Herdr applies it at once. An empty box removes the entry's key. `escape` closes the palette without saving.
 
 - Keys are typed, not pressed, because Herdr runs its own keys before a mod sees them.
 - A key needs `ctrl`, `alt` or `cmd`, or is a function key. A sequence is written with spaces: `ctrl-space shift-n`.
