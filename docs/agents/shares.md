@@ -59,6 +59,6 @@ For a styled preview, treat Dockr's preview as the composition reference:
 - Use one clean sans-serif typeface and consistent title sizing across the set.
 - Give each mod its own restrained accent palette while keeping the overall dark developer-tool aesthetic.
 - Add depth with soft directional light, an illuminated frame, shadow and sparse corner geometry. Avoid flat template backgrounds, decorative ribbons, stages and busy glass layers.
-- Preserve a 16:9 canvas and comparable outer margins, but let the interface's natural proportions determine its exact height.
+- Use a 16:10 canvas to match the Herdr Gallery's 960×600 image slot. Preserve comparable outer margins, but let the interface's natural proportions determine its exact height; extend the background instead of stretching the interface.
 - Generate or capture each interface first, then add title, framing and layout deterministically so image generation cannot drift typography or alignment.
 - Review the previews together before publishing. Check title spelling, alignment, interface fidelity, public-safe data and visual weight at gallery size.
