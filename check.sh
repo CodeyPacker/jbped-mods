@@ -60,7 +60,8 @@ for dir in */; do
   fi
   [ -f "$share/RECIPE.md" ] || note "$share" "no RECIPE.md, so not ready for herdr.dev/mods"
 
-  rows="$rows| $shot | **[$title]($share/)**<br>$summary |
+  install="Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/jbped/herdr-mods/tree/main/$share"
+  rows="$rows| $shot | **[$title]($share/)**<br>$summary<br>Install: <code>$install</code> |
 "
 done
 
