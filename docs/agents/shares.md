@@ -55,6 +55,7 @@ For a styled preview, treat Dockr's preview as the composition reference:
 
 - Keep the real mod interface dominant, large and readable. Do not invent, redraw or substantially crop its UI.
 - Put the display title above the interface and align its left edge with the interface frame. Use the public product name, not the folder slug; for example, `Agents+` and `Tabs+`.
+- Keep the title visually attached to the interface: target roughly 16–24 pixels between the title's visible bottom and the frame. Increase that gap only when the available header space would otherwise clip or crowd the title, as in Dockr.
 - Use one clean sans-serif typeface and consistent title sizing across the set.
 - Give each mod its own restrained accent palette while keeping the overall dark developer-tool aesthetic.
 - Add depth with soft directional light, an illuminated frame, shadow and sparse corner geometry. Avoid flat template backgrounds, decorative ribbons, stages and busy glass layers.
