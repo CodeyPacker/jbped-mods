@@ -15,7 +15,13 @@ const VAULT = "vaultr.vault";   // shared: every copy reads the same vault
 const VAULTS = "vaultr.vaults"; // shared: the vaults to switch between
 const NARROW = 620;           // below this width the list and the note take turns
 const ROW_H = 24;
-const KEYS = "/ search   j k move   enter open   [ ] headings   backspace back   v vault   b list   o Obsidian   r reload";
+// The legend: [key, what]. CORE is the footer line, KEYS the list "?" shows.
+const CORE = [["j/k", "move"], ["enter", "open"], ["/", "search"], ["[ / ]", "heading"], ["v", "vault"], ["?", "keys"]];
+const KEYS = [
+  ["j / k", "down / up"], ["enter", "open"], ["h / l", "close / open folder"], ["/", "search"],
+  ["[ / ]", "previous / next heading"], ["backspace", "back"], ["v / V", "next / previous vault"],
+  ["b", "list"], ["o", "Obsidian"], ["r", "reload"], ["esc", "leave the search"], ["?", "hide this list"],
+];
 
 const clean = (p) => (p ? slash(String(p).trim()).replace(/\/+$/, "") : null);
 const fixed = () => clean(props()?.vault); // this copy's own vault, which no switch changes
@@ -44,6 +50,7 @@ export default class Vaultr extends View {
     this.size = null;
     this.listShown = true;
     this.choosing = false;      // the folder form, over a vault that is already set
+    this.help = false;          // every key is listed, after "?"
     this.gen = 0;               // a new vault or a reload ends the tasks of the one before
     this.reset(null);
     if (checking()) return;
@@ -215,6 +222,7 @@ export default class Vaultr extends View {
   // which is pulled up over it (see body()). Bringing its bottom into view puts its top, and the
   // heading, at the top of the view, in one step.
   reveal(at, cx) {
+    this.help = false; // the key list's height is not known, and the anchor needs the view's
     this.headAt = at;
     this.anchor = at;
     // The anchor shifts the children after it by one, and is itself at the segment's old index.
@@ -372,9 +380,10 @@ export default class Vaultr extends View {
       else if (k === "l" || k === "right") { if (row?.kind === "dir") this.toggle(row.path, true); }
       else if (k === "h" || k === "left") { if (row?.kind === "dir") this.toggle(row.path, false); }
       else if (k === "backspace") this.back(cx);
-      else if (k === "/") { this.listShown = true; this.search.focus(); }
+      else if (k === "/" && !e.modifiers?.shift) { this.listShown = true; this.search.focus(); }
       else if (k === "]") this.stepHeading(1, cx);
       else if (k === "[") this.stepHeading(-1, cx);
+      else if (k === "?" || (e.modifiers?.shift && k === "/")) this.help = !this.help;
       else if (k === "b") this.listShown = !this.listShown;
       else if (k === "v") this.cycle(e.modifiers?.shift ? -1 : 1);
       else if (k === "r") this.start(this.vault, cx);
@@ -452,7 +461,7 @@ export default class Vaultr extends View {
         .children(n.front.split(/\r?\n/).map((l) => div().child(l))));
     }
     // The view's height: the copy's, less the bar, the footer, the notice strip and a margin.
-    const viewH = Math.max(80, (this.size?.height ?? 600) - 32 - 24 - (this.error ?? this.notice ? 32 : 0) - 12);
+    const viewH = Math.max(80, (this.size?.height ?? 600) - 32 - 28 - (this.error ?? this.notice ? 32 : 0) - 12);
     n.segs.forEach((seg, i) => {
       if (i === this.anchor) out.push(div().flex_none().h(viewH));
       if (seg.type === "md") {
@@ -480,6 +489,7 @@ export default class Vaultr extends View {
   reader(t) {
     const n = this.note;
     const strip = this.error ?? this.notice;
+    const hint = ([k, what]) => h_flex().flex_none().gap(5).child(div().text_color(t.accent).child(k)).child(div().text_color(t.dim).child(what));
     const tool = (id, label, on, active = true) => div().id(id).px(6).h(22).flex_none().rounded(4).text_color(active ? t.muted : t.dim)
       .hover((s) => s.bg(t.hover)).on_click(on).child(h_flex().h_full().items_center().child(label));
     return v_flex().h_full()
@@ -493,8 +503,10 @@ export default class Vaultr extends View {
       .child(v_flex().id(`vaultr-note-${this.nav}`).flex_1().min_h(0).px(16).py(12).gap(10).overflow_y_scrollbar().track_scroll(this.noteScroll)
         .on_mouse_down("left", () => this.handle.focus())
         .children(n ? this.body(t) : [div().text_color(t.dim).child(this.loading ? "Reading the vault…" : "")]))
-      .child(h_flex().flex_none().h(24).px(12).gap(12).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
-        .child(div().flex_1().min_w(0).truncate().child(KEYS))
+      .when(this.help, (el) => el.child(h_flex().flex_none().flex_wrap().px(12).py(8).gap_x(16).gap_y(4).bg(t.raised).border_t(1).border_color(t.border).text_size(11)
+        .children(KEYS.map(hint))))
+      .child(h_flex().flex_none().h(28).px(12).gap(12).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
+        .child(h_flex().flex_1().min_w(0).gap(14).items_center().overflow_hidden().children(this.help ? [] : CORE.map(hint)))
         .child(div().id("vaultr-change").flex_none().hover((s) => s.text_color(t.foreground))
           .on_click((_e, cx) => { this.choosing = true; this.error = null; this.pathInput.set_value(""); cx.notify(); })
           .child(`${base(this.vault)} · ${this.index.notes.length} notes · vaults`)));

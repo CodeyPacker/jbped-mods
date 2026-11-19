@@ -57,6 +57,7 @@ The keys work while Vaultr has the keyboard: click it, or move onto it with `pan
 | `backspace` | back to the note before |
 | `v` / `shift-v` | switch to the next / previous saved vault |
 | `b` | show or hide the list |
+| `?` | show or hide the list of every key |
 | `o` | open the note in Obsidian |
 | `r` | read the vault again |
 | `escape` | leave the search box, or clear the search |

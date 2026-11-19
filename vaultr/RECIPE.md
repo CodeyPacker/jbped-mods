@@ -18,7 +18,8 @@ Two columns on `background`, 13px text.
   - A notice strip on `surface` when there is one: an error in `blocked`, a note such as `No note named "X".` in `muted`.
   - The note, scrolling, 16px side padding, 10px between parts: the properties box (`surface`, 1px `border`, radius 6, 12px `muted`, one line per frontmatter line), then the text, with each image as its own block at most 720px wide with radius 4. A missing image is one `blocked` line: "Missing image: name".
   - Under a 1px `border` line: "BACKLINKS (n)" in 11px `dim`, then one `accent` line per linking note. While the vault is still being read it says "BACKLINKS (reading the vault…)".
-  - Footer, 24px high, 11px `dim`: the key hints at the left, "<vault folder name> · N notes · vaults" at the right.
+  - Footer, 28px high, 11px: the legend at the left, "<vault folder name> · N notes · vaults" in `dim` at the right. The legend is key and meaning pairs, the key in `accent` and the meaning in `dim`, 14px apart: `j/k` move, `enter` open, `/` search, `[ / ]` heading, `v` vault, `?` keys.
+  - After `?`, a block above the footer on `raised` lists every key the same way, wrapping, and the footer's legend is empty. `?` again, or a heading jump, hides it.
 - **Vaults form**, in place of both columns when no vault is set or after "vaults": centered, "Choose your Obsidian vault" (or "Vaults") in 16px semibold, one `muted` line, one 30px row per saved vault (folder name in semibold, path in 12px `muted`, a ✕ at the right, the current one on `selected`), a path field with a "Use" button ("Add" when a vault is saved), "Browse…" below (and "Cancel" when a vault is set), and an error line in `blocked`.
 
 Narrower than 620px there is one column: the list or the note. The list then has a 32px row above the search box, "← Back to <note name>" in `muted` with a 1px `border` line below, which shows the note again.
