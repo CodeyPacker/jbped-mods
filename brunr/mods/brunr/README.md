@@ -191,6 +191,7 @@ Mouse:
 - Click selects a row. Double-click runs a Request or folds a Collection or folder.
 - The arrow folds. The Run button at the top runs the selected row.
 - The Environment chip opens the picker.
+- Right-click opens the row's menu over the dialog, each item with its key: Run, Run folder or Run Collection (when a Run can start), Open file, Environment, Global environment, Open Bruno (this computer only), Copy URL, Copy path and Reload. Copy path copies the Collection root, or the file or folder inside it, as a path on its Machine. The menu takes the picker keys.
 - The title row also has reload, full screen (dialog only) and the settings gear.
 
 Command palette entries: "Brunr: Open" and "Brunr: Reload".

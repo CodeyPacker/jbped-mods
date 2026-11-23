@@ -15,7 +15,7 @@ A dialog that lists your Bruno Collections as a tree, runs their Requests with t
 - **Global environments.** Pick one per Bruno workspace for all of its Collections.
 - **Other Machines.** A Collection on WSL or an ssh Machine is listed and run there. Machines get their own headings.
 - **Both formats.** The OpenCollection YAML format and the bru format, in one tree.
-- **Open file, Copy URL and Open Bruno.** Show a Request's file, copy its URL, or start Bruno desktop.
+- **Open file, Copy URL, Copy path and Open Bruno.** Show a Request's file, copy its URL or path, or start Bruno desktop.
 - **Keyboard and settings.** Move, fold, run and pick without the mouse, and `?` shows every key. The gear or `,` opens the settings: open as a tab or a dialog, open the dialog in full screen, hide the key hints, and switch any shortcut off or move it to another key.
 - **Setup help.** When `bru` is missing on a Machine, the dialog says what to install and has a Copy button.
 
@@ -44,7 +44,7 @@ Or by hand:
 
 ## Use
 
-`ctrl-shift-u` opens Brunr. Pressed again, it closes the dialog, or goes back from the tab. Click selects a row and double-click runs a Request or folds a folder. The Run button at the top runs the selected Request, folder or Collection, and the chip on a Collection picks its Environment.
+`ctrl-shift-u` opens Brunr. Pressed again, it closes the dialog, or goes back from the tab. Click selects a row and double-click runs a Request or folds a folder. Right-click opens a row's menu, with Copy URL and Copy path. The Run button at the top runs the selected Request, folder or Collection, and the chip on a Collection picks its Environment.
 
 | Key | Action |
 |---|---|

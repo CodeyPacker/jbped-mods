@@ -37,8 +37,8 @@ import { Response, methodBadge } from "./response.js";
 /** A row of the tree, as tree.buildRows makes it. @typedef {any} Row */
 /** One {{variable}} of the "run with values" form. @typedef {{ name: string, known: boolean, secret: boolean, input: any }} VarField */
 /** The "run with values" form. @typedef {{ key: string, name: string, url: string, fields: VarField[], at: number }} VarsForm */
-/** One choice in a picker. `warn` is a dim line under it. @typedef {{ label: string, value: any, warn?: string | null }} Choice */
-/** A small list over the dialog: an Environment to pick, or a Run to confirm. @typedef {{ title: string, options: Choice[], at: number, current?: any, choose: (value: any, cx: Context | AsyncContext) => void }} Picker */
+/** One choice in a picker. `warn` is a dim line under it. `hint` is its key, at the right. @typedef {{ label: string, value: any, warn?: string | null, hint?: string }} Choice */
+/** A small list over the dialog: an Environment to pick, a Run to confirm, or a row's menu. @typedef {{ title: string, options: Choice[], at: number, current?: any, choose: (value: any, cx: Context | AsyncContext) => void }} Picker */
 
 /** The mod's folder name: its icons live there. */
 const MOD = "brunr";
@@ -411,6 +411,45 @@ export default class Brunr extends View {
     cx.notify();
   }
 
+  /** Right-click: the row's menu, as a picker. @param {Row} row */
+  openMenu(row) {
+    this.sel = row.key;
+    this.focus = "tree";
+    this.note = null;
+    const key = (/** @type {string} */ id) => (this.shortcuts.isOff(id) ? "" : this.shortcuts.keyFor(id) ?? "");
+    /** @type {Choice[]} */
+    const options = [];
+    if (row.kind === "request" && this.canRun(row)) options.push({ label: "Run", value: "run", hint: "enter" });
+    if (tree.runsMany(row) && this.canRun(row)) options.push({ label: row.kind === "folder" ? "Run folder" : "Run Collection", value: "run", hint: key("run") });
+    if (row.kind === "request") options.push({ label: "Open file", value: "file", hint: key("file") });
+    if (row.ck) options.push({ label: "Environment", value: "env", hint: key("env") });
+    if (row.kind === "global") options.push({ label: "Global environment", value: "global", hint: key("env") });
+    if (row.ck && row.machine == null) options.push({ label: "Open Bruno", value: "app", hint: key("app") });
+    if (row.kind === "request" && row.url) options.push({ label: "Copy URL", value: "url", hint: key("url") });
+    if (row.ck) options.push({ label: "Copy path", value: "path" });
+    options.push({ label: "Reload", value: "reload", hint: key("reload") });
+    this.picker = {
+      title: row.name, options, at: 0,
+      choose: (value, cx) => {
+        if (value === "path") this.copyPath(cx, row);
+        else if (value === "run") this.runKey(cx, row.key, false);
+        else if (value === "file") this.openFile(cx, row);
+        else if (value === "env") this.openEnvPicker(row);
+        else if (value === "global") this.openGlobalPicker(row);
+        else if (value === "app") this.openBruno(cx);
+        else this.command(value, cx);
+      },
+    };
+  }
+
+  /** Copies the row's path on its Machine: the Collection root, or a file or folder inside it. @param {Context | AsyncContext} cx @param {Row} row */
+  copyPath(cx, row) {
+    const root = this.entry(row.ck)?.root;
+    if (!root) return;
+    /** @type {Context} */ (cx).write_to_clipboard(row.path ? `${root}/${row.path}` : root);
+    this.say("Copied the path", false);
+  }
+
   // Pickers
 
   /** @param {string} c @param {Context | AsyncContext} cx */
@@ -658,7 +697,8 @@ export default class Brunr extends View {
     const el = listRow(t, { id: `brunr-row-${i}`, on, compact: true }).pl(8 + r.depth * INDENT).pr(8).gap(6)
       // The selection is dimmer while j and k act on the Response.
       .when(on && this.focus !== "tree", (e) => e.bg(t.hover))
-      .on_click((e, cx) => this.clickRow(cx, r, e));
+      .on_click((e, cx) => this.clickRow(cx, r, e))
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.openMenu(r); cx.notify(); });
     if (r.kind === "global") {
       return el.child(svg(ICON("globe")).size(13).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.name))
@@ -761,7 +801,8 @@ export default class Brunr extends View {
           .child(div().w(10).flex_none().text_color(t.accent).child(p.current !== undefined && o.value === p.current ? "●" : ""))
           .child(v_flex().flex_1().min_w(0).gap(1)
             .child(div().truncate().text_color(t.foreground).child(o.label))
-            .when(Boolean(o.warn), (el) => el.child(div().text_size(SIZE.small).text_color(t.dim).child(o.warn ?? "")))))))
+            .when(Boolean(o.warn), (el) => el.child(div().text_size(SIZE.small).text_color(t.dim).child(o.warn ?? ""))))
+          .when(Boolean(o.hint), (el) => el.child(div().flex_none().text_size(SIZE.small).text_color(t.dim).child(o.hint ?? ""))))))
       .child(divider(t))
       .child(legend(t, [["j/k", "move"], ["enter", "choose"], ["esc", "back"]]));
     return div().id("brunr-picker-around").absolute().inset_0()
