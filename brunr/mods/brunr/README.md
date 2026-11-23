@@ -75,7 +75,7 @@ bru run [path] [-r] [--env NAME] [--global-env NAME --workspace-path DIR] --repo
 The CLI's output goes to a progress file next to the report:
 
 - Not on Windows, `sh -c 'out=$1; shift; exec "$@" >"$out" 2>&1' sh FILE bru run ...` starts it. Every value is a separate argument and no shell reads it.
-- On Windows, `node -e` with a fixed script finds `bru.cmd` on the PATH, reads the CLI's script path out of it and starts that script with `node` itself, the way the npm shim does. No `cmd.exe` is involved, so `%`, `&`, quotes and parentheses in a path or Environment name are passed as they are. When the script cannot be found next to `bru.cmd`, Brunr starts `bru.cmd` directly as before, and that Run shows no progress.
+- On Windows, `node -e` with a fixed script finds `bru.cmd` on the PATH, then in `%APPDATA%\npm` (npm's default global folder), reads the CLI's script path out of it and starts that script with `node` itself, the way the npm shim does. No `cmd.exe` is involved, so `%`, `&`, quotes and parentheses in a path or Environment name are passed as they are. When the script cannot be found next to `bru.cmd`, Brunr starts `bru.cmd` directly as before, and that Run shows no progress.
 - The CLI's exit code and its whole output still reach the result.
 
 Rules:
@@ -225,7 +225,7 @@ The gear or `,` opens them:
 - The running Request is named only while the CLI sends Requests in the order Brunr expects. Requests with the same `seq` keep the folder's listing order, which Brunr takes as the file name ignoring case, as Windows lists files. Another Machine may list them in another order.
 - On Windows, a timed-out Run may leave the CLI running until it ends by itself, since Brunr ends the `node` that started it.
 - Secrets stored in Bruno desktop are empty in a CLI Run (see Environments and secrets).
-- On Windows Brunr starts `bru.cmd`, so the npm global folder must be on the PATH Herdr was started with. Without it the dialog shows the missing CLI notice.
+- On Windows Brunr finds `bru.cmd` on the PATH Herdr was started with, or in `%APPDATA%\npm`. Herdr cannot start a `.cmd` file by name, so the CLI check and each Run start the CLI's script with `node`, and `node` must be on that PATH. A `bru.cmd` installed elsewhere and missing from that PATH shows the missing CLI notice.
 - Bruno desktop cannot be told to open a specific Request, so "Open Bruno" only starts the app. Brunr looks for it at `<home>/AppData/Local/Programs/Bruno/Bruno.exe` on Windows, `/Applications/Bruno.app` on macOS and `bruno` on the PATH elsewhere.
 - Collections on another Machine are listed and read with `sh` and `cat`, so that Machine needs both.
 - A Global environment applies only to Collections listed in the workspace file.
